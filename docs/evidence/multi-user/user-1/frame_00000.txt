@@ -1,0 +1,13 @@
+user: user-1 (simulated head 1)
+frame_id: 0
+resolution_per_eye: [960, 1000]
+near_plane: 0.05
+far_plane: 20
+depth_scale: 1
+depth_encoding: ForwardNormalized
+left_position: [-0.0315, 1.6000, 0.0000]
+left_orientation_xyzw: [0.0000, 0.0000, 0.0000, 1.0000]
+left_fov_left_right_up_down: [-0.9600, 0.7900, 0.8700, -0.9200]
+right_position: [0.0315, 1.6000, 0.0000]
+right_orientation_xyzw: [0.0000, 0.0000, 0.0000, 1.0000]
+right_fov_left_right_up_down: [-0.7900, 0.9600, 0.8700, -0.9200]

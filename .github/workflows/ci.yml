@@ -1,0 +1,42 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    macos:
+        name: macOS (format, lint, tests against qaros-stub)
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            - uses: Swatinem/rust-cache@v2
+            - name: Format
+              run: cargo fmt --all --check
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets -- -D warnings
+            - name: Tests
+              run: cargo test --workspace
+
+    windows:
+        name: Windows (build and lint, no QAROS runtime)
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            - uses: Swatinem/rust-cache@v2
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets -- -D warnings
+            - name: Release build of the viewer
+              run: cargo build --release -p qaros-rerun

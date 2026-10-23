@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${VIEW_NAME}</title>
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: #000;
+        }
+
+        #frame {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            visibility: hidden;
+        }
+
+        #status {
+            position: fixed;
+            left: 8px;
+            bottom: 6px;
+            font: 12px system-ui, sans-serif;
+            color: #8a8a8a;
+        }
+    </style>
+</head>
+<body>
+    <img id="frame" alt="${VIEW_NAME}" decoding="sync">
+    <div id="status">waiting for frames</div>
+    <script>
+        // Plain image loads only, no script-side HTTP or in-memory image URLs, so the page works
+        // in the embedded browsers that render QAROS GUI panels. The page has one image element:
+        // a detached preloader fetches each frame, and the shown image takes the same URL once
+        // that frame has loaded, from the cache, so no half-loaded or second image is ever drawn.
+        // WebKit decodes large images asynchronously at first paint and paints nothing until
+        // the decode ends, so the frame is decoded before it is shown and the shown image asks
+        // for synchronous decoding where decode() is missing.
+        // A frame that fails (no frame yet, or no panel server: the viewer stopped) is asked for
+        // again, less often the longer it fails, and the page resumes once the server is back.
+        var frameUrl = "${FRAME_URL}";
+        var firstRetryDelay = 500;
+        var longestRetryDelay = 4000;
+        var retryDelay = firstRetryDelay;
+        var pageToken = String(new Date().getTime());
+        var shownElement = document.getElementById("frame");
+        var statusElement = document.getElementById("status");
+        var preloader = new Image();
+        var requestNumber = 0;
+
+        function loadNextFrame() {
+            requestNumber += 1;
+            preloader.src = frameUrl + "?n=" + pageToken + "-" + requestNumber;
+        }
+
+        function showPreloadedFrame() {
+            shownElement.src = preloader.src;
+            shownElement.style.visibility = "visible";
+            statusElement.textContent = "";
+            retryDelay = firstRetryDelay;
+            setTimeout(loadNextFrame, 50);
+        }
+
+        function onFrameLoaded() {
+            if (typeof preloader.decode === "function") {
+                preloader.decode().then(showPreloadedFrame, showPreloadedFrame);
+            } else {
+                showPreloadedFrame();
+            }
+        }
+
+        function onFrameMissing() {
+            setTimeout(loadNextFrame, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, longestRetryDelay);
+        }
+
+        preloader.onload = onFrameLoaded;
+        preloader.onerror = onFrameMissing;
+        loadNextFrame();
+    </script>
+</body>
+</html>
