@@ -107,14 +107,13 @@ Get-ChildItem out\headset\user-1
 
 To stop the viewer earlier: `kill %1` in the shell, `Stop-Process -Id $viewer.Id` in PowerShell.
 
-`log-test-scene` logs a 1 m orange cube, a ring of light-blue points around it, axes, an image and a time series through the standard SDK connection. Among the viewer's log lines you see (timestamps removed; your rates differ):
+`log-test-scene` logs a 1 m orange cube, a ring of light-blue points around it, axes, an image and a time series through the standard SDK connection. Among the viewer's log lines you see (timestamps removed):
 
 ```text
 INFO qaros_rerun: listening for Rerun SDK connections on port 9876; headset sink: Images
 INFO qaros_rerun::panel_capture: panels: "camera/image" at http://127.0.0.1:9877/views/camera_image
 INFO qaros_rerun::panel_capture: panels: "plots/sine" at http://127.0.0.1:9877/views/plots_sine
 INFO qaros_rerun::viewer_app: headset: frames started 240, shown 240, abandoned 0; draw data copied 2868 of 2868
-  user-1: shown 240; 81.0 shown per second; begin to show 13.0 ms and 1.00 viewer frames on average
 ```
 
 While the viewer runs, `http://127.0.0.1:9877/views` lists the panels as JSON (`["camera_image","plots_sine"]`). `out/headset/user-1` then holds every 30th frame, `frame_00000` to `frame_00210`, each as `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` (poses, fields of view, near and far). A color frame looks like this:
@@ -312,8 +311,6 @@ Users are the running target apps in the QAROS peer list. The viewer creates a r
 A target that does not answer sender creation costs no slot. It is retried about once a minute, so a headset switched on after the viewer started gets its stream within about a minute. The viewer remembers such targets for 10 minutes in `qaros-rerun.unanswered-peers.txt`, next to the onboarding id file.
 
 Each user's two eyes are drawn from the same scene in every viewer frame.
-
-**Measuring your rate.** On exit the viewer prints one line per user: `user-<n>: shown N; X shown per second; begin to show Y ms and Z viewer frames on average`. For the timing of each phase of a viewer frame and each QAROS call, set `QAROS_RERUN_PERF_LOG` to the path of a CSV file.
 
 ### The decoupled render loop (`--decoupled-render`)
 

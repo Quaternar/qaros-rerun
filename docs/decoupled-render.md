@@ -18,14 +18,7 @@ The same idea applies to any application whose scene update is slower than the h
 
 ## When to use it
 
-Try it when your scene updates slowly: many entities, large point clouds, long time windows. Measured on a Mac (Apple M5 Pro, Metal, release build, Rerun 0.40.0, one user standing still, 960x1000 per eye, image sink, two runs each):
-
-| Scene | Scene update | Eye frames per second, flag off | Eye frames per second, flag on |
-| --- | --- | --- | --- |
-| Test scene with a 100 ms delay after every UI pass, standing in for a slow update | about 114 ms | 4.3 to 4.4 | 247 to 252 |
-| Test scene with 5000 extra point cloud entities | about 40 ms | 12.2 to 13.1 | 64.6 to 64.8 |
-
-With the flag on, the eye rate no longer depends on how long the scene update takes, only on how much the scene costs to draw: with 5000 entities each eye frame still collects and encodes thousands of draw calls. Your rates on a Windows GPU differ; measure them with `QAROS_RERUN_PERF_LOG` (below).
+Try it when your scene updates slowly: many entities, large point clouds, long time windows. With the flag on, head motion no longer waits for the scene update; the eyes still cost what the scene costs to draw.
 
 Limits:
 
@@ -100,14 +93,3 @@ Carrying them across a Rerun upgrade: re-apply the changes to the new vendored c
 - **Persistent variants of draw data or of the belt in `re_renderer`.** A patch across every renderer; unnecessary while pools recycle by reference count.
 - **Sink on the UI thread, proxied from the render thread.** Every begin and show would wait for the UI thread again.
 - **A second queue for the render thread.** wgpu 30 exposes one queue per device.
-
-## Measuring
-
-```sh
-QAROS_RERUN_PERF_LOG=runs/NAME.perf.csv \
-    ./target/release/qaros-rerun --headless 1280x800 --out runs/NAME.images --frames N \
-    --write-every 100000 --motion still --quit-when-done --decoupled-render &
-sleep 3; ./target/release/log-test-scene 300 rerun+http://127.0.0.1:9876/proxy 5000
-```
-
-`QAROS_RERUN_PERF_LOG` writes a CSV with the timing of each phase of a frame; the gaps between a user's `frame_shown` events are the eye intervals. `log-test-scene`'s third argument adds that many small point cloud entities for a scene that updates slowly; `QAROS_RERUN_SCENE_DELAY_MS` sleeps after every UI pass as a stand-in for a slow update. The exit summary's per-user frames in flight are counted in eye frames that drew, not in viewer frames, so that column does not compare between the flag off and on; begin to show in milliseconds does.
