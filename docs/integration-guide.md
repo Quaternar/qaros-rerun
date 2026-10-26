@@ -34,7 +34,7 @@ QAROS terms used below, with links to the [QAROS documentation][QAROS-DOCS]:
 
 - **The 3D view in stereo.** The first 3D view the viewer draws is rendered twice per headset frame, once per eye, with the eye poses and fields of view QAROS hands out for that frame. Color and depth go to QAROS, so the headset can reproject. Pixels where nothing was drawn are transparent, so only your data appears in the room.
 - **One stream per user.** Every running target app in the QAROS session is a user with a render stream of its own. By default the viewer renders for up to two users at a time; a third waits for a free slot. Users who leave are released.
-- **2D views as panels.** With `--panels`, every other view (images, time series, maps) is cropped from the viewer's UI, served as a small web page, and opened as a QAROS GUI panel beside the app volume.
+- **2D views as panels.** With `--panels`, every other view (images, time series, maps) is cropped from the viewer's UI, served as a small web page, and opened as a QAROS GUI panel within reach of the first viewer near the app volume.
 - **The desktop viewer.** In a window, the viewer behaves as Rerun's: timeline, blueprint and selection work as usual, and the headset shows the same time point.
 
 What does not reach the headset: Rerun's labels and other overlays drawn after the 3D render, and any interaction from the glasses. Nothing travels back from the headset to the viewer.
@@ -287,7 +287,7 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 
 ### Panels
 
-`--panels ADDRESS` starts the panel server: `http://ADDRESS/views` lists the published 2D views as JSON, and `http://ADDRESS/views/<name>` is a view's page. Views are captured every 250 ms (`--panel-interval-ms`). With `--sink qaros`, each view gets a GUI panel once it has been published for 3 s: 0.6 m wide, in a row to the right of the app volume, top edges level with the volume's top, facing a viewer in front of it.
+`--panels ADDRESS` starts the panel server: `http://ADDRESS/views` lists the published 2D views as JSON, and `http://ADDRESS/views/<name>` is a view's page. Views are captured every 250 ms (`--panel-interval-ms`). With `--sink qaros`, each view gets a GUI panel once it has been published for 3 s: 0.45 m wide, created within reach of the first viewer near the app volume: 0.8 m from the head, to the right of the gaze, top edges just below the eyes, facing the head. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left; close them in the Hub Display for fresh placement.
 
 - **Reachability.** Bind to `0.0.0.0:<port>` so headsets can load the pages, and allow the port through the firewall. The viewer then names the pages by this machine's LAN address and logs the choice (`panels: pages named by ...`). If that is the wrong network, pass `--panel-base-url http://<reachable address>:<port>`.
 - **Across runs.** A view's panel name and URL stay the same on every run. At Stop the viewer hides its panels instead of closing them (`--panels-at-stop keep` leaves them showing), and the next run reattaches to them. A reattached panel whose page loads nothing within 10 s is loaded again once; `--dead-panels leave` turns that off.
@@ -413,8 +413,11 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--eye-resolution WxH` | `960x1000` | Per-eye resolution (QAROS streams take theirs from the negotiated layout) |
 | `--write-every N` | 20 | Write every N-th shown frame of each user |
 | `--raw-depth` | off | Also write depth as raw little-endian `f32` (`frame_N_depth.f32`) |
-| `--motion circle\|still` | `circle` | Scripted head motion |
+| `--motion circle\|orbit\|still` | `circle` | Scripted head motion: `circle` walks around the world center looking level, `orbit` walks the same circle looking at the center |
 | `--radius METERS` | 1.6 | Radius of the circle walk |
+| `--eye-height METERS` | 1.6 | Eye height of the simulated heads |
+| `--period SECONDS` | 4 | Time for one circle, counted at 60 frames per second |
+| `--fov DEGREES` | headset-like | A centered field of view this many degrees wide, with square pixels |
 | `--users N` | 1 | Simulated users, spread around the circle |
 | `--join-interval N` | 30 | User k joins N viewer frames after user k-1 |
 

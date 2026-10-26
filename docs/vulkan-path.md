@@ -118,5 +118,5 @@ To run the path on Windows, see the [integration guide](integration-guide.md#cho
 
 [MIXER]: https://github.com/Quaternar/qaros/blob/b1338df/docs/website/docs/operator-guide/the-mixer.md "QAROS mixer: late-stage reprojection"
 [CUBE]: https://github.com/Quaternar/qaros/tree/b1338df/qar-streaming-c/examples/vulkan_cube "QuaternAR qaros at b1338df, the Vulkan cube example"
-[API]: https://github.com/Quaternar/qaros/blob/442a98026ec9c0748127a7c52b24f2174a5593e7/qar-streaming-rust/docs/vulkan-api.md "QAROS Rust binding: the Vulkan path in the qaros crate"
+[API]: https://github.com/Quaternar/qaros/blob/faa4946236c2fbd9195ed2a690c352408798fada/qar-streaming-rust/docs/vulkan-api.md "QAROS Rust binding: the Vulkan path in the qaros crate"
 [LAUNCH]: https://github.com/Quaternar/qaros/blob/b1338df/docs/website/docs/developer-guide/onboarding-and-sessions.mdx "Onboarding and Sessions at b1338df, section Launched by QAROS: QAROS API apps"

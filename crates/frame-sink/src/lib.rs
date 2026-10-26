@@ -26,7 +26,7 @@ pub use gpu::{GpuEyeTargets, GpuFrameRequest, GpuFrameSink};
 #[cfg(feature = "gpu")]
 pub use gpu_readback::{GpuReadbackSink, READBACK_COLOR_FORMAT, READBACK_DEPTH_FORMAT};
 pub use image_sink::{ImageSink, ImageSinkOptions, SimulatedUser, depth_visualization};
-pub use pose_source::{HeadMotion, PoseSource, ScriptedHeadMotion};
+pub use pose_source::{HeadMotion, PoseSource, ScriptedHeadMotion, camera_like_fov};
 pub use users::{MaxUsers, RenderPolicy, RosterChange, UserEvent, UserId, UserInfo, UserRoster};
 pub use xr_math::{DepthEncoding, DepthRange, Fov, NearFar, Pose};
 

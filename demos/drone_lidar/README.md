@@ -14,12 +14,13 @@ The first start downloads the dataset (157 MB) and records it once, about 3 minu
 
 ## What it shows
 
-- The blue points are the lidar scans of the last 5 s of flight, so the measured patch moves through the rooms with the drone.
-- The red trail is the drone's path over the last minute.
+- The white points are the lidar scans of the last 5 s of flight, so the measured patch moves through the rooms with the drone.
+- The orange trail is the drone's path over the last minute.
+- The dim blue to green backdrop is the whole scan, one point in 60, coloured by height. The launcher adds it at replay (it is not part of the example), computed once from the dataset into `demos/.cache/drone_lidar/`; being static, it costs far less per frame than a longer lidar window.
 
 ## In the glasses
 
-The whole basement fits on the table, about 1.5 m long. The demo has no 2D panels. Lean in to follow the trail through a doorway, or step back to see the floor plan.
+The scanned basement fits on the table, about 1.7 m by 1.1 m. The demo has no 2D panels. Lean in to follow the trail through a doorway, or step back to see the floor plan.
 
 ## If something looks wrong
 

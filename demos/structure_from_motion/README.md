@@ -19,7 +19,7 @@ The first start downloads the dataset (80 MB) and records it once, about 4 minut
 
 ## In the glasses
 
-The point cloud stands on the table at about a third of its reconstructed size, with the camera and reprojection error panels to the right of the volume. Walk around it: the model stays in place and each eye sees it from its own position.
+The point cloud is centered on the median of the reconstructed points, at 0.3 of its reconstructed size (the car is about 1 m long), with the camera and reprojection error panels to the right of the volume. Walk around it: the model stays in place and each eye sees it from its own position.
 
 ## If something looks wrong
 

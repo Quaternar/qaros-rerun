@@ -26,10 +26,10 @@ vulkan-device = { path = "crates/vulkan-device" }
 
 # The Rust binding to qar-streaming-c, its stub and its test extension, from
 # `qar-streaming-rust/` in the QAROS repository, pinned by revision.
-qaros = { git = "https://github.com/Quaternar/qaros", rev = "442a98026ec9c0748127a7c52b24f2174a5593e7" }
-qaros-stub = { git = "https://github.com/Quaternar/qaros", rev = "442a98026ec9c0748127a7c52b24f2174a5593e7" }
+qaros = { git = "https://github.com/Quaternar/qaros", rev = "faa4946236c2fbd9195ed2a690c352408798fada" }
+qaros-stub = { git = "https://github.com/Quaternar/qaros", rev = "faa4946236c2fbd9195ed2a690c352408798fada" }
 # Test-only: the QAROS test extension, for the end-to-end test of the sink.
-qaros-ext = { git = "https://github.com/Quaternar/qaros", rev = "442a98026ec9c0748127a7c52b24f2174a5593e7", package = "qar-streaming-rust-ext" }
+qaros-ext = { git = "https://github.com/Quaternar/qaros", rev = "faa4946236c2fbd9195ed2a690c352408798fada", package = "qar-streaming-rust-ext" }
 
 glam = "0.33.11"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

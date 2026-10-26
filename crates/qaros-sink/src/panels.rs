@@ -20,8 +20,20 @@ pub struct PanelView {
     pub height_in_pixel: u32,
 }
 
-const PANEL_WIDTH_METERS: f32 = 0.6;
+/// 0.45 m reads well at arm's length and keeps a second panel well in front of the user.
+const PANEL_WIDTH_METERS: f32 = 0.45;
 const PANEL_GAP_METERS: f32 = 0.1;
+/// Within reach: how far from the user's head the panels stand, measured on the floor plane.
+const REACH_DISTANCE_METERS: f32 = 0.8;
+/// How far below the user's eyes the panels' top edges sit.
+const REACH_TOP_BELOW_EYES_METERS: f32 = 0.1;
+/// Where the row starts, measured along the arc from the user's gaze to the first panel's
+/// left edge, so the panels stand beside what the user looks at rather than in front of it.
+const REACH_ROW_START_METERS: f32 = 0.25;
+/// A head farther than this from the app volume's centre, on the floor plane, does not anchor
+/// new panels: a desktop receiver's camera watching from across the room is nobody who could
+/// reach them, and a headset user stands near the content.
+const REACH_ANCHOR_MAX_DISTANCE_METERS: f32 = 4.0;
 
 /// What the viewer's panels become when [`QarosPanels`] drops at Stop. Neither closes them:
 /// they stay in the session for the next run to claim by common name.
@@ -71,9 +83,17 @@ pub trait PanelActivity {
     fn user_stream_started(&self) -> bool;
 }
 
-/// One QAROS GUI panel per published 2D view, pointed at the view's page on the panel server
-/// and lined up to the right of the app volume, top edges level with the volume's top. When
-/// this value drops the panels stay in the session, hidden or kept as [`PanelsAtStop`] says.
+/// One QAROS GUI panel per published 2D view, pointed at the view's page on the panel server.
+///
+/// The Hub owns a panel's place once it exists: it keeps the pose the panel was created with,
+/// or wherever a user moved it, across runs, and ignores later pose calls, so users find their
+/// panels where they left them. This type therefore never sets the pose of a panel that
+/// exists. A new panel is created at its final place, within reach of the first user whose
+/// head is near the app volume ([`QarosPanels::consider_head`]); until such a head is known,
+/// views without a panel wait. A panel an earlier run left is reattached by its common name
+/// as it is. Closing the panels in the Hub Display makes the next run create them afresh.
+/// When this value drops the panels stay in the session, hidden or kept as [`PanelsAtStop`]
+/// says.
 pub struct QarosPanels {
     connection: Rc<QarosConnection>,
     base_url: String,
@@ -87,6 +107,15 @@ pub struct QarosPanels {
     /// When this run first saw the panels' browser running, which starts the silence clock of
     /// the kept pages claimed before.
     browser_seen_running: Option<Instant>,
+    /// The head of the first user streaming near the app volume, gravity-level: new panels
+    /// open within reach of it. Set once.
+    reach_anchor: Option<Pose>,
+    /// Places in the within-reach row taken by panels this run created.
+    reach_slots_used: usize,
+    /// Views waiting for a head before their new panel opens, already logged as such.
+    waiting_logged: BTreeSet<String>,
+    /// A head too far from the app volume was logged, once per run.
+    far_head_logged: bool,
 }
 
 /// A claimed panel, and whether it kept the page an earlier run loaded and is visible.
@@ -108,6 +137,10 @@ impl QarosPanels {
             dead_pages: DeadPages::default(),
             kept_pages: BTreeMap::new(),
             browser_seen_running: None,
+            reach_anchor: None,
+            reach_slots_used: 0,
+            waiting_logged: BTreeSet::new(),
+            far_head_logged: false,
         }
     }
 
@@ -132,7 +165,9 @@ impl QarosPanels {
     }
 
     /// Opens or reattaches a panel for every settled view not seen before. A view whose panel
-    /// cannot be created is logged once and not retried. Once a panel opens, visible panels
+    /// exists is reattached at once; a view that needs a new panel waits until
+    /// [`QarosPanels::consider_head`] has a head to place it by, and is retried each sync. A
+    /// view whose panel cannot be created is logged once and not retried. Once a panel opens, visible panels
     /// that earlier runs left in this app volume are hidden, except those of views still among
     /// `published_view_names`: a view published but not settled yet claims its panel later, and
     /// a view published later still finds its hidden panel by name.
@@ -157,11 +192,24 @@ impl QarosPanels {
         };
         let mut opened_any = false;
         for view in new_views {
-            let slot = self.panels.len() + self.failed.len();
+            let exists = self.existing_panel(&listed, &view.name).is_some();
+            if !exists && self.reach_anchor.is_none() {
+                if self.waiting_logged.insert(view.name.clone()) {
+                    log::info!(
+                        "qaros: the panel for {} opens once a viewer near the app volume streams",
+                        view.name
+                    );
+                }
+                continue;
+            }
+            let slot = self.reach_slots_used;
             match self.open_panel(view, slot, &listed) {
                 Ok(panel) => {
                     if panel.kept_visible_page {
                         self.kept_pages.insert(view.name.clone(), Instant::now());
+                    }
+                    if !exists {
+                        self.reach_slots_used += 1;
                     }
                     self.panels.insert(view.name.clone(), panel.id);
                     opened_any = true;
@@ -175,6 +223,35 @@ impl QarosPanels {
         if opened_any {
             self.hide_panels_left_by_earlier_runs(&listed, published_view_names);
         }
+    }
+
+    /// Takes `head`, a streaming user's head in room space, as the place new panels open by,
+    /// if no head was taken yet and this one is within [`REACH_ANCHOR_MAX_DISTANCE_METERS`] of
+    /// the app volume's centre on the floor plane. New panels then open in a row within reach
+    /// of it, at the next [`QarosPanels::sync`]. Existing panels are not touched: the Hub keeps
+    /// their place.
+    pub fn consider_head(&mut self, head: Pose) {
+        if self.reach_anchor.is_some() {
+            return;
+        }
+        let volume_centre = from_qaros_pose(self.connection.volume_config().pose).position;
+        if !is_near_the_volume(head.position, volume_centre) {
+            if !self.far_head_logged {
+                self.far_head_logged = true;
+                log::info!(
+                    "qaros: a viewer at {} streams, too far from the app volume at {volume_centre} \
+                     to place panels by; waiting for one nearer",
+                    head.position
+                );
+            }
+            return;
+        }
+        let anchor = gravity_level(head);
+        self.reach_anchor = Some(anchor);
+        log::info!(
+            "qaros: new panels open within reach of the viewer at {}",
+            anchor.position
+        );
     }
 
     /// Navigates, once, each panel reattached without navigation whose page has asked for
@@ -254,9 +331,8 @@ impl QarosPanels {
         let panels = self.connection.session().gui_panels();
         let config = self.panel_config(view, slot);
         let panel = panels.get_or_create(&config)?;
-        // get_or_create returns an existing panel unchanged; pose and size are set explicitly
-        // so a panel left over from an earlier run follows this one.
-        panels.set_pose(panel, config.pose)?;
+        // get_or_create returns an existing panel unchanged. Its place belongs to the Hub and
+        // the user, so no pose is set; the size follows this run's view.
         panels.set_size(panel, config.size)?;
         let url = self.view_url(&view.name);
         let earlier_run_panel = listed.iter().find(|listed_panel| {
@@ -296,6 +372,18 @@ impl QarosPanels {
             size: panel_size(view),
             ..GuiPanelConfig::new(common_name)
         }
+    }
+
+    /// The open panel of `view_name` in this app volume, if the session has one.
+    fn existing_panel<'listed>(
+        &self,
+        listed: &'listed [GuiPanelInfo],
+        view_name: &str,
+    ) -> Option<&'listed GuiPanelInfo> {
+        let common_name = format!("{view_name}{}", self.common_name_suffix());
+        listed
+            .iter()
+            .find(|panel| panel.display_name == common_name && panel.state != GuiPanelState::Closed)
     }
 
     fn common_name_suffix(&self) -> String {
@@ -355,9 +443,53 @@ impl QarosPanels {
     }
 
     fn panel_pose(&self, slot: usize) -> Pose {
+        if let Some(anchor) = self.reach_anchor {
+            return panel_pose_within_reach(anchor, slot);
+        }
         let volume = self.connection.volume_config();
         panel_pose_beside_volume(from_qaros_pose(volume.pose), volume.size, slot)
     }
+}
+
+/// Whether a head at `head_position` stands within [`REACH_ANCHOR_MAX_DISTANCE_METERS`] of the
+/// app volume's centre, measured on the floor plane.
+fn is_near_the_volume(head_position: Vec3, volume_centre: Vec3) -> bool {
+    let offset = head_position - volume_centre;
+    Vec3::new(offset.x, 0.0, offset.z).length() <= REACH_ANCHOR_MAX_DISTANCE_METERS
+}
+
+/// `head` turned about room +Y only: its forward projected on the floor plane, so a tilted
+/// head neither tilts nor raises the panels. A head looking straight up or down keeps room -Z.
+fn gravity_level(head: Pose) -> Pose {
+    let forward = head.transform_vector(Vec3::NEG_Z);
+    let level_forward = Vec3::new(forward.x, 0.0, forward.z)
+        .try_normalize()
+        .unwrap_or(Vec3::NEG_Z);
+    let yaw = (-level_forward.x).atan2(-level_forward.z);
+    Pose::new(Quat::from_rotation_y(yaw), head.position)
+}
+
+/// Room pose of the panel in `slot` within reach of `head` (gravity-level, see
+/// [`gravity_level`]), in the same convention as [`panel_pose_beside_volume`].
+///
+/// The panels stand on an arc of [`REACH_DISTANCE_METERS`] around the head, starting
+/// [`REACH_ROW_START_METERS`] to the right of the gaze and going right, [`PANEL_GAP_METERS`]
+/// apart along the arc, top edges [`REACH_TOP_BELOW_EYES_METERS`] below the eyes. Each one
+/// turns about +Y only, so it stays upright, with its front facing the head.
+fn panel_pose_within_reach(head: Pose, slot: usize) -> Pose {
+    #[allow(clippy::cast_precision_loss)]
+    let arc_to_centre = REACH_ROW_START_METERS
+        + PANEL_WIDTH_METERS * 0.5
+        + slot as f32 * (PANEL_WIDTH_METERS + PANEL_GAP_METERS);
+    let angle_to_the_right = arc_to_centre / REACH_DISTANCE_METERS;
+    let forward = head.transform_vector(Vec3::NEG_Z);
+    let right = head.transform_vector(Vec3::X);
+    let away_from_head = forward * angle_to_the_right.cos() + right * angle_to_the_right.sin();
+    let position = head.position + away_from_head * REACH_DISTANCE_METERS
+        - Vec3::Y * REACH_TOP_BELOW_EYES_METERS;
+    // Panel +Z points away from the head, so its -Z front faces it.
+    let yaw = away_from_head.x.atan2(away_from_head.z);
+    Pose::new(Quat::from_rotation_y(yaw), position)
 }
 
 /// Room pose of the panel in `slot`, in the convention of the `b1338df` header: the midpoint
@@ -453,19 +585,37 @@ mod tests {
     }
 
     #[test]
+    fn a_headset_near_the_volume_anchors_panels_and_a_distant_receiver_camera_does_not() {
+        // A measured session: the structure-from-motion volume at room (0, 0.5, -1.7), the
+        // glasses' head at (-0.28, 0.43, 0.58) and the first head the viewer saw, a Display
+        // Receiver's camera, at (1.21, 2.06, 6.99).
+        let volume_centre = Vec3::new(0.0, 0.5, -1.7);
+        assert!(is_near_the_volume(
+            Vec3::new(-0.277, 0.428, 0.577),
+            volume_centre
+        ));
+        assert!(!is_near_the_volume(
+            Vec3::new(1.207, 2.061, 6.989),
+            volume_centre
+        ));
+        // Height does not count: someone on a ladder over the volume is near it.
+        assert!(is_near_the_volume(Vec3::new(0.0, 9.0, -1.7), volume_centre));
+    }
+
+    #[test]
     fn panels_hang_right_of_the_default_volume_facing_a_viewer_at_the_origin() {
         let default_volume = Pose::from_translation(Vec3::new(0.0, 0.5, -1.6));
         let half_turn_about_up = Quat::from_xyzw(0.0, 1.0, 0.0, 0.0);
-        // Volume half width 1.0 + gap 0.1 + half panel 0.3; the next slot is 0.7 further.
+        // Volume half width 1.0 + gap 0.1 + half panel 0.225; the next slot is 0.55 further.
         assert_pose(
             panel_pose_beside_volume(default_volume, two_metre_cube(), 0),
             half_turn_about_up,
-            Vec3::new(1.4, 1.5, -1.6),
+            Vec3::new(1.325, 1.5, -1.6),
         );
         assert_pose(
             panel_pose_beside_volume(default_volume, two_metre_cube(), 1),
             half_turn_about_up,
-            Vec3::new(2.1, 1.5, -1.6),
+            Vec3::new(1.875, 1.5, -1.6),
         );
     }
 
@@ -496,7 +646,7 @@ mod tests {
         assert_pose(
             panel_pose_beside_volume(turned_volume, two_metre_cube(), 1),
             quarter_turn * Quat::from_rotation_y(PI),
-            Vec3::new(0.0, 1.5, -3.7),
+            Vec3::new(0.0, 1.5, -3.475),
         );
     }
 
@@ -507,13 +657,109 @@ mod tests {
             width_in_pixel: 800,
             height_in_pixel: 400,
         });
-        assert!((wide.width - 0.6).abs() < 1e-6);
-        assert!((wide.height - 0.3).abs() < 1e-6);
+        assert!((wide.width - 0.45).abs() < 1e-6);
+        assert!((wide.height - 0.225).abs() < 1e-6);
         let empty = panel_size(&PanelView {
             name: "empty".to_owned(),
             width_in_pixel: 0,
             height_in_pixel: 0,
         });
-        assert!((empty.height - 0.6).abs() < 1e-6);
+        assert!((empty.height - 0.45).abs() < 1e-6);
+    }
+
+    /// Checks one within-reach panel against `head`: on the arc around the head, its top edge
+    /// below the eyes, upright, its front facing the head, and to the right of the gaze.
+    fn assert_within_reach(head: Pose, panel: Pose) {
+        let to_panel = panel.position - head.position;
+        let horizontal = Vec3::new(to_panel.x, 0.0, to_panel.z);
+        assert!(
+            (horizontal.length() - REACH_DISTANCE_METERS).abs() < EPSILON,
+            "{} m from the head",
+            horizontal.length()
+        );
+        assert!(
+            (to_panel.y + REACH_TOP_BELOW_EYES_METERS).abs() < EPSILON,
+            "top edge {} m from eye height",
+            to_panel.y
+        );
+        assert!(
+            panel
+                .transform_vector(Vec3::Y)
+                .abs_diff_eq(Vec3::Y, EPSILON),
+            "upright"
+        );
+        let front_normal = panel.transform_vector(Vec3::NEG_Z);
+        assert!(
+            front_normal.abs_diff_eq(-horizontal.normalize(), EPSILON),
+            "front {front_normal} faces the head"
+        );
+        let right_of_gaze = head.transform_vector(Vec3::X);
+        assert!(horizontal.dot(right_of_gaze) > 0.0, "right of the gaze");
+    }
+
+    #[test]
+    fn panels_stand_within_reach_right_of_a_head_at_the_origin() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let first = panel_pose_within_reach(head, 0);
+        let second = panel_pose_within_reach(head, 1);
+        assert_within_reach(head, first);
+        assert_within_reach(head, second);
+        // Centres one panel width plus the gap apart along the arc.
+        let angle_between = Vec3::new(first.position.x, 0.0, first.position.z)
+            .angle_between(Vec3::new(second.position.x, 0.0, second.position.z));
+        assert!(
+            (angle_between * REACH_DISTANCE_METERS - (PANEL_WIDTH_METERS + PANEL_GAP_METERS)).abs()
+                < EPSILON
+        );
+        // The first panel's left edge sits REACH_ROW_START_METERS along the arc from the gaze.
+        let first_angle =
+            Vec3::new(first.position.x, 0.0, first.position.z).angle_between(Vec3::NEG_Z);
+        assert!(
+            (first_angle * REACH_DISTANCE_METERS
+                - (REACH_ROW_START_METERS + PANEL_WIDTH_METERS * 0.5))
+                .abs()
+                < EPSILON
+        );
+        // +X along the top edge runs to the viewer's left: room -X, roughly, for the first panel.
+        assert!(first.transform_vector(Vec3::X).x < 0.0);
+    }
+
+    #[test]
+    fn panels_follow_a_turned_and_moved_head() {
+        let quarter_turn_left = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let head = Pose::new(quarter_turn_left, Vec3::new(1.0, 1.7, -2.0));
+        // Turned a quarter to the left, the head looks along room -X; its right is room -Z.
+        assert!(
+            head.transform_vector(Vec3::NEG_Z)
+                .abs_diff_eq(Vec3::NEG_X, EPSILON)
+        );
+        for slot in 0..2 {
+            let panel = panel_pose_within_reach(head, slot);
+            assert_within_reach(head, panel);
+            assert!(panel.position.x < head.position.x, "in front of the head");
+            assert!(panel.position.z < head.position.z, "to the head's right");
+        }
+    }
+
+    #[test]
+    fn a_tilted_head_places_the_panels_by_its_heading_alone() {
+        let heading = Quat::from_rotation_y(0.4);
+        let tilted = Pose::new(
+            heading * Quat::from_rotation_x(-0.5) * Quat::from_rotation_z(0.3),
+            Vec3::new(0.2, 1.6, 0.4),
+        );
+        let level = gravity_level(tilted);
+        assert!(level.orientation.dot(heading).abs() > 1.0 - EPSILON);
+        assert_eq!(level.position, tilted.position);
+        assert_within_reach(level, panel_pose_within_reach(level, 0));
+        let straight_down = Pose::new(
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            Vec3::ZERO,
+        );
+        assert!(
+            gravity_level(straight_down)
+                .transform_vector(Vec3::NEG_Z)
+                .abs_diff_eq(Vec3::NEG_Z, EPSILON)
+        );
     }
 }

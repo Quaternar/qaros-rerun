@@ -19,7 +19,7 @@ The first start downloads the URDF and meshes (2.9 MB) and records them once, ab
 
 ## In the glasses
 
-The arm stands on the table at about 1.6 times its real size. The demo has no 2D panels. Walk around it to see the joints from the side.
+The arm stands on the table at twice its real size: its sweep is about 1.4 m wide, centered 0.65 m above the room origin and 1.7 m in front of it, so its base stays just above a table with the origin marker on it. The demo has no 2D panels. Walk around it to see the joints from the side.
 
 ## If something looks wrong
 

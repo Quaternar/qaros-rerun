@@ -30,7 +30,7 @@ use crate::headset::{
     BegunFrames, FrameCount, HeadsetRenderer, HeadsetSettings, HeadsetSink, HeadsetStatistics,
     SceneSource, claim_streaming_view, placement_for_view,
 };
-use crate::viewer_app::FrameHook;
+use crate::viewer_app::{FrameHook, HeadsetFrame};
 
 /// While streaming with nothing to begin and nothing in flight, the render thread waits this
 /// long for a new scene or a wake before it asks the sink again (QAROS frames are polled).
@@ -626,8 +626,12 @@ fn run_eye_frame(
     }
     drop(scene);
     let streaming = sink.is_streaming();
+    let headset_frame = HeadsetFrame {
+        is_streaming: streaming,
+        head: renderer.latest_head(),
+    };
     for hook in &mut sink_side.frame_hooks {
-        hook.on_viewer_frame(streaming);
+        hook.on_viewer_frame(headset_frame);
     }
     status.update(renderer, &sink_side.sink);
     if begun == 0 {
@@ -1296,7 +1300,7 @@ mod tests {
             };
 
             use super::*;
-            use crate::viewer_app::FrameHook;
+            use crate::viewer_app::{FrameHook, HeadsetFrame};
 
             /// Holds the last reference to the connection, as the GUI panel hooks do, and
             /// records the thread it goes on and the teardown step reached once it went.
@@ -1307,7 +1311,7 @@ mod tests {
             }
 
             impl FrameHook for ConnectionHook {
-                fn on_viewer_frame(&mut self, _headset_is_streaming: bool) {}
+                fn on_viewer_frame(&mut self, _headset: HeadsetFrame) {}
             }
 
             impl Drop for ConnectionHook {

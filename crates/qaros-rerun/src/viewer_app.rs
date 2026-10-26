@@ -71,11 +71,20 @@ impl Drop for Headset {
     }
 }
 
+/// What a [`FrameHook`] learns about the headset each frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeadsetFrame {
+    /// The headset sink streams to some user in this frame.
+    pub is_streaming: bool,
+    /// The head of the user the last eye frame was prepared for, in room space; `None` until
+    /// a stream has started.
+    pub head: Option<xr_math::Pose>,
+}
+
 /// Work that runs once per viewer frame on the UI thread, after the views, for example
-/// keeping QAROS GUI panels in step with the published 2D views. `headset_is_streaming` says
-/// the headset sink streams to some user in this frame.
+/// keeping QAROS GUI panels in step with the published 2D views.
 pub trait FrameHook {
-    fn on_viewer_frame(&mut self, headset_is_streaming: bool);
+    fn on_viewer_frame(&mut self, headset: HeadsetFrame);
 }
 
 /// The stock Rerun viewer app plus what runs once per frame outside the views: the headset
@@ -269,8 +278,15 @@ impl<Viewer: eframe::App> eframe::App for HeadsetViewerApp<Viewer> {
             panel_capture.on_frame(ui.ctx());
         }
         let headset_is_streaming = self.headset_is_streaming();
+        let headset_frame = HeadsetFrame {
+            is_streaming: headset_is_streaming,
+            head: self
+                .headset
+                .as_ref()
+                .and_then(|headset| headset.renderer().latest_head()),
+        };
         for hook in &mut self.frame_hooks {
-            hook.on_viewer_frame(headset_is_streaming);
+            hook.on_viewer_frame(headset_frame);
         }
         if let Some(memory_budget_log) = &mut self.memory_budget_log {
             memory_budget_log.log_if_due();
@@ -322,7 +338,7 @@ mod tests {
     }
 
     impl FrameHook for PanelsHook {
-        fn on_viewer_frame(&mut self, _headset_is_streaming: bool) {}
+        fn on_viewer_frame(&mut self, _headset: HeadsetFrame) {}
     }
 
     impl Drop for PanelsHook {

@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use frame_sink::{
     GpuReadbackSink, HeadMotion, ImageSink, ImageSinkOptions, MaxUsers, ScriptedHeadMotion,
-    SimulatedUser,
+    SimulatedUser, camera_like_fov,
 };
 use panel_server::ViewFrames;
 use rerun::external::re_sdk_types::blueprint::components::PanelState;
@@ -157,23 +157,34 @@ fn simulated_users(options: &Options) -> Vec<SimulatedUser> {
                 MotionKind::Circle => HeadMotion::CircleAround {
                     center,
                     radius: options.circle_radius,
-                    eye_height: 1.6,
-                    period_seconds: 4.0,
+                    eye_height: options.eye_height,
+                    period_seconds: options.circle_period_seconds,
+                    start_angle,
+                },
+                MotionKind::Orbit => HeadMotion::Orbit {
+                    center,
+                    radius: options.circle_radius,
+                    eye_height: options.eye_height,
+                    period_seconds: options.circle_period_seconds,
                     start_angle,
                 },
                 MotionKind::Still => HeadMotion::Still {
                     position: glam::Vec3::new(
                         center.x + options.circle_radius * start_angle.sin(),
-                        1.6,
+                        options.eye_height,
                         center.z + options.circle_radius * start_angle.cos(),
                     ),
                     yaw: start_angle,
                 },
             };
+            let mut pose_source = ScriptedHeadMotion::new(motion);
+            if let Some(degrees) = options.camera_fov_degrees {
+                pose_source.left_eye_fov = camera_like_fov(degrees, options.eye_resolution);
+            }
             SimulatedUser {
                 label: format!("simulated head {}", index + 1),
                 joins_at_tick: u64::from(index) * options.join_interval_in_viewer_frames,
-                pose_source: Box::new(ScriptedHeadMotion::new(motion)),
+                pose_source: Box::new(pose_source),
             }
         })
         .collect()

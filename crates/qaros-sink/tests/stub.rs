@@ -2207,7 +2207,7 @@ fn a_wrongly_stamped_frame_shows_up_in_the_stub_pairing_check() {
 }
 
 #[test]
-fn opens_a_panel_per_view_next_to_the_volume_and_hides_them_at_stop() {
+fn opens_a_panel_per_view_within_reach_and_hides_them_at_stop() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let time_series = PanelView {
@@ -2221,7 +2221,7 @@ fn opens_a_panel_per_view_next_to_the_volume_and_hides_them_at_stop() {
         height_in_pixel: 400,
     };
 
-    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877/");
+    let mut panels = panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877/");
     let published = view_names(&["time_series", "image"]);
     panels.sync(&[time_series.clone(), image], &published);
     panels.sync(&[time_series], &published);
@@ -2239,27 +2239,35 @@ fn opens_a_panel_per_view_next_to_the_volume_and_hides_them_at_stop() {
         .find(|panel| panel.content_uri == "http://127.0.0.1:9877/views/time_series")
         .expect("time series panel navigated to its view page");
     assert_eq!(time_series_panel.display_name, "time_series.rerun.rerun");
-    assert!((time_series_panel.size.width - 0.6).abs() < 1e-6);
-    assert!((time_series_panel.size.height - 0.3).abs() < 1e-6);
-    // Top-edge midpoint right of the 2 m wide volume centered at x = 0 (half width 1.0, gap
-    // 0.1, half panel 0.3), top level with its 1.5 m height, turned half a turn about +Y so
-    // the -Z front faces a viewer at the room origin.
+    assert!((time_series_panel.size.width - 0.45).abs() < 1e-6);
+    assert!((time_series_panel.size.height - 0.225).abs() < 1e-6);
+    // The viewer stands at the origin, eyes 1.6 m up, looking along -Z: the first panel's top
+    // edge 0.8 m away on the floor plane, 0.1 m below the eyes, in front and to the right
+    // (0.25 m start plus half a panel along the arc: 0.59375 rad right of the gaze).
     let pose = time_series_panel.pose;
-    assert!((pose.position.x - 1.4).abs() < 1e-5, "{pose:?}");
-    assert!((pose.position.y - 1.25).abs() < 1e-5, "{pose:?}");
-    assert!((pose.position.z + 1.6).abs() < 1e-5, "{pose:?}");
-    assert!(pose.orientation.x.abs() < 1e-5, "{pose:?}");
-    assert!((pose.orientation.y.abs() - 1.0).abs() < 1e-5, "{pose:?}");
-    assert!(pose.orientation.z.abs() < 1e-5, "{pose:?}");
-    assert!(pose.orientation.w.abs() < 1e-5, "{pose:?}");
+    let angle: f32 = (0.25 + 0.225) / 0.8;
+    assert!(
+        (pose.position.x - 0.8 * angle.sin()).abs() < 1e-5,
+        "{pose:?}"
+    );
+    assert!((pose.position.y - 1.5).abs() < 1e-5, "{pose:?}");
+    assert!(
+        (pose.position.z + 0.8 * angle.cos()).abs() < 1e-5,
+        "{pose:?}"
+    );
     let image_panel = listed
         .iter()
         .find(|panel| panel.content_uri == "http://127.0.0.1:9877/views/image")
         .expect("image panel navigated to its view page");
+    let image_position = Vec3::new(
+        image_panel.pose.position.x,
+        image_panel.pose.position.y,
+        image_panel.pose.position.z,
+    );
     assert!(
-        (image_panel.pose.position.x - 2.1).abs() < 1e-5,
-        "second slot one panel width and gap further right: {:?}",
-        image_panel.pose
+        (Vec3::new(image_position.x, 0.0, image_position.z).length() - 0.8).abs() < 1e-5
+            && image_position.x > pose.position.x,
+        "the second panel within reach too, further right: {image_position}"
     );
 
     drop(panels);
@@ -2346,7 +2354,7 @@ fn a_stop_then_start_shows_the_hidden_panels_again_without_navigating_them() {
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let views = panel_views(&["map", "camera"]);
     let published = view_names(&["map", "camera"]);
-    let mut first_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     first_run.sync(&views, &published);
     let first_run_panels = first_run.panels().clone();
     let first_run_open = open_panels(&connection);
@@ -2383,7 +2391,7 @@ fn a_stop_then_start_shows_the_hidden_panels_again_without_navigating_them() {
         ]
     );
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     second_run.sync(&views, &published);
     assert_eq!(second_run.panels(), &first_run_panels);
     assert_eq!(second_run.view_url("map"), first_run_map_url);
@@ -2423,16 +2431,141 @@ fn a_stop_then_start_shows_the_hidden_panels_again_without_navigating_them() {
         .find(|panel| panel.id == first_run_panels["map"])
         .expect("the map panel is still open");
     assert!(
-        (map_panel.pose.position.x - 1.4).abs() < 1e-5,
-        "back in its slot: {map_panel:?}"
-    );
-    assert!(
-        (map_panel.pose.position.y - 1.25).abs() < 1e-5,
-        "back in its slot: {map_panel:?}"
+        (map_panel.pose.position.y - 7.0).abs() < 1e-5,
+        "still where it was moved: the place belongs to the user, {map_panel:?}"
     );
 
     drop(second_run);
     fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn new_panels_wait_for_a_viewer_near_the_volume_and_open_within_reach() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
+    let published = view_names(&["map", "camera"]);
+    panels.sync(&panel_views(&["map"]), &published);
+    assert!(
+        panels.panels().is_empty(),
+        "no head yet: the new panel waits"
+    );
+
+    // A receiver's camera far across the room places nothing.
+    panels.consider_head(Pose::from_translation(Vec3::new(1.2, 2.1, 7.0)));
+    panels.sync(&panel_views(&["map"]), &published);
+    assert!(panels.panels().is_empty(), "a distant head places nothing");
+
+    let head = viewer_head();
+    panels.consider_head(head);
+    panels.sync(&panel_views(&["map"]), &published);
+    let map_position = panel_position(&connection, "map");
+    let to_map = map_position - head.position;
+    assert!(
+        (Vec3::new(to_map.x, 0.0, to_map.z).length() - 0.8).abs() < 1e-4,
+        "within reach: {map_position}"
+    );
+    assert!(
+        (to_map.y + 0.1).abs() < 1e-4,
+        "top edge below the eyes: {map_position}"
+    );
+    assert!(
+        to_map.x > 0.0 && to_map.z < 0.0,
+        "in front, to the right: {map_position}"
+    );
+
+    // A later head changes nothing; a panel opened later joins the same row.
+    panels.consider_head(Pose::from_translation(Vec3::new(1.0, 1.6, 1.0)));
+    panels.sync(&panel_views(&["map", "camera"]), &published);
+    assert_eq!(panel_position(&connection, "map"), map_position);
+    let camera_position = panel_position(&connection, "camera");
+    let to_camera = camera_position - head.position;
+    assert!(
+        (Vec3::new(to_camera.x, 0.0, to_camera.z).length() - 0.8).abs() < 1e-4,
+        "the later panel stands within reach of the first head: {camera_position}"
+    );
+    assert!(
+        to_camera.x > to_map.x,
+        "further right than the first panel: {camera_position}"
+    );
+    assert!(
+        fixture
+            .calls_starting_with("gui_panels_update_pose")
+            .is_empty(),
+        "panels are created in place, never moved"
+    );
+
+    drop(panels);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn a_restart_leaves_a_panel_where_the_user_put_it() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let views = panel_views(&["map"]);
+    let published = view_names(&["map"]);
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877");
+    first_run.sync(&views, &published);
+    let map = first_run.panels()["map"];
+    let gui_panels = connection.session().gui_panels();
+    let mut put_by_the_user = qaros::GuiPanelConfig::new("unused").pose;
+    put_by_the_user.position.x = -2.0;
+    put_by_the_user.position.y = 1.2;
+    gui_panels.set_pose(map, put_by_the_user).unwrap();
+    let user_calls = fixture.calls_starting_with("gui_panels_update_pose").len();
+    drop(first_run);
+
+    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
+    second_run.consider_head(Pose::from_translation(Vec3::new(1.0, 1.6, 0.5)));
+    second_run.sync(&views, &published);
+    assert_eq!(
+        second_run.panels()["map"],
+        map,
+        "the same panel, reattached"
+    );
+    assert_eq!(
+        panel_position(&connection, "map"),
+        Vec3::new(-2.0, 1.2, put_by_the_user.position.z),
+        "where the user put it"
+    );
+    assert_eq!(
+        fixture.calls_starting_with("gui_panels_update_pose").len(),
+        user_calls,
+        "the restart sets no pose"
+    );
+
+    drop(second_run);
+    fixture.assert_clean_teardown(connection);
+}
+
+/// A viewer standing at the room origin, eyes 1.6 m up, near the stub's app volume.
+fn viewer_head() -> Pose {
+    Pose::from_translation(Vec3::new(0.0, 1.6, 0.0))
+}
+
+/// Panels for a run whose viewer stands near the app volume, so new panels open at once.
+fn panels_with_a_viewer(connection: Rc<QarosConnection>, base_url: &str) -> QarosPanels {
+    let mut panels = QarosPanels::new(connection, base_url);
+    panels.consider_head(viewer_head());
+    panels
+}
+
+fn panel_position(connection: &QarosConnection, view_name: &str) -> Vec3 {
+    let display_name = format!("{view_name}.rerun.rerun");
+    let panel = connection
+        .session()
+        .gui_panels()
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|panel| panel.display_name == display_name)
+        .unwrap_or_else(|| panic!("no panel {display_name}"));
+    Vec3::new(
+        panel.pose.position.x,
+        panel.pose.position.y,
+        panel.pose.position.z,
+    )
 }
 
 #[test]
@@ -2441,13 +2574,13 @@ fn a_failed_panel_listing_opens_nothing_and_the_next_sync_reattaches() {
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let views = panel_views(&["map", "camera"]);
     let published = view_names(&["map", "camera"]);
-    let mut first_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     first_run.sync(&views, &published);
     let first_run_panels = first_run.panels().clone();
     drop(first_run);
     let calls_before_restart = fixture.calls().len();
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     fixture.fail_next("query_gui_panels_count", UNCLASSIFIED);
     second_run.sync(&views, &published);
     assert!(second_run.panels().is_empty(), "{:?}", second_run.panels());
@@ -2490,7 +2623,7 @@ fn panels_kept_at_stop_get_no_call_and_are_reattached_as_they_are() {
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let views = panel_views(&["map"]);
     let published = view_names(&["map"]);
-    let mut first_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877")
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877")
         .with_panels_at_stop(PanelsAtStop::Keep);
     first_run.sync(&views, &published);
     let map_panel = first_run.panels()["map"];
@@ -2500,7 +2633,7 @@ fn panels_kept_at_stop_get_no_call_and_are_reattached_as_they_are() {
         [("map.rerun.rerun".to_owned(), GuiPanelState::Visible)]
     );
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877")
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877")
         .with_panels_at_stop(PanelsAtStop::Keep);
     second_run.sync(&views, &published);
     assert_eq!(second_run.panels()["map"], map_panel);
@@ -2525,12 +2658,12 @@ fn a_view_that_settles_later_keeps_its_hidden_panel_for_its_own_claim() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let both = view_names(&["map", "camera"]);
-    let mut first_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     first_run.sync(&panel_views(&["map", "camera"]), &both);
     let first_run_panels = first_run.panels().clone();
     drop(first_run);
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     second_run.sync(&panel_views(&["map"]), &both);
     assert_eq!(
         panel_states(&connection),
@@ -2571,14 +2704,14 @@ fn a_view_that_publishes_late_after_a_restart_reclaims_its_hidden_panel() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let both = view_names(&["map", "camera"]);
-    let mut first_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877")
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877")
         .with_panels_at_stop(PanelsAtStop::Keep);
     first_run.sync(&panel_views(&["map", "camera"]), &both);
     let first_run_panels = first_run.panels().clone();
     drop(first_run);
     assert_eq!(navigation_count(&fixture), 2);
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     second_run.sync(&panel_views(&["map"]), &view_names(&["map"]));
     assert_eq!(
         panel_states(&connection),
@@ -2623,7 +2756,7 @@ fn restart_with_kept_pages(
 ) -> QarosPanels {
     let views = panel_views(&["map", "camera", "image"]);
     let published = view_names(&["map", "camera", "image"]);
-    let mut first_run = QarosPanels::new(Rc::clone(connection), "http://192.168.50.40:9877");
+    let mut first_run = panels_with_a_viewer(Rc::clone(connection), "http://192.168.50.40:9877");
     first_run.sync(&views, &published);
     let image_panel = first_run.panels()["image"];
     drop(first_run);
@@ -2633,7 +2766,7 @@ fn restart_with_kept_pages(
         .set_state(image_panel, GuiPanelState::Minimized)
         .unwrap();
 
-    let mut second_run = QarosPanels::new(Rc::clone(connection), "http://192.168.50.40:9877")
+    let mut second_run = panels_with_a_viewer(Rc::clone(connection), "http://192.168.50.40:9877")
         .with_dead_pages(dead_pages);
     second_run.sync(&views, &published);
     assert_eq!(
@@ -2810,7 +2943,7 @@ fn a_silent_page_beside_a_live_one_is_loaded_again_once() {
     assert_eq!(navigation_count(&fixture), 4);
     drop(second_run);
 
-    let mut third_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut third_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     third_run.sync(
         &panel_views(&["map", "camera", "image"]),
         &view_names(&["map", "camera", "image"]),
@@ -2853,7 +2986,7 @@ fn dead_pages_left_as_they_are_get_no_navigation() {
 fn the_teardown_marks_each_step_for_the_stop_watchdog() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
-    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut panels = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     panels.sync(&panel_views(&["map"]), &view_names(&["map"]));
     enter_teardown_step(TeardownStep::LeaveSink);
 
@@ -2884,7 +3017,7 @@ fn a_changed_panel_server_address_still_finds_the_panels_by_name() {
         "lookalike.other.example.com",
         "map.other.rerun.rerun",
     );
-    let mut killed_run = QarosPanels::new(Rc::clone(&connection), "http://192.168.50.40:9877");
+    let mut killed_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
     killed_run.sync(
         &panel_views(&["map", "camera"]),
         &view_names(&["map", "camera"]),
@@ -2893,7 +3026,7 @@ fn a_changed_panel_server_address_still_finds_the_panels_by_name() {
     assert_eq!(navigation_count(&fixture), 2);
 
     // The next run publishes no camera view (another blueprint): its panel is a leftover.
-    let mut next_run = QarosPanels::new(Rc::clone(&connection), "http://10.0.0.5:9900");
+    let mut next_run = panels_with_a_viewer(Rc::clone(&connection), "http://10.0.0.5:9900");
     next_run.sync(&panel_views(&["map"]), &view_names(&["map"]));
     assert_eq!(next_run.panels()["map"], killed_run_panels["map"]);
     assert_eq!(
@@ -2940,7 +3073,7 @@ fn a_changed_panel_server_address_still_finds_the_panels_by_name() {
 fn views_named_apart_get_panels_of_their_own() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
-    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
+    let mut panels = panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877");
     panels.sync(
         &panel_views(&["plot", "plot-2"]),
         &view_names(&["plot", "plot-2"]),

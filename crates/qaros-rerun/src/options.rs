@@ -35,8 +35,14 @@ Image sink:
     --write-every N            write every N-th shown frame of each user (default 20)
     --raw-depth                also write each written frame's depth as raw little-endian f32
                                (frame_N_depth.f32: left eye, then right eye, row by row)
-    --motion circle|still      scripted head motion (default circle)
+    --motion circle|orbit|still   scripted head motion (default circle): circle walks around
+                               the world center looking level, orbit walks the same circle
+                               looking at the center
     --radius METERS            radius of the circle walk (default 1.6)
+    --eye-height METERS        eye height of the simulated heads (default 1.6)
+    --period SECONDS           time for one circle at 60 frames per second (default 4)
+    --fov DEGREES              a centered, camera-like field of view this many degrees wide,
+                               with square pixels (default: a headset-like, asymmetric field)
     --users N                  simulated users, spread around the circle (default 1)
     --join-interval N          user k joins N viewer frames after user k-1 (default 30)
     --image-targets cpu|gpu    cpu (default) reads color and depth back from Rerun; gpu renders
@@ -142,6 +148,7 @@ pub enum SinkKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MotionKind {
     Circle,
+    Orbit,
     Still,
 }
 
@@ -397,6 +404,10 @@ pub struct Options {
     pub depth_scale_down: u32,
     pub motion: MotionKind,
     pub circle_radius: f32,
+    pub eye_height: f32,
+    pub circle_period_seconds: f32,
+    /// `Some`: a centered field of view this many degrees wide instead of the headset-like one.
+    pub camera_fov_degrees: Option<f32>,
     pub image_targets: ImageTargets,
     pub simulated_users: u32,
     pub join_interval_in_viewer_frames: u64,
@@ -434,6 +445,9 @@ impl Default for Options {
             depth_scale_down: 1,
             motion: MotionKind::Circle,
             circle_radius: 1.6,
+            eye_height: 1.6,
+            circle_period_seconds: 4.0,
+            camera_fov_degrees: None,
             image_targets: ImageTargets::Cpu,
             simulated_users: 1,
             join_interval_in_viewer_frames: 30,
@@ -679,11 +693,23 @@ impl Options {
                 "--motion" => {
                     options.motion = match value()?.as_str() {
                         "circle" => MotionKind::Circle,
+                        "orbit" => MotionKind::Orbit,
                         "still" => MotionKind::Still,
                         other => return Err(invalid(&flag, other)),
                     }
                 }
                 "--radius" => options.circle_radius = parse_number(&flag, &value()?)?,
+                "--eye-height" => options.eye_height = parse_number(&flag, &value()?)?,
+                "--period" => options.circle_period_seconds = parse_positive(&flag, &value()?)?,
+                "--fov" => {
+                    let degrees: f32 = parse_number(&flag, &value()?)?;
+                    if !(1.0..=170.0).contains(&degrees) {
+                        return Err(ParseOutcome::Error(format!(
+                            "{flag} must be between 1 and 170 degrees"
+                        )));
+                    }
+                    options.camera_fov_degrees = Some(degrees);
+                }
                 "--image-targets" => options.image_targets = parse_image_targets(&flag, &value()?)?,
                 "--quit-when-done" => options.quit_when_done = true,
                 "--opaque-background" => options.opaque_background = true,
@@ -938,6 +964,12 @@ mod tests {
             "still",
             "--radius",
             "2.5",
+            "--eye-height",
+            "1.4",
+            "--period",
+            "60",
+            "--fov",
+            "55",
             "--quit-when-done",
             "--opaque-background",
             "--origin",
@@ -974,6 +1006,9 @@ mod tests {
         assert!(options.write_raw_depth);
         assert_eq!(options.motion, MotionKind::Still);
         assert!((options.circle_radius - 2.5).abs() < f32::EPSILON);
+        assert!((options.eye_height - 1.4).abs() < f32::EPSILON);
+        assert!((options.circle_period_seconds - 60.0).abs() < f32::EPSILON);
+        assert_eq!(options.camera_fov_degrees, Some(55.0));
         assert!(options.quit_when_done);
         assert!(options.opaque_background);
         assert_eq!(options.world_origin, Vec3::new(1.0, 2.0, -3.0));

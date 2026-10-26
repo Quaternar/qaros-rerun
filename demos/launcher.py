@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,14 +53,24 @@ VIEWER_LOG_DIRECTIVES = (
 
 @dataclass(frozen=True)
 class Placement:
-    """Where the demo's data sits in the room: the viewer's --center, --origin, --scale, --yaw."""
+    """Where the demo's data sits in the room: the viewer's --center, --origin, --scale, --yaw,
+    and --volume-size when the data needs a larger app volume than the viewer's default.
+
+    The room origin is taken to be a QR marker lying on a table, with the floor 1.0 m below it:
+    the data's center 0.5 m above the marker is about standing eye level, and 1.7 m in front of
+    it leaves room to stand at the table and step back. For an origin on the floor, pass
+    `--origin 0,1.5,-1.7` after `--`."""
 
     center: tuple[float, float, float]
-    origin: tuple[float, float, float] = (0.0, 1.1, -1.2)
+    origin: tuple[float, float, float] = (0.0, 0.5, -1.7)
     scale: float = 1.0
     yaw_degrees: float = 0.0
+    volume_size: tuple[float, float, float] | None = None
 
     def viewer_arguments(self) -> list[str]:
+        volume_arguments = []
+        if self.volume_size is not None:
+            volume_arguments = ["--volume-size", ",".join(f"{value:g}" for value in self.volume_size)]
         return [
             "--center",
             ",".join(f"{value:g}" for value in self.center),
@@ -70,6 +80,7 @@ class Placement:
             f"{self.scale:g}",
             "--yaw",
             f"{self.yaw_degrees:g}",
+            *volume_arguments,
         ]
 
 
@@ -88,6 +99,9 @@ class Demo:
     """Arguments after the Python interpreter, run inside `example_directory`."""
     placement: Placement
     blueprint: Callable[[], rrb.Blueprint]
+    presentation: Callable[[rr.RecordingStream, Path], None] | None = None
+    """Static data logged after the replay, for the headset only (a backdrop, an exaggeration);
+    called with the stream and the example's directory, where its dataset lies."""
 
 
 def demo_time_panel(
@@ -192,7 +206,7 @@ def run(demo: Demo) -> None:
         pid_path.write_text(f"{viewer.pid}\n", encoding="utf-8")
         try:
             wait_for_viewer(viewer, port, viewer_log_path)
-            play_recording(demo.application_id, recording_path, blueprint, port)
+            play_recording(demo, recording_path, blueprint, port)
             print(f"{demo.title}: playing in a loop. Close the viewer or press Ctrl+C to stop.")
             viewer.wait()
         except KeyboardInterrupt:
@@ -366,8 +380,12 @@ def wait_for_viewer(viewer: subprocess.Popen[bytes], port: int, viewer_log_path:
     sys.exit(f"The viewer did not open port {port} within {VIEWER_START_TIMEOUT_SECONDS:g} s")
 
 
-def play_recording(application_id: str, recording_path: Path, blueprint: rrb.Blueprint, port: int) -> None:
-    recording = rr.RecordingStream(application_id)
+def example_directory(demo: Demo) -> Path:
+    return CACHE_DIRECTORY / f"rerun-{RERUN_TAG}" / demo.example_directory
+
+
+def play_recording(demo: Demo, recording_path: Path, blueprint: rrb.Blueprint, port: int) -> None:
+    recording = rr.RecordingStream(demo.application_id)
     recording.connect_grpc(f"rerun+http://127.0.0.1:{port}/proxy")
     # The recorded example carries its own blueprint. Ours goes first so the layout is right while
     # the data loads, and again last so it wins over the recorded one.
@@ -376,6 +394,51 @@ def play_recording(application_id: str, recording_path: Path, blueprint: rrb.Blu
     recording.flush()
     recording.send_blueprint(blueprint, make_active=True, make_default=True)
     recording.flush()
+    if demo.presentation is not None:
+        # The replayed recording keeps its own recording id, so the presentation data goes out
+        # under that id to land in the same recording.
+        presentation = rr.RecordingStream(demo.application_id, recording_id=recorded_recording_id(recording_path))
+        presentation.connect_grpc(f"rerun+http://127.0.0.1:{port}/proxy")
+        demo.presentation(presentation, example_directory(demo))
+        presentation.flush()
+
+
+def recorded_recording_id(recording_path: Path) -> str:
+    """The recording id stored in the .rrd, read once from `rerun rrd print` and kept beside it."""
+    id_path = recording_path.with_name("recording-id.txt")
+    if id_path.exists() and id_path.stat().st_mtime >= recording_path.stat().st_mtime:
+        return id_path.read_text(encoding="utf-8").strip()
+    printer = subprocess.Popen(
+        [sys.executable, "-m", "rerun", "rrd", "print", str(recording_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert printer.stdout is not None
+    recording_id = find_recording_id(printer.stdout)
+    printer.kill()
+    printer.wait()
+    if recording_id is None:
+        sys.exit(f"no recording id found in {recording_path}")
+    id_path.write_text(f"{recording_id}\n", encoding="utf-8")
+    return recording_id
+
+
+def find_recording_id(printed_lines: Iterable[str]) -> str | None:
+    """The id of the first `StoreId(Recording, "<application>", "<recording id>")` printed, which
+    `rerun rrd print` spreads over one line per field."""
+    in_recording_store_id = False
+    quoted_values: list[str] = []
+    for line in printed_lines:
+        stripped = line.strip()
+        if stripped == "Recording,":
+            in_recording_store_id = True
+            quoted_values = []
+        elif in_recording_store_id and stripped.startswith('"'):
+            quoted_values.append(stripped.strip('",'))
+            if len(quoted_values) == 2:
+                return quoted_values[1]
+    return None
 
 
 def give_the_viewer_time_to_stop(viewer: subprocess.Popen[bytes]) -> None:

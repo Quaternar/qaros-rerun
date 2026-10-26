@@ -520,6 +520,15 @@ pub struct HeadsetRenderer {
     /// is abandoned, in place of `readback_timeout_in_viewer_frames`, since eye frames on the
     /// render thread come far faster than viewer frames.
     readback_time_limit: Option<Duration>,
+    /// The head of the user the last frame was prepared for, in room space.
+    latest_head: Option<xr_math::Pose>,
+}
+
+/// A user's head from the two eye poses of one frame: midway between the eyes, turned like
+/// the left eye.
+fn head_between_eyes(request: &FrameRequest) -> xr_math::Pose {
+    let [left, right] = [request.views[0].pose, request.views[1].pose];
+    xr_math::Pose::new(left.orientation, (left.position + right.position) * 0.5)
 }
 
 impl HeadsetRenderer {
@@ -540,7 +549,16 @@ impl HeadsetRenderer {
             next_frame_sequence: 0,
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
+            latest_head: None,
         }
+    }
+
+    /// The head of the user this renderer last prepared a frame for, in room space (the sink
+    /// maps every eye pose into the room before it reaches the renderer). Frames of every
+    /// streaming user pass through here, a headset's and a desktop receiver's alike. `None`
+    /// until a stream has started.
+    pub fn latest_head(&self) -> Option<xr_math::Pose> {
+        self.latest_head
     }
 
     pub fn statistics(&self) -> &HeadsetStatistics {
@@ -796,6 +814,7 @@ impl HeadsetRenderer {
         // flight under the same key belongs to the old stream, whose sink frame is gone.
         self.in_flight
             .retain(|stale| stale.request.key != request.key);
+        self.latest_head = Some(head_between_eyes(&request));
         let frame_sequence = self.next_frame_sequence;
         self.next_frame_sequence += 1;
         let depth_range = self.depth_range;
@@ -1216,6 +1235,7 @@ mod tests {
             next_frame_sequence: 0,
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
+            latest_head: None,
         }
     }
 

@@ -21,6 +21,15 @@ pub enum HeadMotion {
         /// Where on the circle frame 0 stands, in radians about room Y (0: on the +Z side).
         start_angle: f32,
     },
+    /// The circle walk of `CircleAround` with the head also pitched toward `center`, the way a
+    /// person keeps a tabletop model in view while walking around it.
+    Orbit {
+        center: Vec3,
+        radius: f32,
+        eye_height: f32,
+        period_seconds: f32,
+        start_angle: f32,
+    },
 }
 
 /// Deterministic head motion for Mac runs: time comes from the frame index, not the clock,
@@ -63,17 +72,32 @@ impl ScriptedHeadMotion {
                 period_seconds,
                 start_angle,
             } => {
-                #[allow(clippy::cast_precision_loss)]
-                let seconds = frame_index as f32 / self.frames_per_second;
-                let angle = start_angle + std::f32::consts::TAU * seconds / period_seconds;
-                let position = Vec3::new(
-                    center.x + radius * angle.sin(),
-                    eye_height,
-                    center.z + radius * angle.cos(),
-                );
+                let angle = self.circle_angle(frame_index, start_angle, period_seconds);
+                let position = circle_position(center, radius, eye_height, angle);
                 Pose::new(Quat::from_rotation_y(angle), position)
             }
+            HeadMotion::Orbit {
+                center,
+                radius,
+                eye_height,
+                period_seconds,
+                start_angle,
+            } => {
+                let angle = self.circle_angle(frame_index, start_angle, period_seconds);
+                let position = circle_position(center, radius, eye_height, angle);
+                let pitch = (center.y - eye_height).atan2(radius);
+                Pose::new(
+                    Quat::from_rotation_y(angle) * Quat::from_rotation_x(pitch),
+                    position,
+                )
+            }
         }
+    }
+
+    fn circle_angle(&self, frame_index: u64, start_angle: f32, period_seconds: f32) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let seconds = frame_index as f32 / self.frames_per_second;
+        start_angle + std::f32::consts::TAU * seconds / period_seconds
     }
 
     pub fn right_eye_fov(&self) -> Fov {
@@ -83,6 +107,25 @@ impl ScriptedHeadMotion {
             ..self.left_eye_fov
         }
     }
+}
+
+/// Where on a circle of `radius` around `center` the head stands at `angle` (0: on the +Z side).
+fn circle_position(center: Vec3, radius: f32, eye_height: f32, angle: f32) -> Vec3 {
+    Vec3::new(
+        center.x + radius * angle.sin(),
+        eye_height,
+        center.z + radius * angle.cos(),
+    )
+}
+
+/// A centered field of view `horizontal_degrees` wide whose vertical extent keeps square pixels
+/// at `eye_resolution`: a camera-like eye for renders meant to be looked at on a screen.
+pub fn camera_like_fov(horizontal_degrees: f32, eye_resolution: [u32; 2]) -> Fov {
+    let half_horizontal_tangent = (horizontal_degrees.to_radians() * 0.5).tan();
+    #[allow(clippy::cast_precision_loss)]
+    let aspect = eye_resolution[1] as f32 / eye_resolution[0] as f32;
+    let half_vertical = (half_horizontal_tangent * aspect).atan();
+    Fov::symmetric(horizontal_degrees.to_radians(), half_vertical * 2.0)
 }
 
 impl PoseSource for ScriptedHeadMotion {
@@ -143,6 +186,47 @@ mod tests {
             );
             assert!((to_center.length() - 1.5).abs() < EPSILON);
         }
+    }
+
+    #[test]
+    fn orbiting_head_looks_at_the_center_itself() {
+        let center = Vec3::new(0.0, 1.0, -2.0);
+        let motion = ScriptedHeadMotion::new(HeadMotion::Orbit {
+            center,
+            radius: 1.5,
+            eye_height: 1.6,
+            period_seconds: 4.0,
+            start_angle: 0.7,
+        });
+        for frame_index in [0, 17, 60, 119] {
+            let head = motion.head_pose(frame_index);
+            let forward = head.transform_vector(Vec3::NEG_Z);
+            let to_center = (center - head.position).normalize();
+            assert!(forward.abs_diff_eq(to_center, EPSILON), "{frame_index}");
+            let head_right_axis = head.transform_vector(Vec3::X);
+            assert!(
+                head_right_axis.y.abs() < EPSILON,
+                "eyes stay level: {head_right_axis}"
+            );
+        }
+        let circling = circle();
+        assert!(
+            motion
+                .head_pose(42)
+                .position
+                .abs_diff_eq(circling.head_pose(42).position, EPSILON)
+        );
+    }
+
+    #[test]
+    fn camera_like_fov_keeps_square_pixels() {
+        let fov = camera_like_fov(60.0, [1600, 900]);
+        assert!((fov.angle_right - 30_f32.to_radians()).abs() < EPSILON);
+        assert!((fov.angle_left + fov.angle_right).abs() < EPSILON);
+        assert!((fov.angle_up + fov.angle_down).abs() < EPSILON);
+        let horizontal_tangent = fov.angle_right.tan();
+        let vertical_tangent = fov.angle_up.tan();
+        assert!((vertical_tangent / horizontal_tangent - 900.0 / 1600.0).abs() < EPSILON);
     }
 
     #[test]

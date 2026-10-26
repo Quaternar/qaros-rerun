@@ -14,13 +14,13 @@ The first start downloads the aircraft data (2.7 MB) and the region outlines (30
 
 ## What it shows
 
-- Each dot in the 3D view is an aircraft with a trail of its last minute of flight. Its height is its altitude, exaggerated 10x by the example so climbs and descents are visible.
+- Each dot in the 3D view is an aircraft with a trail of its last minute of flight. Its height is its altitude, exaggerated 20x (the example uses 10x) so that cruising aircraft fly about 0.4 m above the outlines at tabletop scale. Each aircraft has a light colour of its own: see-through glasses add light to the room, so dark colours would barely show. Both changes are logged by the launcher at replay, on top of the recording.
 - The red lines are the NUTS region outlines.
 - The map panel shows the same aircraft on OpenStreetMap at zoom 7.
 
 ## In the glasses
 
-The volume lies flat on the table, with the map panel to the right of it, north up in both. Crouch to table level to see the traffic separate by altitude.
+The traffic is centered in a 2.4 m app volume, the region outlines reaching about 1.1 m north of the center, with the map panel to the right of the volume, north up in both. Walk around it: from the side the traffic separates by altitude.
 
 ## If something looks wrong
 

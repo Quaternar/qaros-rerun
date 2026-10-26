@@ -31,7 +31,7 @@ use vulkan_device::{PhysicalDeviceIdentity, PhysicalDeviceSelector, VulkanDevice
 use crate::device_setup::GraphicsChoice;
 use crate::headset::HeadsetSink;
 use crate::options::{ColorFormatKind, Options, PoseSpaceKind, QarosGraphics};
-use crate::viewer_app::{FrameHook, StopRequest};
+use crate::viewer_app::{FrameHook, HeadsetFrame, StopRequest};
 
 const PANEL_SYNC_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a view must have been published before it gets a panel.
@@ -378,8 +378,13 @@ impl ViewActivity {
 }
 
 impl FrameHook for PanelHook {
-    fn on_viewer_frame(&mut self, headset_is_streaming: bool) {
-        self.user_stream_started |= headset_is_streaming;
+    fn on_viewer_frame(&mut self, headset: HeadsetFrame) {
+        self.user_stream_started |= headset.is_streaming;
+        // New panels open within reach of the first head near the app volume; QarosPanels
+        // ignores heads after that one, and heads too far away to reach anything.
+        if let Some(head) = headset.head {
+            self.panels.consider_head(head);
+        }
         let now = Instant::now();
         if self
             .last_sync
