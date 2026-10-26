@@ -34,8 +34,8 @@ While an observer is registered, `ExtendedEyeFrustum::last_frame` (`eye.rs`) ret
 ## Evidence and sources
 
 - [HOOK] `patches/re_view_spatial/src/view_3d_observer.rs`, `src/ui_3d.rs`, `src/eye.rs`; the per-eye copy in `crates/qaros-rerun/src/draw_data_copy.rs`.
-- [README] `README.md`, "The hook".
+- [ARCH] `docs/architecture.md`, "The hook".
 - [CULL] `log-test-scene 300 <url> 0 8` puts a magenta PNG-encoded image under a pinhole 8 m behind the default desktop camera. Headless image sink, circle walk, 60 written color images per run, two runs each: without the `last_frame` change none shows magenta, with it 31 do.
 
 [HOOK]: ../../patches/re_view_spatial/src/view_3d_observer.rs "Observer hook"
-[README]: ../../README.md "qaros-rerun README"
+[ARCH]: ../architecture.md "qaros-rerun architecture"

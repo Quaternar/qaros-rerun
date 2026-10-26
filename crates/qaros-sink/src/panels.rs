@@ -3,11 +3,15 @@ use std::f32::consts::PI;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use frame_sink::UserId;
 use glam::{Quat, Vec3};
-use qaros::{AppVolumeSize, GuiPanelConfig, GuiPanelId, GuiPanelInfo, GuiPanelSize, GuiPanelState};
+use qaros::{
+    AppVolumeSize, GuiPanelConfig, GuiPanelId, GuiPanelInfo, GuiPanelSize, GuiPanelState, PeerId,
+};
 use xr_math::Pose;
 
 use crate::connection::{QarosConnection, from_qaros_pose, to_qaros_pose};
+use crate::peer_devices::PeerDevice;
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 
 /// A 2D view published by the panel server: its URL-safe name and current size in pixels.
@@ -34,6 +38,26 @@ const REACH_ROW_START_METERS: f32 = 0.25;
 /// new panels: a desktop receiver's camera watching from across the room is nobody who could
 /// reach them, and a headset user stands near the content.
 const REACH_ANCHOR_MAX_DISTANCE_METERS: f32 = 4.0;
+/// How long new panels wait for a headset's head once a head near the app volume streams. A
+/// Visualizer receiver (the Hub Display on the PC) streams too and its camera can stand near
+/// the volume, but nobody can reach panels placed by it; after this wait, with no headset
+/// seen, any head near the volume places them, so a run without glasses still gets panels.
+pub const HEADSET_WAIT: Duration = Duration::from_secs(20);
+/// How often a viewer's device is asked of QAROS again while panels wait for a headset: a
+/// target refines its device identity once the device reports its model.
+const DEVICE_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The timeline panel's name before the volume suffix. It holds a dot, which no view name
+/// holds, so it never passes for a view's panel.
+const TIMELINE_PANEL_NAME: &str = "timeline.panel";
+/// Wide and short for a slider: the track takes 0.36 m, the Play button 0.09 m by 0.12 m.
+const TIMELINE_PANEL_WIDTH_METERS: f32 = 0.45;
+const TIMELINE_PANEL_HEIGHT_METERS: f32 = 0.12;
+/// How far in front of the user's head the timeline panel's centre stands, along the gaze on
+/// the floor plane.
+const TIMELINE_FORWARD_METERS: f32 = 0.5;
+/// How far below the user's eyes the timeline panel's centre sits.
+const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
 
 /// What the viewer's panels become when [`QarosPanels`] drops at Stop. Neither closes them:
 /// they stay in the session for the next run to claim by common name.
@@ -83,14 +107,16 @@ pub trait PanelActivity {
     fn user_stream_started(&self) -> bool;
 }
 
-/// One QAROS GUI panel per published 2D view, pointed at the view's page on the panel server.
+/// One QAROS GUI panel per published 2D view, pointed at the view's page on the panel server,
+/// and with [`QarosPanels::with_timeline_panel`] one timeline panel for the run.
 ///
 /// The Hub owns a panel's place once it exists: it keeps the pose the panel was created with,
 /// or wherever a user moved it, across runs, and ignores later pose calls, so users find their
 /// panels where they left them. This type therefore never sets the pose of a panel that
-/// exists. A new panel is created at its final place, within reach of the first user whose
-/// head is near the app volume ([`QarosPanels::consider_head`]); until such a head is known,
-/// views without a panel wait. A panel an earlier run left is reattached by its common name
+/// exists. A new panel is created at its final place, within reach of the first headset user
+/// whose head is near the app volume, or of any viewer near it once none came for
+/// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]); until such a head is known, views without
+/// a panel wait. A panel an earlier run left is reattached by its common name
 /// as it is. Closing the panels in the Hub Display makes the next run create them afresh.
 /// When this value drops the panels stay in the session, hidden or kept as [`PanelsAtStop`]
 /// says.
@@ -107,21 +133,44 @@ pub struct QarosPanels {
     /// When this run first saw the panels' browser running, which starts the silence clock of
     /// the kept pages claimed before.
     browser_seen_running: Option<Instant>,
-    /// The head of the first user streaming near the app volume, gravity-level: new panels
-    /// open within reach of it. Set once.
+    /// The head that places new panels, gravity-level: they open within reach of it. Set once.
     reach_anchor: Option<Pose>,
+    /// When a head near the app volume first streamed, which starts [`HEADSET_WAIT`].
+    first_near_head: Option<Instant>,
+    /// What each viewer near the volume is, as last asked of QAROS, and when it was asked.
+    viewer_devices: BTreeMap<UserId, (DeviceLookup, Instant)>,
+    /// Viewers near the volume that are not headsets, logged once each while panels wait.
+    not_headset_logged: BTreeSet<UserId>,
     /// Places in the within-reach row taken by panels this run created.
     reach_slots_used: usize,
     /// Views waiting for a head before their new panel opens, already logged as such.
     waiting_logged: BTreeSet<String>,
     /// A head too far from the app volume was logged, once per run.
     far_head_logged: bool,
+    /// The timeline page's URL, when this run opens a timeline panel.
+    timeline_url: Option<String>,
 }
 
 /// A claimed panel, and whether it kept the page an earlier run loaded and is visible.
 struct ClaimedPanel {
     id: GuiPanelId,
     kept_visible_page: bool,
+}
+
+/// A panel this run opens: one per settled view, and the timeline panel.
+enum WantedPanel<'view> {
+    View(&'view PanelView),
+    Timeline { url: String },
+}
+
+impl WantedPanel<'_> {
+    /// The key in [`QarosPanels::panels`] and the start of the panel's common name.
+    fn name(&self) -> &str {
+        match self {
+            Self::View(view) => &view.name,
+            Self::Timeline { .. } => TIMELINE_PANEL_NAME,
+        }
+    }
 }
 
 impl QarosPanels {
@@ -138,10 +187,25 @@ impl QarosPanels {
             kept_pages: BTreeMap::new(),
             browser_seen_running: None,
             reach_anchor: None,
+            first_near_head: None,
+            viewer_devices: BTreeMap::new(),
+            not_headset_logged: BTreeSet::new(),
             reach_slots_used: 0,
             waiting_logged: BTreeSet::new(),
             far_head_logged: false,
+            timeline_url: None,
         }
+    }
+
+    /// Also opens one timeline panel, showing the panel server's page at `page_path` (for
+    /// example `/timeline-panel`), whether or not any view is published. A new one opens once
+    /// a head places panels ([`QarosPanels::consider_head`]), [`TIMELINE_FORWARD_METERS`] in
+    /// front of that head and [`TIMELINE_BELOW_EYES_METERS`] below its eyes, facing them; one
+    /// an earlier run left is reattached, kept and hidden at Stop like the views' panels.
+    #[must_use]
+    pub fn with_timeline_panel(mut self, page_path: &str) -> Self {
+        self.timeline_url = Some(format!("{}{page_path}", self.base_url));
+        self
     }
 
     #[must_use]
@@ -174,13 +238,14 @@ impl QarosPanels {
     /// While the panel list cannot be read nothing is opened, so the next sync retries:
     /// without the list a reattached panel would pass for a new one, navigated and left hidden.
     pub fn sync(&mut self, views: &[PanelView], published_view_names: &[String]) {
-        let new_views: Vec<&PanelView> = views
-            .iter()
-            .filter(|view| {
-                !self.panels.contains_key(&view.name) && !self.failed.contains(&view.name)
-            })
-            .collect();
-        if new_views.is_empty() {
+        let mut wanted: Vec<WantedPanel<'_>> = views.iter().map(WantedPanel::View).collect();
+        if let Some(url) = &self.timeline_url {
+            wanted.push(WantedPanel::Timeline { url: url.clone() });
+        }
+        wanted.retain(|panel| {
+            !self.panels.contains_key(panel.name()) && !self.failed.contains(panel.name())
+        });
+        if wanted.is_empty() {
             return;
         }
         let listed = match self.connection.session().gui_panels().list() {
@@ -191,32 +256,35 @@ impl QarosPanels {
             }
         };
         let mut opened_any = false;
-        for view in new_views {
-            let exists = self.existing_panel(&listed, &view.name).is_some();
+        for panel in wanted {
+            let name = panel.name().to_owned();
+            let exists = self.existing_panel(&listed, &name).is_some();
             if !exists && self.reach_anchor.is_none() {
-                if self.waiting_logged.insert(view.name.clone()) {
+                if self.waiting_logged.insert(name.clone()) {
                     log::info!(
-                        "qaros: the panel for {} opens once a viewer near the app volume streams",
-                        view.name
+                        "qaros: the panel for {name} opens once a viewer near the app volume streams"
                     );
                 }
                 continue;
             }
             let slot = self.reach_slots_used;
-            match self.open_panel(view, slot, &listed) {
-                Ok(panel) => {
-                    if panel.kept_visible_page {
-                        self.kept_pages.insert(view.name.clone(), Instant::now());
+            match self.open_panel(&panel, slot, &listed) {
+                Ok(claimed) => {
+                    // The timeline page asks the panel server for nothing until it is touched,
+                    // so its silence says nothing about whether it loaded.
+                    let is_view = matches!(panel, WantedPanel::View(_));
+                    if claimed.kept_visible_page && is_view {
+                        self.kept_pages.insert(name.clone(), Instant::now());
                     }
-                    if !exists {
+                    if !exists && is_view {
                         self.reach_slots_used += 1;
                     }
-                    self.panels.insert(view.name.clone(), panel.id);
+                    self.panels.insert(name, claimed.id);
                     opened_any = true;
                 }
                 Err(error) => {
-                    log::warn!("qaros: no panel for view {}: {error}", view.name);
-                    self.failed.insert(view.name.clone());
+                    log::warn!("qaros: no panel for {name}: {error}");
+                    self.failed.insert(name);
                 }
             }
         }
@@ -225,12 +293,14 @@ impl QarosPanels {
         }
     }
 
-    /// Takes `head`, a streaming user's head in room space, as the place new panels open by,
-    /// if no head was taken yet and this one is within [`REACH_ANCHOR_MAX_DISTANCE_METERS`] of
-    /// the app volume's centre on the floor plane. New panels then open in a row within reach
-    /// of it, at the next [`QarosPanels::sync`]. Existing panels are not touched: the Hub keeps
-    /// their place.
-    pub fn consider_head(&mut self, head: Pose) {
+    /// Takes `head`, the head of the streaming `user` in room space at `now`, as the place new
+    /// panels open by, if no head was taken yet, this one is within
+    /// [`REACH_ANCHOR_MAX_DISTANCE_METERS`] of the app volume's centre on the floor plane, and
+    /// the user's device places panels: a headset's head at once, any other
+    /// once no headset came for [`HEADSET_WAIT`] after the first head near the volume. New
+    /// panels then open within reach of it, at the next [`QarosPanels::sync`]. Existing panels
+    /// are not touched: the Hub keeps their place.
+    pub fn consider_head(&mut self, user: UserId, head: Pose, now: Instant) {
         if self.reach_anchor.is_some() {
             return;
         }
@@ -246,12 +316,54 @@ impl QarosPanels {
             }
             return;
         }
+        let waited_for_a_headset =
+            now.saturating_duration_since(*self.first_near_head.get_or_insert(now));
+        let lookup = self.viewer_device(user, now);
+        let device = lookup.as_ref().ok().and_then(Option::as_ref);
+        let viewer = describe_viewer(user, self.connection.peer_of_user(user), &lookup);
+        if !places_panels(device, waited_for_a_headset) {
+            if self.not_headset_logged.insert(user) {
+                log::info!(
+                    "qaros: {viewer} near the app volume is no headset; new panels wait up to \
+                     {HEADSET_WAIT:?} for a headset's head"
+                );
+            }
+            return;
+        }
         let anchor = gravity_level(head);
         self.reach_anchor = Some(anchor);
-        log::info!(
-            "qaros: new panels open within reach of the viewer at {}",
-            anchor.position
-        );
+        if device.is_some_and(PeerDevice::is_headset) {
+            log::info!(
+                "qaros: new panels open within reach of {viewer}, at {}",
+                anchor.position
+            );
+        } else {
+            log::info!(
+                "qaros: no headset near the app volume for {HEADSET_WAIT:?}; new panels open \
+                 within reach of {viewer}, at {}",
+                anchor.position
+            );
+        }
+    }
+
+    /// What QAROS says `user`'s device is, asked again at most every
+    /// [`DEVICE_LOOKUP_INTERVAL`] until it says headset. `Ok(None)` while the user's peer is
+    /// not known or not listed.
+    fn viewer_device(&mut self, user: UserId, now: Instant) -> DeviceLookup {
+        if let Some((lookup, asked)) = self.viewer_devices.get(&user) {
+            let is_headset = lookup
+                .as_ref()
+                .is_ok_and(|device| device.as_ref().is_some_and(PeerDevice::is_headset));
+            if is_headset || now.saturating_duration_since(*asked) < DEVICE_LOOKUP_INTERVAL {
+                return lookup.clone();
+            }
+        }
+        let lookup = match self.connection.peer_of_user(user) {
+            Some(peer) => self.connection.peer_device(peer),
+            None => Ok(None),
+        };
+        self.viewer_devices.insert(user, (lookup.clone(), now));
+        lookup
     }
 
     /// Navigates, once, each panel reattached without navigation whose page has asked for
@@ -324,17 +436,17 @@ impl QarosPanels {
     /// Stop is shown again once its page is in place; one a user minimised stays minimised.
     fn open_panel(
         &self,
-        view: &PanelView,
+        wanted: &WantedPanel<'_>,
         slot: usize,
         listed: &[GuiPanelInfo],
     ) -> qaros::Result<ClaimedPanel> {
         let panels = self.connection.session().gui_panels();
-        let config = self.panel_config(view, slot);
+        let config = self.panel_config(wanted, slot);
         let panel = panels.get_or_create(&config)?;
         // get_or_create returns an existing panel unchanged. Its place belongs to the Hub and
         // the user, so no pose is set; the size follows this run's view.
         panels.set_size(panel, config.size)?;
-        let url = self.view_url(&view.name);
+        let url = self.panel_url(wanted);
         let earlier_run_panel = listed.iter().find(|listed_panel| {
             listed_panel.id == panel && listed_panel.state != GuiPanelState::Closed
         });
@@ -364,13 +476,24 @@ impl QarosPanels {
     /// server has. The display name repeats it, because a panel listing shows display names
     /// and not common names, and that is how [`QarosPanels::is_left_by_earlier_run`] tells
     /// this volume's panels apart.
-    fn panel_config(&self, view: &PanelView, slot: usize) -> GuiPanelConfig {
-        let common_name = format!("{}{}", view.name, self.common_name_suffix());
+    fn panel_config(&self, wanted: &WantedPanel<'_>, slot: usize) -> GuiPanelConfig {
+        let common_name = format!("{}{}", wanted.name(), self.common_name_suffix());
+        let (pose, size) = match wanted {
+            WantedPanel::View(view) => (self.panel_pose(slot), panel_size(view)),
+            WantedPanel::Timeline { .. } => (self.timeline_panel_pose(), timeline_panel_size()),
+        };
         GuiPanelConfig {
             display_name: Some(common_name.clone()),
-            pose: to_qaros_pose(self.panel_pose(slot)),
-            size: panel_size(view),
+            pose: to_qaros_pose(pose),
+            size,
             ..GuiPanelConfig::new(common_name)
+        }
+    }
+
+    fn panel_url(&self, wanted: &WantedPanel<'_>) -> String {
+        match wanted {
+            WantedPanel::View(view) => self.view_url(&view.name),
+            WantedPanel::Timeline { url } => url.clone(),
         }
     }
 
@@ -449,6 +572,64 @@ impl QarosPanels {
         let volume = self.connection.volume_config();
         panel_pose_beside_volume(from_qaros_pose(volume.pose), volume.size, slot)
     }
+
+    /// Without a head a new panel does not open, and an existing panel keeps its place
+    /// whatever pose it is given, so the fallback is never seen.
+    fn timeline_panel_pose(&self) -> Pose {
+        self.reach_anchor
+            .map_or_else(|| self.panel_pose(0), timeline_panel_pose_facing)
+    }
+}
+
+/// Room pose of the timeline panel for `head` (gravity-level, see [`gravity_level`]), in the
+/// convention of [`panel_pose_beside_volume`] (the midpoint of the top edge, front along
+/// panel -Z). The panel's centre stands [`TIMELINE_FORWARD_METERS`] in front of the head along
+/// its gaze and [`TIMELINE_BELOW_EYES_METERS`] below the eyes; the panel turns about +Y to the
+/// head and tilts back about its top edge's axis until its front faces the eyes, so its top
+/// edge stays level.
+fn timeline_panel_pose_facing(head: Pose) -> Pose {
+    let forward = head.transform_vector(Vec3::NEG_Z);
+    let centre =
+        head.position + forward * TIMELINE_FORWARD_METERS - Vec3::Y * TIMELINE_BELOW_EYES_METERS;
+    let away_from_head = centre - head.position;
+    let level_distance = Vec3::new(away_from_head.x, 0.0, away_from_head.z).length();
+    let yaw = away_from_head.x.atan2(away_from_head.z);
+    let tilt = (-away_from_head.y).atan2(level_distance);
+    // Panel +Z points away from the eyes, so its -Z front faces them.
+    let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(tilt);
+    let top_centre = centre + orientation * Vec3::Y * (TIMELINE_PANEL_HEIGHT_METERS * 0.5);
+    Pose::new(orientation, top_centre)
+}
+
+fn timeline_panel_size() -> GuiPanelSize {
+    GuiPanelSize {
+        width: TIMELINE_PANEL_WIDTH_METERS,
+        height: TIMELINE_PANEL_HEIGHT_METERS,
+        content_scale: 1.0,
+    }
+}
+
+/// A viewer's device as QAROS reports it: `Ok(None)` when its peer is not known or not listed,
+/// `Err` when QAROS cannot say.
+type DeviceLookup = Result<Option<PeerDevice>, String>;
+
+/// Whether the head of a viewer near the app volume places new panels: a headset's at once
+/// (`QAR_DEVICE_CATEGORY_HEADSET`), any other viewer's (a Visualizer receiver, or a device
+/// QAROS does not name) only after [`HEADSET_WAIT`] without a headset.
+fn places_panels(device: Option<&PeerDevice>, waited_for_a_headset: Duration) -> bool {
+    device.is_some_and(PeerDevice::is_headset) || waited_for_a_headset >= HEADSET_WAIT
+}
+
+/// For logs: "user-2 (peer 01:02:..., headset "METALENSE2")".
+fn describe_viewer(user: UserId, peer: Option<PeerId>, lookup: &DeviceLookup) -> String {
+    let peer = peer.map_or_else(|| "peer unknown".to_owned(), |peer| format!("peer {peer}"));
+    let device = match lookup {
+        Ok(Some(device)) if device.name.is_empty() => device.category_name().to_owned(),
+        Ok(Some(device)) => format!("{} {:?}", device.category_name(), device.name),
+        Ok(None) => "device not listed".to_owned(),
+        Err(error) => format!("device unreadable: {error}"),
+    };
+    format!("{user} ({peer}, {device})")
 }
 
 /// Whether a head at `head_position` stands within [`REACH_ANCHOR_MAX_DISTANCE_METERS`] of the
@@ -557,6 +738,8 @@ impl Drop for QarosPanels {
 
 #[cfg(test)]
 mod tests {
+    use qaros::qaros_sys::QarDeviceCategory;
+
     use super::*;
 
     const EPSILON: f32 = 1e-5;
@@ -600,6 +783,70 @@ mod tests {
         ));
         // Height does not count: someone on a ladder over the volume is near it.
         assert!(is_near_the_volume(Vec3::new(0.0, 9.0, -1.7), volume_centre));
+    }
+
+    fn device(category: QarDeviceCategory, name: &str) -> PeerDevice {
+        PeerDevice {
+            category,
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_headset_places_panels_at_once_and_a_display_receiver_only_after_the_wait() {
+        let glasses = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_HEADSET, "METALENSE2");
+        let display_receiver = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_VISUALIZER, "");
+        let unnamed = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_UNKNOWN, "");
+        assert_eq!(HEADSET_WAIT, Duration::from_secs(20));
+        let just_short = Duration::from_millis(19_999);
+
+        assert!(places_panels(Some(&glasses), Duration::ZERO));
+        assert!(!places_panels(Some(&display_receiver), Duration::ZERO));
+        assert!(!places_panels(Some(&display_receiver), just_short));
+        assert!(places_panels(Some(&display_receiver), HEADSET_WAIT));
+        assert!(!places_panels(Some(&unnamed), just_short));
+        assert!(places_panels(Some(&unnamed), HEADSET_WAIT));
+        assert!(
+            !places_panels(None, just_short),
+            "a viewer whose device QAROS cannot say waits like a receiver"
+        );
+        assert!(places_panels(None, HEADSET_WAIT));
+    }
+
+    #[test]
+    fn the_log_names_the_viewer_its_peer_and_its_device() {
+        let peer = PeerId([0xAB; 16]);
+        let peer_text = "AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB";
+        assert_eq!(
+            describe_viewer(
+                UserId(2),
+                Some(peer),
+                &Ok(Some(device(
+                    QarDeviceCategory::QAR_DEVICE_CATEGORY_HEADSET,
+                    "METALENSE2"
+                )))
+            ),
+            format!("user-2 (peer {peer_text}, headset \"METALENSE2\")")
+        );
+        assert_eq!(
+            describe_viewer(
+                UserId(1),
+                Some(peer),
+                &Ok(Some(device(
+                    QarDeviceCategory::QAR_DEVICE_CATEGORY_VISUALIZER,
+                    ""
+                )))
+            ),
+            format!("user-1 (peer {peer_text}, Visualizer receiver)")
+        );
+        assert_eq!(
+            describe_viewer(UserId(3), None, &Ok(None)),
+            "user-3 (peer unknown, device not listed)"
+        );
+        assert_eq!(
+            describe_viewer(UserId(4), Some(peer), &Err("not implemented".to_owned())),
+            format!("user-4 (peer {peer_text}, device unreadable: not implemented)")
+        );
     }
 
     #[test]
@@ -658,7 +905,7 @@ mod tests {
             height_in_pixel: 400,
         });
         assert!((wide.width - 0.45).abs() < 1e-6);
-        assert!((wide.height - 0.225).abs() < 1e-6);
+        assert!((wide.height - 0.225).abs() < 1e-6, "{}", wide.height);
         let empty = panel_size(&PanelView {
             name: "empty".to_owned(),
             width_in_pixel: 0,
@@ -739,6 +986,81 @@ mod tests {
             assert!(panel.position.x < head.position.x, "in front of the head");
             assert!(panel.position.z < head.position.z, "to the head's right");
         }
+    }
+
+    #[test]
+    fn the_timeline_panel_stands_half_a_metre_ahead_and_a_fifth_below_the_eyes_facing_them() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let panel = timeline_panel_pose_facing(head);
+        let half_height = TIMELINE_PANEL_HEIGHT_METERS * 0.5;
+        // Tilted back by atan(0.2 / 0.5), about 21.8 degrees, the top edge sits 0.06 m up the
+        // panel from its centre at (0, 1.4, -0.5).
+        let tilt = 0.2_f32.atan2(0.5);
+        assert_pose(
+            panel,
+            Quat::from_rotation_y(PI) * Quat::from_rotation_x(tilt),
+            Vec3::new(
+                0.0,
+                1.4 + half_height * tilt.cos(),
+                -0.5 - half_height * tilt.sin(),
+            ),
+        );
+        let centre = panel.position - panel.transform_vector(Vec3::Y) * half_height;
+        assert!(
+            centre.abs_diff_eq(Vec3::new(0.0, 1.4, -0.5), EPSILON),
+            "centre {centre}"
+        );
+        let front_normal = panel.transform_vector(Vec3::NEG_Z);
+        let to_the_eyes = (head.position - centre).normalize();
+        assert!(
+            front_normal.abs_diff_eq(to_the_eyes, EPSILON),
+            "front {front_normal} faces the eyes along {to_the_eyes}"
+        );
+        assert!(
+            front_normal.abs_diff_eq(Vec3::new(0.0, 0.2, 0.5).normalize(), EPSILON),
+            "{front_normal}"
+        );
+        assert!(
+            panel
+                .transform_vector(Vec3::X)
+                .abs_diff_eq(Vec3::NEG_X, EPSILON),
+            "the top edge level, +X to the viewer's left"
+        );
+    }
+
+    #[test]
+    fn the_timeline_panel_follows_a_turned_tilted_head_by_its_heading() {
+        let quarter_turn_left = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let looking_down = Pose::new(
+            quarter_turn_left * Quat::from_rotation_x(-0.6),
+            Vec3::new(1.0, 1.7, -2.0),
+        );
+        let head = gravity_level(looking_down);
+        let panel = timeline_panel_pose_facing(head);
+        let centre =
+            panel.position - panel.transform_vector(Vec3::Y) * (TIMELINE_PANEL_HEIGHT_METERS * 0.5);
+        // The head looks along room -X: the centre 0.5 m that way and 0.2 m below the eyes.
+        assert!(
+            centre.abs_diff_eq(Vec3::new(0.5, 1.5, -2.0), EPSILON),
+            "centre {centre}"
+        );
+        let to_the_eyes = (head.position - centre).normalize();
+        assert!(
+            panel
+                .transform_vector(Vec3::NEG_Z)
+                .abs_diff_eq(to_the_eyes, EPSILON)
+        );
+        assert!(
+            panel.transform_vector(Vec3::X).y.abs() < EPSILON,
+            "the top edge level"
+        );
+    }
+
+    #[test]
+    fn the_timeline_panel_is_wide_and_short() {
+        let size = timeline_panel_size();
+        assert!((size.width - 0.45).abs() < 1e-6);
+        assert!((size.height - 0.12).abs() < 1e-6);
     }
 
     #[test]

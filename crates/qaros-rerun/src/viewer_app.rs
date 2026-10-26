@@ -5,9 +5,10 @@ use frame_sink::perf;
 use rerun::external::{eframe, re_viewer};
 
 use crate::decoupled::DecoupledHeadset;
-use crate::headset::{HeadsetRenderer, HeadsetSink, with_sink_lent_to_pass};
+use crate::headset::{HeadsetRenderer, HeadsetSink, ViewerHead, with_sink_lent_to_pass};
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::panel_capture::PanelCapture;
+use crate::timeline_scrub::{TimelineScrub, TimelineSource};
 
 #[cfg(all(feature = "qaros", not(test)))]
 pub(crate) use qaros_sink::end_process_after_teardown;
@@ -72,25 +73,25 @@ impl Drop for Headset {
 }
 
 /// What a [`FrameHook`] learns about the headset each frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeadsetFrame {
     /// The headset sink streams to some user in this frame.
     pub is_streaming: bool,
-    /// The head of the user the last eye frame was prepared for, in room space; `None` until
-    /// a stream has started.
-    pub head: Option<xr_math::Pose>,
+    /// The head of every user an eye frame was prepared for lately, in room space, by user;
+    /// empty until a stream has started.
+    pub heads: Vec<ViewerHead>,
 }
 
 /// Work that runs once per viewer frame on the UI thread, after the views, for example
 /// keeping QAROS GUI panels in step with the published 2D views.
 pub trait FrameHook {
-    fn on_viewer_frame(&mut self, headset: HeadsetFrame);
+    fn on_viewer_frame(&mut self, headset: &HeadsetFrame);
 }
 
 /// The stock Rerun viewer app plus what runs once per frame outside the views: the headset
-/// sink, continuous repaint while a stream is active, panel capture, frame hooks, the Vulkan
-/// memory budget log, and an optional exit once the sink is done. `Viewer` is the Rerun app
-/// except in tests.
+/// sink, continuous repaint while a stream is active, panel capture and the timeline
+/// panel's slider, frame hooks, the Vulkan memory budget log, and an optional exit once the
+/// sink is done. `Viewer` is the Rerun app except in tests.
 pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     pub inner: Viewer,
     pub headset: Option<Headset>,
@@ -99,6 +100,8 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     /// `QAROS_RERUN_SCENE_DELAY_MS`: a stand-in for a heavy scene, slept after every UI pass.
     pub scene_delay: Option<std::time::Duration>,
     pub panel_capture: Option<PanelCapture>,
+    /// With `--panels`: the timeline panel's slider requests, applied before the Rerun app's logic.
+    pub timeline_scrub: Option<TimelineScrub>,
     pub frame_hooks: Vec<Box<dyn FrameHook>>,
     pub quit_when_done: bool,
     pub stop_request: Option<StopRequest>,
@@ -195,7 +198,7 @@ impl<Viewer> HeadsetViewerApp<Viewer> {
     }
 }
 
-impl<Viewer: eframe::App> eframe::App for HeadsetViewerApp<Viewer> {
+impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<Viewer> {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         self.inner.clear_color(visuals)
     }
@@ -210,7 +213,8 @@ impl<Viewer: eframe::App> eframe::App for HeadsetViewerApp<Viewer> {
 
     /// eframe calls `logic` before every `ui`, and alone while the window is minimised or
     /// occluded (`eframe` 0.37.0 `wgpu_integration.rs`, `if !show_ui`), so the stop is checked
-    /// here: a check in `ui` alone never runs for a minimised window.
+    /// here: a check in `ui` alone never runs for a minimised window. The Rerun app runs its
+    /// pending commands in its `logic`, so the slider's commands go in just before it.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.is_stop_requested() {
             self.exit_after_qaros_teardown();
@@ -218,7 +222,15 @@ impl<Viewer: eframe::App> eframe::App for HeadsetViewerApp<Viewer> {
         if self.has_render_thread_failed() {
             self.exit_after_render_thread_failure();
         }
+        if let Some(timeline_scrub) = &self.timeline_scrub
+            && timeline_scrub.apply(&self.inner)
+        {
+            ctx.request_repaint();
+        }
         self.inner.logic(ctx, frame);
+        if let Some(timeline_scrub) = &self.timeline_scrub {
+            timeline_scrub.publish_position(&self.inner);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -280,13 +292,12 @@ impl<Viewer: eframe::App> eframe::App for HeadsetViewerApp<Viewer> {
         let headset_is_streaming = self.headset_is_streaming();
         let headset_frame = HeadsetFrame {
             is_streaming: headset_is_streaming,
-            head: self
-                .headset
-                .as_ref()
-                .and_then(|headset| headset.renderer().latest_head()),
+            heads: self.headset.as_ref().map_or_else(Vec::new, |headset| {
+                headset.renderer().recent_heads(std::time::Instant::now())
+            }),
         };
         for hook in &mut self.frame_hooks {
-            hook.on_viewer_frame(headset_frame);
+            hook.on_viewer_frame(&headset_frame);
         }
         if let Some(memory_budget_log) = &mut self.memory_budget_log {
             memory_budget_log.log_if_due();
@@ -317,7 +328,14 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::Rc;
 
+    use panel_server::{TimelinePosition, TimelineRequest, TimelineRequests};
+    use re_viewer_context::external::re_log_types::{
+        AbsoluteTimeRange, StoreId, StoreKind, TimeInt,
+    };
+    use re_viewer_context::{SystemCommand, command_channel};
+
     use super::*;
+    use crate::timeline_scrub::ActiveTimeline;
 
     #[derive(Default)]
     struct RecordingViewer {
@@ -332,13 +350,23 @@ mod tests {
         fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
     }
 
+    impl TimelineSource for RecordingViewer {
+        fn active_timeline(&self) -> Option<ActiveTimeline> {
+            Some(ActiveTimeline {
+                store_id: StoreId::random(StoreKind::Recording, "test"),
+                range: AbsoluteTimeRange::new(TimeInt::new_temporal(0), TimeInt::new_temporal(10)),
+                cursor: TimeInt::new_temporal(4),
+            })
+        }
+    }
+
     /// Stands for the GUI panels: dropped at the teardown.
     struct PanelsHook {
         dropped: Rc<Cell<bool>>,
     }
 
     impl FrameHook for PanelsHook {
-        fn on_viewer_frame(&mut self, _headset: HeadsetFrame) {}
+        fn on_viewer_frame(&mut self, _headset: &HeadsetFrame) {}
     }
 
     impl Drop for PanelsHook {
@@ -365,6 +393,7 @@ mod tests {
             decoupled: None,
             scene_delay: None,
             panel_capture: None,
+            timeline_scrub: None,
             frame_hooks: vec![Box::new(PanelsHook {
                 dropped: Rc::clone(&hook_dropped),
             })],
@@ -424,6 +453,38 @@ mod tests {
             test.logic_passes.get(),
             1,
             "the Rerun app's logic does not run once the stop is seen"
+        );
+    }
+
+    #[test]
+    fn slider_requests_reach_the_viewer_in_the_logic_pass_also_while_minimised() {
+        let mut test = test_app();
+        let (command_sender, command_receiver) = command_channel();
+        let requests = TimelineRequests::default();
+        let position = TimelinePosition::default();
+        test.app.timeline_scrub = Some(TimelineScrub::new(
+            requests.clone(),
+            position.clone(),
+            command_sender,
+        ));
+
+        requests.push(TimelineRequest::SeekAndPause { fraction: 0.5 });
+        assert_eq!(logic_only_pass(&mut test.app), None);
+
+        let Some((_, SystemCommand::TimeControlCommands { time_commands, .. })) =
+            command_receiver.recv_system()
+        else {
+            panic!("no time control commands sent");
+        };
+        assert_eq!(
+            format!("{time_commands:?}"),
+            "[SetPlayState(Paused), SetTimeClamped(TimeReal(5))]"
+        );
+        assert_eq!(test.logic_passes.get(), 1, "and the Rerun app's logic ran");
+        assert_eq!(
+            position.latest(),
+            Some(0.4),
+            "the pass published the cursor the viewer shows"
         );
     }
 }

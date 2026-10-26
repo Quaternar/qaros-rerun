@@ -1,45 +1,18 @@
-// Runs the panel page's script with stand-ins for the image and timer APIs and checks that it
-// keeps asking for frames while the panel server is gone, backing off, and resumes once frames
-// load again. Reads the rendered page from stdin; `page.rs` runs it under `cargo test`.
+// Checks that the panel page keeps asking for frames while the panel server is gone, backing
+// off, and resumes once frames load again. Reads the rendered page from stdin; `page.rs` runs
+// it under `cargo test`.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import vm from "node:vm";
 
-const page = readFileSync(0, "utf8");
-const script = page.match(/<script>([\s\S]*)<\/script>/)[1];
+import { runPage } from "./page_stand_ins.mjs";
 
-const timers = [];
-const preloaders = [];
-const shown = { src: "", style: { visibility: "hidden" } };
-const status = { textContent: "waiting for frames" };
+const { elements, images, runNextTimer, timers } = runPage(readFileSync(0, "utf8"));
+const shown = elements.frame;
+const status = elements.status;
 
-class StandInImage {
-    constructor() {
-        this.src = "";
-        preloaders.push(this);
-    }
-}
-
-vm.runInNewContext(script, {
-    Image: StandInImage,
-    Date,
-    String,
-    Math,
-    setTimeout: (callback, delay) => timers.push({ callback, delay }),
-    document: {
-        getElementById: (id) => ({ frame: shown, status })[id],
-    },
-});
-
-assert.equal(preloaders.length, 1, "one detached preloader");
-const preloader = preloaders[0];
-
-function runNextTimer() {
-    const timer = timers.shift();
-    timer.callback();
-    return timer.delay;
-}
+assert.equal(images.length, 1, "one detached preloader");
+const preloader = images[0];
 
 function failFrames(count) {
     const delays = [];

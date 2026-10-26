@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here, following [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- A timeline panel per viewer with `--panels`, in every demo whether or not it has 2D views: a slider and a Play button filling a 0.45 m by 0.12 m GUI panel that opens 0.5 m in front of the head that places the panels and 0.5 m below its eyes, tilted to face them. Dragging the slider with a finger pauses the viewer and moves its time cursor to that point of the recording, and Play resumes playback. The page (`/timeline-panel` on the panel server) sends `/timeline?at=<fraction>` and `/timeline?play`; it takes the mouse input of QAROS's Ultralight panels and the touch input of its CEF panels.
+- The timeline panel's thumb follows the viewer's time cursor, during playback and when the desktop time bar moves. The viewer publishes the cursor as a fraction of the recording's time range each frame, and the page polls `/timeline/position` every 250 ms, a PNG whose width is 1 plus the fraction in thousandths. Polled positions wait while a finger drags the thumb and for a second after the last seek.
+
+### Changed
+
+- New panels open within reach of a headset: the viewer asks QAROS for each streaming peer's device category (`qar_peer_spec_get_category`) and places panels by the first `QAR_DEVICE_CATEGORY_HEADSET` head near the app volume. A Display Receiver (a Visualizer receiver) or a viewer whose category QAROS cannot say places them only when no headset streamed within 20 s of the first head near the volume. The log names the viewer, its peer and its device.
+
 ## [0.1.0]
 
 Initial public release.

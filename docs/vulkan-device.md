@@ -1,32 +1,14 @@
+---
+title: The Vulkan device
+description: How a wgpu application creates its own Vulkan device on the GPU of the QAROS session, with the extensions and raw handles QAROS needs.
+sidebar_position: 6
+---
+
 # Vulkan device: Rerun on a device the viewer creates
 
-QAROS's Vulkan API adopts the application's Vulkan device for streaming interop, and QuaternAR's StereoKit fork picks the GPU through a callback that receives the `VkInstance` and returns the `VkPhysicalDevice`, "because every shared texture and semaphore is bound to the adapter the session already picked" ([SKQ]). This note covers the part of that path which does not need QAROS itself, and runs on an Apple-silicon Mac through MoltenVK: Rerun renders on a Vulkan device the viewer creates, on a physical device it chooses, with device extensions wgpu would not enable, and the raw handles, image wrapping and semaphores the QAROS sink uses are in place and tested. The code is `crates/vulkan-device` and `crates/qaros-rerun/src/device_setup.rs`.
+QAROS's Vulkan API adopts the application's Vulkan device for streaming interop, and every shared texture and semaphore is bound to the GPU the session picked (QuaternAR's StereoKit fork does the same through a device picker callback, [SKQ]). An application built on wgpu, like Rerun, normally lets wgpu choose the GPU and the device extensions. This page shows how the viewer takes that over: Rerun renders on a Vulkan device the viewer creates, on the physical device the session names, with device extensions wgpu would not enable, and with the raw handles, image wrapping and semaphores the QAROS sink needs. The code is `crates/vulkan-device` and `crates/qaros-rerun/src/device_setup.rs`, and it is reusable in any wgpu application.
 
 Sources: the crates as published on crates.io, wgpu 30.0.0, wgpu-hal 30.0.0, ash 0.38.0, egui-wgpu 0.36.2, re_renderer 0.38.1 and re_viewer 0.38.1, and [SKQ]. The line references below are to those versions (Rerun 0.38.1, egui 0.36.2), not to the Rerun 0.40.0 the viewer builds against.
-
-## Running on the Mac
-
-wgpu's Vulkan backend on macOS is compiled in already (Rerun enables wgpu's `vulkan-portability`), but it needs a Vulkan loader at run time: wgpu-hal calls `ash::Entry::load()` (`wgpu-hal-30.0.0/src/vulkan/instance.rs` L583), which opens `libvulkan.dylib` by leaf name (`ash-0.38.0+1.3.281/src/entry.rs` L80).
-
-```sh
-brew install molten-vk vulkan-loader vulkan-tools    # vulkan-tools only for vulkaninfo
-export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
-./target/debug/qaros-rerun --headless 1600x1000 --out out/vk --frames 60 --write-every 30 \
-    --motion still --quit-when-done --vulkan-device name:apple --vulkan-extension VK_EXT_metal_objects &
-./target/debug/log-test-scene 300
-```
-
-- `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` is the only variable needed. Homebrew's loader finds MoltenVK through `/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json` on its own; `VK_ICD_FILENAMES` (or `VK_DRIVER_FILES`) pointing at that file is only needed with another loader.
-- Homebrew's `cargo` is a shell script, and macOS strips `DYLD_*` variables when it starts `/bin/bash`, so `cargo test` and `cargo run` never pass the variable on. Use the toolchain's own binaries: `PATH="$(dirname "$(rustup which cargo)"):$PATH"`. Without a loader the Vulkan tests print `skipped` and pass.
-- `--graphics-backend vulkan` alone keeps egui's device creation and only narrows the instance to Vulkan; `--vulkan-device SELECTOR` creates the device here (selectors: `default`, `name:TEXT`, `uuid:HEX`, `luid:HEX`, `index:N`), and `--vulkan-extension NAME` adds device extensions, `windows-interop` standing for the QAROS Windows set.
-
-### What the Mac shows
-
-- **Headless**, on the app-created device (log excerpt in [evidence/vulkan-device-run.log](evidence/vulkan-device-run.log)): the picker lists the MoltenVK device, the device is created with `VK_EXT_metal_objects` added to wgpu's own extensions, egui reports `backend: Vulkan ... driver: "MoltenVK", driver_info: "1.4.2"`, and the image sink shows 60 of 60 stereo frames. The color and depth PNGs of frames 0 and 30 are byte-identical to a Metal run with the same arguments and to the README's Metal evidence for frame 0, and so are those of `--graphics-backend vulkan` with egui's own device.
-- **Windowed**, on the app-created device: the window presents, and 90 of 90 frames are shown with the same eye PNGs. No surface error, so MoltenVK's `VK_EXT_metal_surface` swapchain works on a device egui did not choose.
-- **Tests** (`crates/vulkan-device/tests`, run on MoltenVK): the picker receives the instance and its choice becomes the device; handles read back from the wgpu device match; selection by name; an unsupported extension and an unmatched LUID are refused before `vkCreateDevice`; a `VkImage` created with ash on the device is wrapped, cleared by a wgpu render pass, read back pixel by pixel, and its owner's drop callback runs once wgpu drops it; wgpu signals a staged timeline semaphore; a staged wait holds wgpu work until the host signals; raw batches chain before and after a wgpu submission through binary semaphores.
-- MoltenVK logs pipeline warnings Rerun's shaders trigger (no primitive restart disable on Metal, blending declared on integer attachments); rendering is unaffected.
-- MoltenVK 1.4 reports a valid LUID (`000000010000074b` on the Mac measured), so the LUID path of the picker runs here too.
 
 ## How the device is made
 
@@ -46,17 +28,17 @@ What egui's own setup does that this one does not:
 
 ## The handles and helpers the QAROS sink uses
 
-| Need | API | Tested on the Mac |
-| --- | --- | --- |
-| Raw objects to give QAROS | `VulkanDeviceHandles` (the `VulkanDevice::handles` field, or `VulkanDeviceHandles::of(&wgpu::Device)` for any Vulkan device): `instance`, `get_instance_proc_addr`, `instance_api_version`, `physical_device`, `device`, `queue_family_index`, `queue_index`, `queue`, enabled extensions | yes, against the device's own hal handles |
-| A QAROS-owned `VkImage` as a render target | `texture_from_vk_image(device, image, descriptor, on_drop)`: wgpu-hal `texture_from_raw` with external memory and a drop callback (`wgpu-hal-30.0.0/src/vulkan/device.rs` L296), then `create_texture_from_hal` | yes: render, readback, drop callback |
-| Wait for QAROS before rendering, signal QAROS after | `stage_wait_semaphore`, `stage_signal_semaphore`: wgpu-hal's `Queue::add_wait_semaphore` and `add_signal_semaphore` (`mod.rs` L1524-1572), binary or timeline, consumed by wgpu's next submission | yes |
-| Keyed mutex or anything else wgpu cannot put on its submission | `submit_sync_batch`: an empty raw `vkQueueSubmit` on wgpu's queue with waits, signals and `VkWin32KeyedMutexAcquireReleaseInfoKHR`, chained to wgpu's work through a semaphore | the semaphore chain yes; the keyed mutex compiles for Windows only |
-| Take images over from their owner and hand them back | `HandoverQueue::submit_handover`: a raw acquire batch (reported layout and queue family to the attachment layout), wgpu's submission, a raw release batch (final layout, release to the owner's family, the owner's semaphores signalled), chained by binary semaphores; slots with fences so command buffers are reused safely | yes: three frames from `UNDEFINED` and from `VK_QUEUE_FAMILY_EXTERNAL`, pixels checked by a consumer batch |
+| Need | API |
+| --- | --- |
+| Raw objects to give QAROS | `VulkanDeviceHandles` (the `VulkanDevice::handles` field, or `VulkanDeviceHandles::of(&wgpu::Device)` for any Vulkan device): `instance`, `get_instance_proc_addr`, `instance_api_version`, `physical_device`, `device`, `queue_family_index`, `queue_index`, `queue`, enabled extensions |
+| A QAROS-owned `VkImage` as a render target | `texture_from_vk_image(device, image, descriptor, on_drop)`: wgpu-hal `texture_from_raw` with external memory and a drop callback (`wgpu-hal-30.0.0/src/vulkan/device.rs` L296), then `create_texture_from_hal` |
+| Wait for QAROS before rendering, signal QAROS after | `stage_wait_semaphore`, `stage_signal_semaphore`: wgpu-hal's `Queue::add_wait_semaphore` and `add_signal_semaphore` (`mod.rs` L1524-1572), binary or timeline, consumed by wgpu's next submission |
+| Keyed mutex or anything else wgpu cannot put on its submission | `submit_sync_batch`: an empty raw `vkQueueSubmit` on wgpu's queue with waits, signals and `VkWin32KeyedMutexAcquireReleaseInfoKHR` (Windows only), chained to wgpu's work through a semaphore |
+| Take images over from their owner and hand them back | `HandoverQueue::submit_handover`: a raw acquire batch (reported layout and queue family to the attachment layout), wgpu's submission, a raw release batch (final layout, release to the owner's family, the owner's semaphores signalled), chained by binary semaphores; slots with fences so command buffers are reused safely |
 
 Rules that follow from Vulkan and wgpu, documented on the API:
 
-- A semaphore wait only orders the batch it is part of. A raw batch that acquires a keyed mutex therefore signals a binary semaphore that wgpu's submission waits on, and the release batch waits on a semaphore wgpu's submission signals; the third Mac test runs exactly that chain with a host-signalled gate in place of the keyed mutex.
+- A semaphore wait only orders the batch it is part of. A raw batch that acquires a keyed mutex therefore signals a binary semaphore that wgpu's submission waits on, and the release batch waits on a semaphore wgpu's submission signals; `crates/vulkan-device/tests` runs that chain with a host-signalled gate in place of the keyed mutex.
 - Staged semaphores attach to whichever `wgpu::Queue::submit` comes next, including egui's and Rerun's, and queue access must be externally synchronized. Stage right before the sink's own submit, on the UI thread that submits, and do not let QAROS submit to the same `VkQueue` from its own thread unless it serializes with the viewer.
 - A wrapped image starts in `VK_IMAGE_LAYOUT_UNDEFINED` for wgpu (content discarded on first use), and wgpu then tracks its layout. An image QAROS hands out again every frame either comes back in the layout wgpu left it in, or is wrapped again per frame.
 
@@ -66,7 +48,6 @@ Rules that follow from Vulkan and wgpu, documented on the API:
 - `--vulkan-extension windows-interop` adds `VK_KHR_external_memory_win32`, `VK_KHR_external_semaphore_win32`, `VK_KHR_win32_keyed_mutex` and `VK_KHR_timeline_semaphore` (`WINDOWS_INTEROP_EXTENSIONS`). wgpu already enables `VK_KHR_external_memory_win32` when offered (`adapter.rs` L1340-1341); the others only this path enables. Timeline semaphores are core in Vulkan 1.2 and wgpu turns the feature on when supported, so the extension name is redundant on current NVIDIA drivers but harmless.
 - Picking by LUID: `luid:HEX` matches `VkPhysicalDeviceIDProperties.deviceLUID`, the same eight bytes as DXGI's adapter LUID and QAROS's `QarGraphicsDeviceId` (LUID variant). On a hybrid laptop this is what keeps the viewer on the GPU QAROS's session uses; on a one-GPU VM `default` gives the same device.
 - D3D11 textures imported through wgpu-hal's `texture_from_d3d11_shared_handle` (`device.rs` L453) get dedicated memory, which `Texture::memory()` exposes (`mod.rs` L843): that `VkDeviceMemory` is what a keyed mutex acquire in `submit_sync_batch` names.
-- `vulkan-device`, `frame-sink` with `gpu` and `qaros-sink` with `vulkan` are checked for `x86_64-pc-windows-msvc` from the Mac (check and clippy, all targets); the viewer itself is built and checked on Windows.
 
 ## How the QAROS Vulkan path uses this
 
@@ -82,5 +63,22 @@ Rules that follow from Vulkan and wgpu, documented on the API:
 | A discarded frame still signals the semaphore | `submit_sync_batch` with the signal only |
 
 What the header leaves open for this crate: whether QAROS submits to the adopted device's queues from its own threads (wgpu-hal opens one queue and the viewer submits to it from the UI thread; the stub waits on the semaphore inside `show_frame`, on the caller's thread), the usage flags of its images (not reported), and device features beyond the two extensions (none requested so far). QAROS must stop using the device before the viewer drops it; the sink waits for the device and destroys the sender first.
+
+## Running on the Mac
+
+For development, the same device creation runs on an Apple-silicon Mac through MoltenVK. wgpu's Vulkan backend on macOS is compiled in already (Rerun enables wgpu's `vulkan-portability`), but it needs a Vulkan loader at run time: wgpu-hal calls `ash::Entry::load()` (`wgpu-hal-30.0.0/src/vulkan/instance.rs` L583), which opens `libvulkan.dylib` by leaf name (`ash-0.38.0+1.3.281/src/entry.rs` L80).
+
+```sh
+brew install molten-vk vulkan-loader vulkan-tools    # vulkan-tools only for vulkaninfo
+export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
+./target/debug/qaros-rerun --headless 1600x1000 --out out/vk --frames 60 --write-every 30 \
+    --motion still --quit-when-done --vulkan-device name:apple --vulkan-extension VK_EXT_metal_objects &
+./target/debug/log-test-scene 300
+```
+
+- `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` is the only variable needed. Homebrew's loader finds MoltenVK through `/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json` on its own; `VK_ICD_FILENAMES` (or `VK_DRIVER_FILES`) pointing at that file is only needed with another loader.
+- Homebrew's `cargo` is a shell script, and macOS strips `DYLD_*` variables when it starts `/bin/bash`, so `cargo test` and `cargo run` never pass the variable on. Use the toolchain's own binaries: `PATH="$(dirname "$(rustup which cargo)"):$PATH"`. Without a loader the Vulkan tests print `skipped` and pass.
+- `--graphics-backend vulkan` alone keeps egui's device creation and only narrows the instance to Vulkan; `--vulkan-device SELECTOR` creates the device here (selectors: `default`, `discrete`, `name:TEXT`, `uuid:HEX`, `luid:HEX`, `index:N`), and `--vulkan-extension NAME` adds device extensions, `windows-interop` standing for the QAROS Windows set.
+- MoltenVK logs pipeline warnings for some of Rerun's shaders (no primitive restart disable on Metal, blending declared on integer attachments); rendering is unaffected.
 
 [SKQ]: https://github.com/Quaternar/StereoKit/blob/feature/qar-vulkan-0.4/StereoKitC/qar_vulkan.h "QuaternAR StereoKit fork, qar_vulkan.h"

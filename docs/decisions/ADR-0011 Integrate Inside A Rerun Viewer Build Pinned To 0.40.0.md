@@ -35,7 +35,7 @@ Build a separate viewer binary, `qaros-rerun`, from the Rerun 0.40.0 crates, wit
 - [rerun#3087] Rerun extensibility tracking issue.
 - [TC] `rust-toolchain.toml` (channel 1.96), `Cargo.toml` (`rust-version = "1.96"`, the exact Rerun, egui and wgpu pins).
 - [CRATES] The `rerun` crate's release list on crates.io.
-- [README] `README.md`, "Architecture".
+- [README] `README.md`, "How it works".
 
 [rerun#3087]: https://github.com/rerun-io/rerun/issues/3087 "Rerun extensibility tracking issue"
 [TC]: ../../rust-toolchain.toml "Toolchain pin"

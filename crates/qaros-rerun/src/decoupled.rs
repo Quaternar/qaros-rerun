@@ -628,10 +628,10 @@ fn run_eye_frame(
     let streaming = sink.is_streaming();
     let headset_frame = HeadsetFrame {
         is_streaming: streaming,
-        head: renderer.latest_head(),
+        heads: renderer.recent_heads(Instant::now()),
     };
     for hook in &mut sink_side.frame_hooks {
-        hook.on_viewer_frame(headset_frame);
+        hook.on_viewer_frame(&headset_frame);
     }
     status.update(renderer, &sink_side.sink);
     if begun == 0 {
@@ -1311,7 +1311,7 @@ mod tests {
             }
 
             impl FrameHook for ConnectionHook {
-                fn on_viewer_frame(&mut self, _headset: HeadsetFrame) {}
+                fn on_viewer_frame(&mut self, _headset: &HeadsetFrame) {}
             }
 
             impl Drop for ConnectionHook {

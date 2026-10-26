@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use panel_server::{PanelServer, ViewFrames};
+use panel_server::{PanelServer, TimelinePosition, TimelineRequests, ViewFrames};
 use re_viewer_context::{PublishedViewInfo, ViewId, ViewRectPublisher};
 
 /// Views seen by the 3D observer this frame, so panel capture can skip them.
@@ -53,6 +53,16 @@ impl PanelCapture {
     /// The published views, shared with the HTTP thread.
     pub fn frames(&self) -> ViewFrames {
         self.server.frames().clone()
+    }
+
+    /// The timeline panel's slider requests, shared with the HTTP thread.
+    pub fn timeline_requests(&self) -> TimelineRequests {
+        self.server.timeline_requests().clone()
+    }
+
+    /// Where the viewer's time cursor stands, read by the HTTP thread for the pages.
+    pub fn timeline_position(&self) -> TimelinePosition {
+        self.server.timeline_position().clone()
     }
 
     pub fn on_frame(&mut self, egui_ctx: &egui::Context) {

@@ -20,6 +20,7 @@ mod panel_capture;
 mod panel_render;
 #[cfg(feature = "qaros")]
 mod qaros_setup;
+mod timeline_scrub;
 mod viewer_app;
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -40,6 +41,7 @@ use crate::memory_budget_log::MemoryBudgetLog;
 use crate::memory_knobs::MemoryKnobs;
 use crate::options::{ImageTargets, MotionKind, Options, ParseOutcome, SinkKind, USAGE};
 use crate::panel_capture::{PanelCapture, SharedViewDirectory, ViewDirectory};
+use crate::timeline_scrub::TimelineScrub;
 use crate::viewer_app::{
     FrameHook, Headset, HeadsetViewerApp, SharedHeadset, StopRequest, end_process_after_teardown,
 };
@@ -440,12 +442,18 @@ async fn run_viewer(
 
     let quit_when_done = options.quit_when_done;
     let is_headless = options.headless_size.is_some();
+    // Headless, the runner keeps the panel capture, so the slider's shared state is taken here.
+    let timeline_link = panel_capture
+        .as_ref()
+        .map(|capture| (capture.timeline_requests(), capture.timeline_position()));
     let build_app = move |creation_context: &eframe::CreationContext<'_>,
                           panel_capture: Option<PanelCapture>|
           -> HeadsetViewerApp {
         // Already set only if the creator ran twice, which eframe does not do.
         let _ = egui_context.set(creation_context.egui_ctx.clone());
-        let mut inner = re_viewer::App::new(
+        // `App::new` with a command channel of our own, so the slider can send time commands.
+        let (command_sender, command_receiver) = re_viewer::command_channel();
+        let mut inner = re_viewer::App::with_commands(
             main_thread_token,
             re_viewer::build_info(),
             re_viewer::AppEnvironment::Custom("qaros-rerun".to_owned()),
@@ -453,6 +461,8 @@ async fn run_viewer(
             creation_context,
             None,
             runtime,
+            re_viewer::register_text_log_receiver(),
+            (command_sender.clone(), command_receiver),
         );
         inner.add_log_receiver(log_receiver);
         HeadsetViewerApp {
@@ -461,6 +471,8 @@ async fn run_viewer(
             decoupled,
             scene_delay,
             panel_capture,
+            timeline_scrub: timeline_link
+                .map(|(requests, position)| TimelineScrub::new(requests, position, command_sender)),
             frame_hooks,
             quit_when_done,
             stop_request,

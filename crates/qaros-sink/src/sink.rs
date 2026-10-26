@@ -244,6 +244,7 @@ impl QarosSink {
         let left = self.users.poll();
         self.drop_streams(left);
         for (user, peer) in self.users.creations_to_start() {
+            self.connection.note_user_peer(user.id, peer);
             self.start_stream(user, peer);
         }
         let mut finished = self.pending.take_finished();

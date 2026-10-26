@@ -30,7 +30,7 @@ use glam::{Quat, Vec3};
 use qaros::{GuiPanelState, PeerId, PixelFormat};
 use qaros_sink::{
     BEGIN_WAIT_DRAIN_LIMIT, ConnectOptions, DeadPages, FRAME_FAILURE_MINIMUM, FRAME_FAILURE_PERIOD,
-    PAGE_SILENCE_LIMIT, PanelActivity, PanelView, PanelsAtStop, PeerEvent, PoseSpace,
+    HEADSET_WAIT, PAGE_SILENCE_LIMIT, PanelActivity, PanelView, PanelsAtStop, PeerEvent, PoseSpace,
     QarosConnection, QarosPanels, QarosSink, QarosSinkOptions, ReleaseCause, TargetPeers,
     TeardownStep, UserEventSource, WakeViewer, connect, current_teardown_step, enter_teardown_step,
 };
@@ -641,6 +641,35 @@ fn targets_are_found_in_the_peer_list_without_render_requests() {
         "a target that stops running is released"
     );
     assert!(sink.rendered_users().is_empty());
+    drop(sink);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn the_connection_knows_each_user_peer_and_reads_peer_devices_from_the_peer_list() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    assert_eq!(connection.peer_of_user(UserId(1)), None);
+    let mut sink = new_sink(&connection, PoseSpace::Room);
+    let request = single_request(&mut sink).expect("a frame for the listed visualizer");
+    assert_eq!(request.key.user, UserId(1));
+    assert_eq!(connection.peer_of_user(UserId(1)), Some(VISUALIZER_PEER));
+
+    assert_eq!(
+        connection.peer_device(PeerId([0x99; 16])),
+        Ok(None),
+        "a peer the list does not hold"
+    );
+    let unreadable = connection
+        .peer_device(VISUALIZER_PEER)
+        .expect_err("qaros-stub implements no device category");
+    assert!(
+        unreadable.starts_with("qar_peer_spec_get_category: ")
+            && unreadable.contains("not implemented in qaros-stub"),
+        "{unreadable}"
+    );
+    submit_both_eyes(&mut sink, request.key);
+    sink.show_frame(request.key, show_info()).unwrap();
     drop(sink);
     fixture.assert_clean_teardown(connection);
 }
@@ -2288,6 +2317,124 @@ fn opens_a_panel_per_view_within_reach_and_hides_them_at_stop() {
     fixture.assert_clean_teardown(connection);
 }
 
+#[test]
+fn a_timeline_panel_opens_without_views_in_front_of_and_below_the_head_facing_it() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877/")
+        .with_timeline_panel("/timeline-panel");
+    panels.sync(&[], &[]);
+    assert!(
+        panels.panels().is_empty(),
+        "no head yet: the timeline waits"
+    );
+
+    place_panels_by(&mut panels, viewer_head());
+    panels.sync(&[], &[]);
+    panels.sync(&[], &[]);
+    assert_eq!(panels.panels().len(), 1);
+    assert_eq!(navigation_count(&fixture), 1, "navigated once");
+    assert_eq!(
+        open_panels(&connection),
+        [(
+            "timeline.panel.rerun.rerun".to_owned(),
+            "http://127.0.0.1:9877/timeline-panel".to_owned()
+        )]
+    );
+    let listed = connection.session().gui_panels().list().unwrap();
+    let timeline = &listed[0];
+    assert!((timeline.size.width - 0.45).abs() < 1e-6);
+    assert!((timeline.size.height - 0.12).abs() < 1e-6);
+    // The head at (0, 1.6, 0) looks along -Z: the panel's centre at (0, 1.4, -0.5), tilted
+    // back to face the eyes, its top edge 0.06 m up the panel from the centre.
+    let orientation = Quat::from_xyzw(
+        timeline.pose.orientation.x,
+        timeline.pose.orientation.y,
+        timeline.pose.orientation.z,
+        timeline.pose.orientation.w,
+    );
+    let top_centre = Vec3::new(
+        timeline.pose.position.x,
+        timeline.pose.position.y,
+        timeline.pose.position.z,
+    );
+    let centre = top_centre - orientation * Vec3::Y * 0.06;
+    assert!(
+        centre.abs_diff_eq(Vec3::new(0.0, 1.4, -0.5), 1e-5),
+        "centre {centre}"
+    );
+    let front_normal = orientation * Vec3::NEG_Z;
+    let to_the_eyes = (viewer_head().position - centre).normalize();
+    assert!(
+        front_normal.abs_diff_eq(to_the_eyes, 1e-5),
+        "front {front_normal} faces the eyes along {to_the_eyes}"
+    );
+
+    // A view settling later takes the first place of the row: the timeline holds none.
+    panels.sync(&panel_views(&["map"]), &view_names(&["map"]));
+    let map_position = panel_position(&connection, "map");
+    let first_place_angle: f32 = (0.25 + 0.225) / 0.8;
+    assert!(
+        (map_position.x - 0.8 * first_place_angle.sin()).abs() < 1e-5,
+        "{map_position}"
+    );
+
+    drop(panels);
+    assert_eq!(
+        panel_states(&connection),
+        [
+            ("map.rerun.rerun".to_owned(), GuiPanelState::Hidden),
+            (
+                "timeline.panel.rerun.rerun".to_owned(),
+                GuiPanelState::Hidden
+            ),
+        ],
+        "Stop hides the timeline panel like the others"
+    );
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn a_restart_reclaims_the_timeline_panel_where_it_is() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let views = panel_views(&["map"]);
+    let published = view_names(&["map"]);
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877")
+        .with_timeline_panel("/timeline-panel");
+    first_run.sync(&views, &published);
+    let first_run_panels = first_run.panels().clone();
+    let map_position = panel_position(&connection, "map");
+    let timeline_position = panel_position(&connection, "timeline.panel");
+    drop(first_run);
+    let navigations = navigation_count(&fixture);
+
+    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877")
+        .with_timeline_panel("/timeline-panel");
+    second_run.sync(&views, &published);
+    assert_eq!(
+        second_run.panels(),
+        &first_run_panels,
+        "both reattached before any head"
+    );
+    assert_eq!(navigation_count(&fixture), navigations, "pages kept");
+    assert_eq!(panel_position(&connection, "map"), map_position);
+    assert_eq!(
+        panel_position(&connection, "timeline.panel"),
+        timeline_position
+    );
+    assert!(
+        panel_states(&connection)
+            .iter()
+            .all(|(_, state)| *state == GuiPanelState::Visible),
+        "shown again, none hidden as a leftover: {:?}",
+        panel_states(&connection)
+    );
+
+    drop(second_run);
+    fixture.assert_clean_teardown(connection);
+}
+
 fn view_names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
@@ -2451,13 +2598,29 @@ fn new_panels_wait_for_a_viewer_near_the_volume_and_open_within_reach() {
         "no head yet: the new panel waits"
     );
 
-    // A receiver's camera far across the room places nothing.
-    panels.consider_head(Pose::from_translation(Vec3::new(1.2, 2.1, 7.0)));
+    // A receiver's camera far across the room places nothing, however long it streams.
+    let first_seen = Instant::now();
+    let distant_receiver = Pose::from_translation(Vec3::new(1.2, 2.1, 7.0));
+    panels.consider_head(UserId(1), distant_receiver, first_seen);
+    panels.consider_head(UserId(1), distant_receiver, first_seen + HEADSET_WAIT * 2);
     panels.sync(&panel_views(&["map"]), &published);
     assert!(panels.panels().is_empty(), "a distant head places nothing");
 
+    // The stub names no device category, so a near head is no known headset: it places the
+    // panels only once no headset came for HEADSET_WAIT after it first streamed.
     let head = viewer_head();
-    panels.consider_head(head);
+    panels.consider_head(UserId(2), head, first_seen);
+    panels.consider_head(
+        UserId(2),
+        head,
+        first_seen + HEADSET_WAIT.saturating_sub(Duration::from_millis(1)),
+    );
+    panels.sync(&panel_views(&["map"]), &published);
+    assert!(
+        panels.panels().is_empty(),
+        "no headset yet, and the wait for one not over"
+    );
+    panels.consider_head(UserId(2), head, first_seen + HEADSET_WAIT);
     panels.sync(&panel_views(&["map"]), &published);
     let map_position = panel_position(&connection, "map");
     let to_map = map_position - head.position;
@@ -2475,7 +2638,11 @@ fn new_panels_wait_for_a_viewer_near_the_volume_and_open_within_reach() {
     );
 
     // A later head changes nothing; a panel opened later joins the same row.
-    panels.consider_head(Pose::from_translation(Vec3::new(1.0, 1.6, 1.0)));
+    panels.consider_head(
+        UserId(3),
+        Pose::from_translation(Vec3::new(1.0, 1.6, 1.0)),
+        first_seen + HEADSET_WAIT * 2,
+    );
     panels.sync(&panel_views(&["map", "camera"]), &published);
     assert_eq!(panel_position(&connection, "map"), map_position);
     let camera_position = panel_position(&connection, "camera");
@@ -2517,7 +2684,10 @@ fn a_restart_leaves_a_panel_where_the_user_put_it() {
     drop(first_run);
 
     let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
-    second_run.consider_head(Pose::from_translation(Vec3::new(1.0, 1.6, 0.5)));
+    place_panels_by(
+        &mut second_run,
+        Pose::from_translation(Vec3::new(1.0, 1.6, 0.5)),
+    );
     second_run.sync(&views, &published);
     assert_eq!(
         second_run.panels()["map"],
@@ -2547,8 +2717,16 @@ fn viewer_head() -> Pose {
 /// Panels for a run whose viewer stands near the app volume, so new panels open at once.
 fn panels_with_a_viewer(connection: Rc<QarosConnection>, base_url: &str) -> QarosPanels {
     let mut panels = QarosPanels::new(connection, base_url);
-    panels.consider_head(viewer_head());
+    place_panels_by(&mut panels, viewer_head());
     panels
+}
+
+/// The stub names no device category, so `head` places the panels once it has streamed for
+/// [`HEADSET_WAIT`] without a headset.
+fn place_panels_by(panels: &mut QarosPanels, head: Pose) {
+    let first_seen = Instant::now();
+    panels.consider_head(UserId(1), head, first_seen);
+    panels.consider_head(UserId(1), head, first_seen + HEADSET_WAIT);
 }
 
 fn panel_position(connection: &QarosConnection, view_name: &str) -> Vec3 {

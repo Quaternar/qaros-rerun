@@ -143,11 +143,12 @@ pub async fn build(
 
     let mut frame_hooks: Vec<Box<dyn FrameHook>> = Vec::new();
     if let (Some(frames), Some(base_url)) = (panel_frames, options.panel_base_url()) {
-        re_log::info!("qaros: 2D views open as GUI panels from {base_url}");
+        re_log::info!("qaros: 2D views and the timeline slider open as GUI panels from {base_url}");
         frame_hooks.push(Box::new(PanelHook {
             panels: QarosPanels::new(connection, &base_url)
                 .with_panels_at_stop(panels_at_stop(options))
-                .with_dead_pages(dead_pages(options)),
+                .with_dead_pages(dead_pages(options))
+                .with_timeline_panel(panel_server::TIMELINE_PAGE_PATH),
             frames,
             last_sync: None,
             activity: HashMap::new(),
@@ -314,7 +315,8 @@ fn stop_when_closed(
     }
 }
 
-/// Opens a GUI panel for each 2D view the panel server keeps publishing, checked once a second.
+/// Opens a GUI panel for each 2D view the panel server keeps publishing, checked once a second,
+/// and the timeline panel.
 struct PanelHook {
     panels: QarosPanels,
     frames: ViewFrames,
@@ -378,14 +380,14 @@ impl ViewActivity {
 }
 
 impl FrameHook for PanelHook {
-    fn on_viewer_frame(&mut self, headset: HeadsetFrame) {
+    fn on_viewer_frame(&mut self, headset: &HeadsetFrame) {
         self.user_stream_started |= headset.is_streaming;
-        // New panels open within reach of the first head near the app volume; QarosPanels
-        // ignores heads after that one, and heads too far away to reach anything.
-        if let Some(head) = headset.head {
-            self.panels.consider_head(head);
-        }
         let now = Instant::now();
+        // New panels open within reach of a headset's head near the app volume, or of any head
+        // near it after a wait; QarosPanels ignores heads after the one it takes.
+        for head in &headset.heads {
+            self.panels.consider_head(head.user, head.pose, now);
+        }
         if self
             .last_sync
             .is_some_and(|last| now.saturating_duration_since(last) < PANEL_SYNC_INTERVAL)

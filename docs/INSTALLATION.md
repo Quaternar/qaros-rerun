@@ -1,16 +1,22 @@
+---
+title: Installation
+description: Build qaros-rerun from source on Windows (or a Mac for development) and run it once without a headset.
+sidebar_position: 1
+---
+
 # Installation
 
-How to build `qaros-rerun` from source and check it once on a Mac or a Windows PC. Streaming to headsets through QAROS is covered by the [integration guide](integration-guide.md).
+How to build `qaros-rerun` from source and run it once, before any headset is involved. Streaming to headsets through QAROS is covered by the [integration guide](integration-guide.md).
 
 ## Prerequisites
 
-| | Mac | Windows |
+| | Windows (the Hub PC) | Mac (development only) |
 | --- | --- | --- |
-| C and C++ build tools | Xcode Command Line Tools (`xcode-select --install`) | Visual Studio Build Tools 2022 with the "Desktop development with C++" workload |
+| C and C++ build tools | Visual Studio Build Tools 2022 with the "Desktop development with C++" workload | Xcode Command Line Tools (`xcode-select --install`) |
 | Rust | [rustup](https://rustup.rs) | [rustup](https://rustup.rs) |
-| Git | included with the Command Line Tools | [Git for Windows](https://git-scm.com/download/win) |
-| Demos (optional) | [uv](https://docs.astral.sh/uv/) | [uv](https://docs.astral.sh/uv/) |
-| Streaming to headsets | not supported | QAROS 0.9 and a GPU with a Vulkan driver |
+| Git | [Git for Windows](https://git-scm.com/download/win) | included with the Command Line Tools |
+| Demos | [uv](https://docs.astral.sh/uv/) | [uv](https://docs.astral.sh/uv/) |
+| Streaming to headsets | QAROS 0.9 and a GPU with a Vulkan driver | not supported ([Developing on a Mac](mac.md)) |
 
 On Windows the build tools, rustup, Git and uv can be installed with `winget`:
 
@@ -45,7 +51,17 @@ The QAROS tests load `qaros-stub`, so no QAROS installation is needed.
 
 ## First run
 
-Without a headset, the viewer's default sink writes the eyes as PNGs with scripted head motion. Start it headless, log the included test scene to it, and look at the frames:
+Without a headset, the viewer's default sink writes the eyes as PNGs with scripted head motion. Start it headless, log the included test scene to it, and look at the frames. In PowerShell:
+
+```powershell
+$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done"
+Start-Sleep 5
+.\target\release\log-test-scene.exe 300
+$viewer.WaitForExit()
+Get-ChildItem out\headset\user-1
+```
+
+In a Mac or Linux shell:
 
 ```sh
 ./target/release/qaros-rerun --headless 1600x1000 --out out/headset \
@@ -56,16 +72,6 @@ wait
 ls out/headset/user-1
 ```
 
-In PowerShell:
-
-```powershell
-$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done"
-Start-Sleep 5
-.\target\release\log-test-scene.exe 300
-$viewer.WaitForExit()
-Get-ChildItem out\headset\user-1
-```
-
 The viewer exits by itself after 240 shown frames and prints a summary line `headset: frames started 240, shown 240, abandoned 0`. `out/headset/user-1` then holds `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` for every 30th frame. While the viewer runs, `http://127.0.0.1:9877/views` lists the 2D views it serves as panels.
 
 Drop `--headless` for a desktop window, and see `qaros-rerun --help` for every option.
@@ -73,4 +79,4 @@ Drop `--headless` for a desktop window, and see `qaros-rerun --help` for every o
 ## Next steps
 
 - Stream to headsets on Windows with QAROS: [integration guide](integration-guide.md).
-- Real Rerun examples in the glasses: [demos](demos.md), for example `uv run demos/robot_arm/run.py`.
+- Real Rerun examples in the glasses: [demos](demos/README.md).

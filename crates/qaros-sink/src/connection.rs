@@ -1,8 +1,12 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
+use frame_sink::UserId;
+use qaros::PeerId;
 use qaros::{
     AppVolumeConfig, AppVolumeId, AppVolumeLifetime, AppVolumeSize, BlockingOptions,
     GraphicsAdapter, Library, LibraryConfig, OnboardMethod, OnboardingId, PeerInfo,
@@ -11,6 +15,7 @@ use qaros::{
 };
 use xr_math::AppPlacement;
 
+use crate::peer_devices::{PeerDevice, read_peer_device};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 
 /// When a render sender's creation gives up. A creation finishes once the target answers,
@@ -106,6 +111,9 @@ pub struct QarosConnection {
     volume_config: AppVolumeConfig,
     adapter: Option<GraphicsAdapter>,
     unanswered_peers_file: Option<PathBuf>,
+    /// The peer each user the sink created a sender for streams to. User ids are never reused,
+    /// so an entry stays right after its user leaves.
+    peers_by_user: RefCell<BTreeMap<UserId, PeerId>>,
     session: Session,
     _library_dropped_last: LibraryDroppedLast,
 }
@@ -175,6 +183,20 @@ impl QarosConnection {
 
     pub fn unanswered_peers_file(&self) -> Option<&Path> {
         self.unanswered_peers_file.as_deref()
+    }
+
+    /// The sink starts creating `user`'s render sender for `peer`.
+    pub(crate) fn note_user_peer(&self, user: UserId, peer: PeerId) {
+        self.peers_by_user.borrow_mut().insert(user, peer);
+    }
+
+    pub fn peer_of_user(&self, user: UserId) -> Option<PeerId> {
+        self.peers_by_user.borrow().get(&user).copied()
+    }
+
+    /// What QAROS says `peer`'s device is; `Ok(None)` when the peer list does not hold it.
+    pub fn peer_device(&self, peer: PeerId) -> Result<Option<PeerDevice>, String> {
+        read_peer_device(self, peer)
     }
 
     /// Every render stream request since the last call, oldest first.
@@ -312,6 +334,7 @@ pub fn connect(
         volume_config,
         adapter,
         unanswered_peers_file: options.unanswered_peers_file.clone(),
+        peers_by_user: RefCell::new(BTreeMap::new()),
         session,
         _library_dropped_last: library_dropped_last,
     })

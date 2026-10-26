@@ -7,8 +7,8 @@
 //!   stereo color and depth, written into the frame textures the negotiated layout describes.
 //!   Users come from a [`UserEventSource`] ([`TargetPeers`]: the running target apps in the
 //!   peer list) and a [`frame_sink::RenderPolicy`] decides whom to render for.
-//! - [`QarosPanels`] opens or reattaches a GUI panel per published 2D view, next to the app
-//!   volume, and hides them at Stop for the next run.
+//! - [`QarosPanels`] opens or reattaches a GUI panel per published 2D view and a timeline
+//!   panel, within reach of a headset user's head, and hides them at Stop for the next run.
 //! - With the `vulkan` feature, `vulkan::VulkanSink` implements `frame_sink::GpuFrameSink`
 //!   over one Vulkan render sender per user: the renderer draws into the senders' own images.
 //!
@@ -23,6 +23,9 @@ mod connection;
 mod console_stop;
 mod host_timing;
 mod panels;
+// The peer category and device name are reachable only through the raw table.
+#[allow(unsafe_code)]
+mod peer_devices;
 mod pending;
 mod pixels;
 mod process_exit;
@@ -43,8 +46,10 @@ pub use connection::{
 pub use console_stop::stop_on_console_events;
 pub use host_timing::keep_process_waits_precise;
 pub use panels::{
-    DeadPages, PAGE_SILENCE_LIMIT, PanelActivity, PanelView, PanelsAtStop, QarosPanels,
+    DeadPages, HEADSET_WAIT, PAGE_SILENCE_LIMIT, PanelActivity, PanelView, PanelsAtStop,
+    QarosPanels,
 };
+pub use peer_devices::PeerDevice;
 pub use process_exit::{
     BOUNDED_FLUSH_WAIT, end_process_after_bounded_flush, end_process_after_teardown,
 };

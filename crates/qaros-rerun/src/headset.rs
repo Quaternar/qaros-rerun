@@ -520,8 +520,18 @@ pub struct HeadsetRenderer {
     /// is abandoned, in place of `readback_timeout_in_viewer_frames`, since eye frames on the
     /// render thread come far faster than viewer frames.
     readback_time_limit: Option<Duration>,
-    /// The head of the user the last frame was prepared for, in room space.
-    latest_head: Option<xr_math::Pose>,
+    /// Each user's head in room space, from the last frame prepared for the user, and when.
+    latest_heads: BTreeMap<UserId, (xr_math::Pose, Instant)>,
+}
+
+/// A head prepared longer ago than this belongs to a user who no longer streams.
+const RECENT_HEAD_AGE: Duration = Duration::from_secs(1);
+
+/// A streaming user's head in room space, and whose it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewerHead {
+    pub user: UserId,
+    pub pose: xr_math::Pose,
 }
 
 /// A user's head from the two eye poses of one frame: midway between the eyes, turned like
@@ -549,16 +559,33 @@ impl HeadsetRenderer {
             next_frame_sequence: 0,
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
-            latest_head: None,
+            latest_heads: BTreeMap::new(),
         }
     }
 
-    /// The head of the user this renderer last prepared a frame for, in room space (the sink
-    /// maps every eye pose into the room before it reaches the renderer). Frames of every
-    /// streaming user pass through here, a headset's and a desktop receiver's alike. `None`
-    /// until a stream has started.
-    pub fn latest_head(&self) -> Option<xr_math::Pose> {
-        self.latest_head
+    /// The head of every user this renderer prepared a frame for in the last
+    /// [`RECENT_HEAD_AGE`] before `now`, in room space (the sink maps every eye pose into the
+    /// room before it reaches the renderer), by user. Frames of every streaming user pass
+    /// through here, a headset's and a desktop receiver's alike. Empty until a stream has
+    /// started.
+    pub fn recent_heads(&self, now: Instant) -> Vec<ViewerHead> {
+        self.latest_heads
+            .iter()
+            .filter(|(_, (_, prepared))| {
+                now.saturating_duration_since(*prepared) <= RECENT_HEAD_AGE
+            })
+            .map(|(user, (pose, _))| ViewerHead {
+                user: *user,
+                pose: *pose,
+            })
+            .collect()
+    }
+
+    fn note_head(&mut self, request: &FrameRequest, now: Instant) {
+        self.latest_heads
+            .retain(|_, (_, prepared)| now.saturating_duration_since(*prepared) <= RECENT_HEAD_AGE);
+        self.latest_heads
+            .insert(request.key.user, (head_between_eyes(request), now));
     }
 
     pub fn statistics(&self) -> &HeadsetStatistics {
@@ -814,7 +841,7 @@ impl HeadsetRenderer {
         // flight under the same key belongs to the old stream, whose sink frame is gone.
         self.in_flight
             .retain(|stale| stale.request.key != request.key);
-        self.latest_head = Some(head_between_eyes(&request));
+        self.note_head(&request, Instant::now());
         let frame_sequence = self.next_frame_sequence;
         self.next_frame_sequence += 1;
         let depth_range = self.depth_range;
@@ -1235,8 +1262,83 @@ mod tests {
             next_frame_sequence: 0,
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
-            latest_head: None,
+            latest_heads: BTreeMap::new(),
         }
+    }
+
+    fn request_for(user: u32, left_eye: glam::Vec3, right_eye: glam::Vec3) -> FrameRequest {
+        let fov = xr_math::Fov {
+            angle_left: -0.7,
+            angle_right: 0.7,
+            angle_up: 0.6,
+            angle_down: -0.6,
+        };
+        let turned = glam::Quat::from_rotation_y(0.3);
+        FrameRequest {
+            key: FrameKey {
+                user: UserId(user),
+                frame_id: 7,
+            },
+            views: [
+                ViewRequest {
+                    pose: xr_math::Pose::new(turned, left_eye),
+                    fov,
+                },
+                ViewRequest {
+                    pose: xr_math::Pose::new(turned, right_eye),
+                    fov,
+                },
+            ],
+            resolution_in_pixel: [64, 64],
+        }
+    }
+
+    #[test]
+    fn every_streaming_user_head_is_reported_until_its_frames_stop() {
+        let depth_range =
+            DepthRange::new(0.05, 20.0, xr_math::DepthEncoding::ForwardNormalized).unwrap();
+        let mut renderer = renderer(false, depth_range);
+        let start = Instant::now();
+        assert_eq!(renderer.recent_heads(start), []);
+
+        let glasses = request_for(
+            2,
+            glam::Vec3::new(-0.032, 1.6, 0.0),
+            glam::Vec3::new(0.032, 1.6, 0.0),
+        );
+        let receiver = request_for(
+            1,
+            glam::Vec3::new(0.984, 2.0, 3.0),
+            glam::Vec3::new(1.016, 2.0, 3.0),
+        );
+        renderer.note_head(&glasses, start);
+        renderer.note_head(&receiver, start + Duration::from_millis(10));
+        let turned = glam::Quat::from_rotation_y(0.3);
+        assert_eq!(
+            renderer.recent_heads(start + Duration::from_millis(20)),
+            [
+                ViewerHead {
+                    user: UserId(1),
+                    pose: xr_math::Pose::new(turned, glam::Vec3::new(1.0, 2.0, 3.0)),
+                },
+                ViewerHead {
+                    user: UserId(2),
+                    pose: xr_math::Pose::new(turned, glam::Vec3::new(0.0, 1.6, 0.0)),
+                },
+            ],
+            "the last prepared frame does not hide the other user's head"
+        );
+
+        let later = start + RECENT_HEAD_AGE + Duration::from_millis(5);
+        renderer.note_head(&receiver, later);
+        assert_eq!(
+            renderer.recent_heads(later),
+            [ViewerHead {
+                user: UserId(1),
+                pose: xr_math::Pose::new(turned, glam::Vec3::new(1.0, 2.0, 3.0)),
+            }],
+            "a user whose frames stopped is gone"
+        );
     }
 
     #[test]

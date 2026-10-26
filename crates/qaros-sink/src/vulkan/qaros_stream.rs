@@ -218,6 +218,7 @@ impl QarosVulkanStream {
 
     fn start_creations(&mut self) {
         for (user, peer) in self.users.creations_to_start() {
+            self.connection.note_user_peer(user.id, peer);
             self.start_sender(user, peer);
         }
     }

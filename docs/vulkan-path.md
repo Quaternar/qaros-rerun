@@ -1,6 +1,12 @@
+---
+title: The Vulkan path
+description: How the viewer renders each eye straight into a QAROS Vulkan render sender's images on its own Vulkan device, with no pixel going through the CPU.
+sidebar_position: 5
+---
+
 # The QAROS Vulkan path
 
-`--sink qaros --qaros-graphics vulkan` (the default for `--sink qaros` on Windows) renders each eye of every user straight into the images of that user's QAROS Vulkan render sender, on a Vulkan device the viewer creates on the GPU the session reports; no pixel goes through the CPU on its way out. It follows the public QAROS header and Vulkan cube example at `b1338df` ([CUBE]: header `qar-streaming-c/include/qar_streaming.h`, example `qar-streaming-c/examples/vulkan_cube/`), through the `vulkan` feature of the `qaros` crate ([API]: `qar-streaming-rust/docs/vulkan-api.md` in the QAROS repository). The device side is [vulkan-device.md](vulkan-device.md).
+`--sink qaros --qaros-graphics vulkan` (the default for `--sink qaros` on Windows) renders each eye of every user straight into the images of that user's QAROS Vulkan render sender, on a Vulkan device the viewer creates on the GPU the session reports; no pixel goes through the CPU on its way out. This is the path to follow when your own application renders with Vulkan, or with wgpu on Vulkan. It follows the public QAROS header and Vulkan cube example at `b1338df` ([CUBE]: header `qar-streaming-c/include/qar_streaming.h`, example `qar-streaming-c/examples/vulkan_cube/`), through the `vulkan` feature of the `qaros` crate ([API]: `qar-streaming-rust/docs/vulkan-api.md` in the QAROS repository). The device side is [vulkan-device.md](vulkan-device.md).
 
 ## Startup: session, then device
 
@@ -9,7 +15,7 @@ QAROS creates the sender's images on the application's device, and the session's
 1. **Session.** `connect` onboards (or rejoins) without an adapter: QAROS puts the session on the GPU carried in the launch invite, else the library picks one. With `--launched-by-qaros` it onboards with the launch invite (below).
 2. **Adapter.** `qar_session_get_graphics_device_id` (`Session::graphics_adapter`) names the session's adapter; `QarosConnection::adapter` keeps it. The launch invite carries a GPU only when the target advertised one (`onboarding-and-sessions.mdx` L250), so a session may name none: the device then goes on the first discrete NVIDIA GPU, else the first discrete GPU, else the first device (`PhysicalDeviceSelector::Discrete`), with a warning, and the sink takes it as it is.
 3. **Device.** `VulkanDevice::create` on the physical device with that LUID (Windows) or UUID, with `VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32` added on Windows (`QAROS_WINDOWS_EXTENSIONS`, the cube's `renderer.cpp` L128-129) and Rerun's own features and limits. An adapter that is not there stops the viewer with the list of candidates. egui gets the same device as `WgpuSetup::Existing`.
-4. **Sink.** `QarosVulkanStream::on_device` checks that the device is on the session's adapter and has the extensions QAROS lists (`qaros::vulkan::required_device_extensions`), then `VulkanSink` wraps it. One render sender is created per target the viewer renders for (targets from the peer list, see the README), with the device's `VkPhysicalDevice` and `VkDevice` (`QarStreamParamsVulkan`), separated textures (one color and one depth image per eye, as the cube requests), the app volume, `--color-format` and `D32_FLOAT` depth.
+4. **Sink.** `QarosVulkanStream::on_device` checks that the device is on the session's adapter and has the extensions QAROS lists (`qaros::vulkan::required_device_extensions`), then `VulkanSink` wraps it. One render sender is created per target the viewer renders for (targets from the peer list, see [architecture.md](architecture.md#the-qaros-sink)), with the device's `VkPhysicalDevice` and `VkDevice` (`QarStreamParamsVulkan`), separated textures (one color and one depth image per eye, as the cube requests), the app volume, `--color-format` and `D32_FLOAT` depth.
 
 `--vulkan-device SELECTOR` overrides the order: the device is created first on the named physical device, and its adapter is chained into onboarding as `QarGraphicsDeviceId` (its LUID on Windows, its UUID elsewhere; the header accepts LUIDs on Windows only).
 
@@ -49,15 +55,24 @@ QAROS reprojects every received frame to the viewer's latest head pose using the
 - depth of the color's size is written in the color's pass, pixel for pixel, as above;
 - depth of another size gets a pass of its own after the color pass. Each depth pixel takes the nearest depth (largest reverse-Z) of the eye pixels it covers, then the same conversion to the `--depth` encoding. Nearest rather than averaged, so drawn content is never pushed behind what another app volume shows, and an edge pixel half covered counts as covered.
 
-`--depth-scale-down N` (with `--image-targets gpu`) makes the image sink's targets hand out depth N times smaller in each dimension, to test and time that pass on the Mac. The written PNGs and raw dumps repeat each depth pixel N x N times to keep the eye's size.
+For development, `--depth-scale-down N` (with `--image-targets gpu`) makes the image sink's targets hand out depth N times smaller in each dimension, so that pass runs without QAROS. The written PNGs and raw dumps repeat each depth pixel N x N times to keep the eye's size.
 
 ## Launched by QAROS
 
 `--launched-by-qaros` implements the API app contract of [LAUNCH] as of `b1338df`: the first line of stdin is the JSON launch invite (`qar_onboarding_invite_deserialize`, then onboarding with it), or a code when it does not start with `{`; it is used for every start (never stored, never logged, no rejoin); the GPU travels in the invite, and the viewer creates its device on the adapter the session then reports; the viewer creates its own app volume "rerun"; end of stdin closes the viewer, windowed or headless. The operator enters the viewer's other arguments in the visualizer's Source Applications panel, one per line, for example `--sink`, `qaros`, `--qaros-graphics`, `vulkan`, `--launched-by-qaros`.
 
+## Things the QAROS header leaves open
+
+Points to watch when you build the same path into your own application:
+
+- **Queue access.** wgpu and the release batches submit to queue 0 of family 0. If QAROS submits to the same `VkQueue` from its own threads, the two must not overlap. The viewer serializes its own submissions with a process-wide lock ([decoupled-render.md](decoupled-render.md#queue-access)).
+- **Image usage.** The header reports format features but not usage flags; the sink wraps the images for render attachment use only.
+- **Depth size.** The "streaming to peer ... views" log line lists each image's size, so the log shows whether QAROS hands out depth at the color's resolution or smaller (the resampled pass then runs).
+- **Adapter.** The device must be on the session's adapter: on a laptop with two GPUs, the LUID `qar_session_get_graphics_device_id` reports decides which GPU renders.
+
 ## Running it on the Mac
 
-As in [vulkan-device.md](vulkan-device.md#running-on-the-mac): Homebrew's `molten-vk` and `vulkan-loader`, `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`, and the toolchain's own `cargo` for tests. `qaros-stub` emulates the Vulkan sender on the caller's device: plain images and a binary semaphore, a check of the write-back at every show and a wait on the semaphore ([API], "Against `qaros-stub`").
+For development, the path runs against `qaros-stub` on MoltenVK. Setup as in [vulkan-device.md](vulkan-device.md#running-on-the-mac): Homebrew's `molten-vk` and `vulkan-loader`, `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`, and the toolchain's own `cargo` for tests. `qaros-stub` emulates the Vulkan sender on the caller's device: plain images and a binary semaphore, a check of the write-back at every show and a wait on the semaphore ([API], "Against `qaros-stub`"). The stub's images are plain device-local images, so the Win32 external memory export that QAROS uses on Windows is not exercised there.
 
 ```sh
 export DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib
@@ -84,22 +99,7 @@ export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_KHRONOS_VALIDATION_REPO
 export VK_KHRONOS_VALIDATION_DEBUG_ACTION=VK_DBG_LAYER_ACTION_LOG_MSG VK_KHRONOS_VALIDATION_LOG_FILENAME=validation.txt
 ```
 
-What the Mac shows ([evidence/vulkan-path/runs.log](evidence/vulkan-path/runs.log)):
-
-- **Viewer against the stub:** the device is created on the MoltenVK device, the session is onboarded with the launch code and the device's UUID chained (`adapter uuid=...` in the stub's log), the sender gets four 64x64 images, 1433 frames are shown with every write-back accepted and every semaphore consumed, no stub error, each in the viewer frame its eyes were drawn in; closing stdin stops the viewer with exit status 0 and teardown runs in order.
-- **GPU targets into PNGs** (`--image-targets gpu`, [evidence/vulkan-path](evidence/vulkan-path)): the color PNGs of frames 0 and 30 are byte-identical to the CPU path's on the same device, and for frame 0 to the Metal evidence in [evidence](evidence); the output pass reproduces Rerun's screenshot path exactly, transparency included. Raw depth (`--raw-depth`) differs from the CPU path's in about 1.3% of the pixels, by at most 3 ULPs (1.8e-7); with MoltenVK's fast math off (`MVK_CONFIG_FAST_MATH_ENABLED=0`) for both runs, color, depth PNG and raw depth are byte-identical, so the difference is the fast-math division of the conversion in the shader, not the depth itself. With `--depth-scale-down 2`, color is still byte-identical, and every depth pixel equals the smallest forward depth of its 2x2 block in the CPU run, within 1.8e-7.
-- **Per-frame time** (release builds, same scene, 300 frames, three runs each; [runs.log](evidence/vulkan-path/runs.log) section 4): with the readback, 28.8 ms per frame at 960x1000 per eye, 61.6 ms at 1832x1920 and 18.2 ms against the stub (64x64); with depth on the GPU, 16.6, 45.2 and 9.7 ms. Begin-to-show drops by about one viewer frame. With depth at half the resolution (`--depth-scale-down 2`), 15.6 and 39.3 ms; at a quarter, 15.8 and 33.7 ms (section 5). The image-sink rows include that sink's own readback of its targets with a device wait per frame, which shrinks with the depth too, so they overstate what the renderer itself saves. These are Apple GPU numbers through MoltenVK and do not predict an NVIDIA GPU.
-- **Tests:** `HandoverQueue` acquires an image from `UNDEFINED` and then from the external family, renders into it with wgpu and releases it, three frames in a row, with a consumer batch that acquires, copies and gives the image back (`crates/vulkan-device/tests/handover.rs`); `VulkanSink` over a local stream with its own images and semaphore checks pixels, depth values, written-back states, one frame in flight, the stop after N frames, the semaphore of an abandoned frame and of a frame open at drop, and the refusal of linear depth (`crates/qaros-sink/tests/vulkan_sink.rs`); `QarosVulkanStream` against the stub checks the adapter on rejoin, the refusal of a session without adapter, three frames' pixels read back from the sender's images, the stub's write-back check, a discarded frame and a clean teardown (`crates/qaros-sink/tests/stub.rs`); `EyeOutput` on the Vulkan device writes depth within 1e-6 of `xr_math`'s conversion in both normalized encodings, keeps the nearest depth of each footprint for a smaller depth target, clears uncovered pixels unless the background is opaque, and refuses linear depth for a depth target (`crates/qaros-rerun/src/eye_output.rs`); `VulkanSink` hands out depth images smaller than color at their own size.
-- **Khronos validation layer** (Homebrew's `vulkan-validationlayers` 1.4.363, `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`, messages to a file): the handover, sink and stub tests report nothing, and the viewer against the stub and the image sink with `--image-targets gpu` report only `VUID-StandaloneSpirv-None-10684`, from the SPIR-V naga generates for Rerun's shaders, the same count as a run with `--image-targets cpu`. With the release barrier's old layout deliberately wrong the layer reports the mismatch, so it does track these images. MoltenVK ignores most layout errors on its own, so this is the check that matters on the Mac.
-
-## What the Mac does not exercise
-
-- **Real external memory.** On MoltenVK the stub's images are plain device-local images and its semaphore a plain binary semaphore; the release to `VK_QUEUE_FAMILY_EXTERNAL` and the acquire back are legal there but exercise none of the Win32 export. On Windows the images are shared with QAROS's encoder through `VK_KHR_external_memory_win32`.
-- **The adapter by LUID.** The LUID `qar_session_get_graphics_device_id` reports, matched against `deviceLUID`, and the device created there.
-- **Image usage and formats.** The header reports format features but not usage flags; the sink wraps the images for render attachment use only. The stub creates them with attachment usage.
-- **Queue access.** wgpu and the release batches submit from the viewer's UI thread to queue 0 of family 0. If QAROS submits to the same `VkQueue` from its own threads (the stub does so inside `show_frame`, on the calling thread), the two must not overlap.
-- **Depth size.** The "streaming to peer ... views" line lists each image's size, so the log shows whether QAROS hands out depth at the color's resolution or smaller (the resampled pass then runs).
-- **The viewer build itself.** `vulkan-device`, `frame-sink` with `gpu` and `qaros-sink` with `vulkan` check and pass clippy for `x86_64-pc-windows-msvc` from the Mac; the viewer crate is built and checked on Windows.
+The tests for this path are `crates/vulkan-device/tests/handover.rs` (acquire, render, release, with a consumer batch standing in for QAROS), `crates/qaros-sink/tests/vulkan_sink.rs` (the sink over a local stream), `crates/qaros-sink/tests/stub.rs` (the stream against the stub) and the unit tests in `crates/qaros-rerun/src/eye_output.rs` (depth conversion, the smaller depth target, transparency). They also run under the Khronos validation layer with the variables above.
 
 To run the path on Windows, see the [integration guide](integration-guide.md#choose-the-path-vulkan-or-cpu).
 
