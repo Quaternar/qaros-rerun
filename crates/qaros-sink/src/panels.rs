@@ -53,12 +53,12 @@ const TIMELINE_PANEL_NAME: &str = "timeline.panel";
 /// Wide and short for a slider: the track takes 0.36 m, the Play button 0.09 m by 0.12 m.
 const TIMELINE_PANEL_WIDTH_METERS: f32 = 0.45;
 const TIMELINE_PANEL_HEIGHT_METERS: f32 = 0.12;
-/// How far in front of the user's head the timeline panel's centre stands, along the gaze on
-/// the floor plane.
 /// The wait before retrying a failed panel listing, the first time.
 const LISTING_RETRY_FAST: Duration = Duration::from_millis(500);
 /// The wait before every later retry.
 const LISTING_RETRY_SLOW: Duration = Duration::from_secs(30);
+/// How far in front of the user's head the timeline panel's centre stands, along the gaze on
+/// the floor plane.
 const TIMELINE_FORWARD_METERS: f32 = 0.5;
 /// How far below the user's eyes the timeline panel's centre sits.
 const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
