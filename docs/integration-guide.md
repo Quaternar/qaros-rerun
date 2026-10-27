@@ -171,7 +171,7 @@ To stop: Ctrl+C in the viewer's console, closing its window, or Stop in QAROS. T
 .\target\release\qaros-rerun.exe --sink qaros --pairing-code <PAIRING-CODE> --panels 0.0.0.0:9877
 ```
 
-**Started by QAROS.** In the visualizer, switch to Developer mode and add `qaros-rerun.exe` in the Source Applications panel as a QAROS API app ([Source Applications][SOURCE-APPS]), with its arguments one per line: `--sink`, `qaros`, `--launched-by-qaros`. QAROS passes a launch invite on stdin, and Stop in the panel closes stdin, which ends the viewer. Started this way the viewer runs headless at 1280x720 unless you add `--window` or `--headless WxH`. Its working directory is the executable's folder, so set `QAROS_DLL` for the system or add `--qaros-library` and the path as two more lines. The viewer's output lands in the Hub's log folder.
+**Started by QAROS.** In the visualizer, switch to Developer mode and add `qaros-rerun.exe` in the Source Applications panel as a QAROS API app ([Source Applications][SOURCE-APPS]), with its arguments one per line: `--sink`, `qaros`, `--launched-by-qaros`. On Windows the viewer then joins as a local app (the Hub asks to allow it on its first start); elsewhere QAROS passes a launch invite on stdin. Stop in the panel closes stdin, which ends the viewer. Started this way the viewer runs headless at 1280x720 unless you add `--window` or `--headless WxH`. Its working directory is the executable's folder, so set `QAROS_DLL` for the system or add `--qaros-library` and the path as two more lines. The viewer's output lands in the Hub's log folder.
 
 ## Send your own data
 
@@ -366,7 +366,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--local-app` | off | Join the Hub on this machine as a local app, with no code or invite; excludes `--pairing-code` and `--onboarding-id-file` |
 | `--pairing-code CODE` | none | The Hub's current pairing code for the first start; also used when a stored id cannot be rejoined |
 | `--onboarding-id-file PATH` | `qaros-rerun.onboarding-id.txt` | Where the onboarding id is kept; `qaros-rerun.unanswered-peers.txt` goes next to it |
-| `--launched-by-qaros` | off | Onboard with the first line of stdin (the launch invite, or a code typed by hand) and stop when stdin closes; runs headless at 1280x720 unless `--window` or `--headless` is given |
+| `--launched-by-qaros` | off | Join as QAROS expects of an app it launches (as a local app on Windows; elsewhere with the first line of stdin, the launch invite or a code typed by hand) and stop when stdin closes; runs headless at 1280x720 unless `--window` or `--headless` is given |
 | `--qaros-library PATH` | `QAROS_DLL`, else the default lookup | The `qar-streaming-c` library |
 | `--qaros-graphics cpu\|vulkan` | `vulkan` on Windows, `cpu` elsewhere | How frames reach QAROS ([Choose the path](#choose-the-path-vulkan-or-cpu)) |
 | `--pose-space app\|room` | `app` | Space of the stream's eye poses: `app` maps them into the room with `--origin`, `--yaw` and `--scale` and reports near and far in app units; `room` takes them as they come |

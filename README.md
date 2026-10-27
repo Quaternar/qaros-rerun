@@ -120,6 +120,7 @@ The tests load `qaros-stub` instead of QAROS, so they need no Hub and no headset
 | [docs/vulkan-path.md](docs/vulkan-path.md) | The QAROS Vulkan path: startup order, one frame, the hand-over, depth |
 | [docs/vulkan-device.md](docs/vulkan-device.md) | The Vulkan device the viewer creates |
 | [docs/decoupled-render.md](docs/decoupled-render.md) | The experimental decoupled render loop (`--decoupled-render`) |
+| [docs/known-issues.md](docs/known-issues.md) | QAROS runtime behaviour the viewer works around: symptom, cause, workaround, build seen on, status |
 | [docs/decisions/](docs/decisions/README.md) | Architecture decision records |
 
 The viewer also builds and runs on a Mac, without QAROS: with a PNG image sink or against `qaros-stub`, for development and tests. See [docs/mac.md](docs/mac.md).

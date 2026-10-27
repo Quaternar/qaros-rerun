@@ -26,13 +26,15 @@ The vendored `re_renderer` exports `queue_submission_lock()`, a process-wide mut
 
 - Positive: every submit in the process that we know of is serialized; the Vulkan path keeps its single-submitter assumption.
 - Negative: with the Vulkan sink, the UI thread's `before_submit` can wait for a sink call on the render thread. The eyes wait for the UI thread at most for one of its submits.
-- Negative: the lock does not cover QAROS's own threads, if they submit to the adopted device's queue (unstated, as before).
+- Negative: the lock does not cover QAROS's own threads. "QAROS may submit on its own queues" ([VKA] L54); whether those can include wgpu's queue is not documented.
 - Negative: with the Vulkan sink, a write of the unanswered-targets file (ADR-0040) during a sink call happens under the lock; rare and small.
 
 ## Evidence and sources
 
 - [CODE] `patches/re_renderer/src/context.rs` (`queue_submission_lock`), `crates/qaros-rerun/src/decoupled.rs` (`sink_submission_lock`), `crates/qaros-rerun/src/eye_render.rs`, `crates/qaros-rerun/src/panel_render.rs` (`PanelRenderer::submit`), `crates/frame-sink/src/gpu.rs` (`submits_outside_wgpu`).
 - [VK] `crates/vulkan-device/src/handover.rs` (`submit_handover`, `submit_raw`), `crates/vulkan-device/src/semaphores.rs` (`wait_queue_idle`, `submit_sync_batch`).
+- [VKA] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/docs/vulkan-api.md` L54.
 
 [CODE]: ../../patches/re_renderer/src/context.rs "Queue submission lock"
 [VK]: ../../crates/vulkan-device/src/handover.rs "Raw Vulkan hand-off"
+[VKA]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-rust/docs/vulkan-api.md "qaros Vulkan API"

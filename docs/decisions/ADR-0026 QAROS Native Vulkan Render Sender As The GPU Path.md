@@ -24,7 +24,7 @@ The GPU path is QAROS's own Vulkan render sender. The `qaros` crate (feature `vu
 ## Consequences
 
 - Positive: on a Windows laptop the Vulkan sender path on its own, through the `qaros` crate without the viewer's rendering, reaches 218 fps (960x1000) and 177 fps (1832x1920) GPU to GPU, pixel-exact, validation layer silent; the viewer shows a frame about 3 ms after beginning it, so its rate is the viewer's own frame time.
-- Negative: the contract is documented mostly by the cube; image format, usage, initial state and the fence rule are inferred from it (the first frame reports `TRANSFER_SRC_OPTIMAL` on the external family, not `UNDEFINED`).
+- Positive: the contract is documented: "the real runtime reports `TRANSFER_SRC_OPTIMAL` owned by `VK_QUEUE_FAMILY_EXTERNAL` from the first frame on", and after rendering every image is left in `TRANSFER_SRC_OPTIMAL`, released to the external family ([VKT] L673); `set_fence(vk::Fence::null())` "is what the C cube writes" ([VKT] L669, [VKA]).
 - Negative: two targets at 1832x1920 reach 18.7 fps each headless; per-user render cost is the limit (ADR-0020).
 
 ## Evidence and sources
@@ -33,8 +33,12 @@ The GPU path is QAROS's own Vulkan render sender. The `qaros` crate (feature `vu
 - [EV] `docs/evidence/vulkan-path/` (GPU path frames, `runs.log`).
 - [QC] The `qaros` crate in `Quaternar/qaros` at the revision pinned in `Cargo.toml`.
 - [CUBE] QAROS Vulkan cube example at `b1338df`.
+- [VKT] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/tutorials/rust/vulkan-rendering.mdx` L669, L673.
+- [VKA] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/docs/vulkan-api.md`.
 
 [VP]: ../vulkan-path.md "The QAROS Vulkan path"
 [EV]: ../evidence/vulkan-path/runs.log "Vulkan path runs"
 [QC]: https://github.com/Quaternar/qaros "QAROS"
 [CUBE]: https://github.com/Quaternar/qaros/tree/b1338df/qar-streaming-c/examples/vulkan_cube "QAROS Vulkan cube example"
+[VKT]: https://github.com/Quaternar/qaros/blob/ebfe3bf/docs/website/docs/developer-guide/tutorials/rust/vulkan-rendering.mdx "Rust Vulkan rendering tutorial"
+[VKA]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-rust/docs/vulkan-api.md "qaros Vulkan API"

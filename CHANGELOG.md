@@ -6,12 +6,21 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Added
 
-- A timeline panel per viewer with `--panels`, in every demo whether or not it has 2D views: a slider and a Play button filling a 0.45 m by 0.12 m GUI panel that opens 0.5 m in front of the head that places the panels and 0.5 m below its eyes, tilted to face them. Dragging the slider with a finger pauses the viewer and moves its time cursor to that point of the recording, and Play resumes playback. The page (`/timeline-panel` on the panel server) sends `/timeline?at=<fraction>` and `/timeline?play`; it takes the mouse input of QAROS's Ultralight panels and the touch input of its CEF panels.
+- A timeline panel per viewer with `--panels`, in every demo whether or not it has 2D views: a slider and a Play button filling a 0.45 m by 0.12 m GUI panel that opens 0.5 m in front of the head that places the panels and 0.2 m below its eyes, tilted to face them. Dragging the slider with a finger pauses the viewer and moves its time cursor to that point of the recording, and Play resumes playback. The page (`/timeline-panel` on the panel server) sends `/timeline?at=<fraction>` and `/timeline?play`; it takes the mouse input of QAROS's Ultralight panels and the touch input of its CEF panels.
 - The timeline panel's thumb follows the viewer's time cursor, during playback and when the desktop time bar moves. The viewer publishes the cursor as a fraction of the recording's time range each frame, and the page polls `/timeline/position` every 250 ms, a PNG whose width is 1 plus the fraction in thousandths. Polled positions wait while a finger drags the thumb and for a second after the last seek.
+- `docs/known-issues.md`: QAROS behaviour the viewer works around, with symptom, cause, workaround, the build it was seen on and its status.
+- Architecture decisions on panel placement within reach of a headset (ADR-0070), the headset chosen by device category (ADR-0071), the timeline panel (ADR-0072), the panel listing retry (ADR-0073), local-app onboarding (ADR-0074) and closed panels claimed again by name (ADR-0075); panels claimed by common name (ADR-0054), the user lifecycle (ADR-0055) and the pairing-code fallback (ADR-0056) are published. ADR-0049's pose rule is superseded by ADR-0070, and the ADRs on depth and color, URI panels, the Vulkan path, the launch contract, target discovery, the session adapter, begin-frame polling, sender creation and the queue lock cite the current QAROS headers and docs.
 
 ### Changed
 
-- New panels open within reach of a headset: the viewer asks QAROS for each streaming peer's device category (`qar_peer_spec_get_category`) and places panels by the first `QAR_DEVICE_CATEGORY_HEADSET` head near the app volume. A Display Receiver (a Visualizer receiver) or a viewer whose category QAROS cannot say places them only when no headset streamed within 20 s of the first head near the volume. The log names the viewer, its peer and its device.
+- New panels open within reach of a headset: the viewer asks QAROS for each streaming peer's device category (`qar_peer_spec_get_category`) and places panels by the first `QAR_DEVICE_CATEGORY_HEADSET` head near the app volume. A Display Receiver (a Visualizer receiver) or a viewer whose category QAROS cannot say places them only when no headset streamed within 60 s of the first head near the volume. The log names the viewer, its peer and its device.
+- `--launched-by-qaros` on Windows joins as a local app, as QAROS expects of an app it launches there, and reads no launch invite from stdin; stdin still signals Stop. Other platforms keep the stdin launch invite.
+- The stop watchdog ends the process 600 ms after a stop request when the teardown has not, so with its bounded flush of at most 200 ms the exit and its log line land before QAROS kills the app, about 1 s after closing stdin.
+- A failed panel listing opens no panel and is retried after 0.5 s, then every 30 s, instead of at every sync.
+
+### Fixed
+
+- Both render senders declare premultiplied alpha (`ColorAlphaMode::Premultiplied`), so the mixer blends the stream by its coverage; an undeclared stream is drawn opaque, uncovered pixels included.
 
 ## [0.1.0]
 

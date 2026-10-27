@@ -14,7 +14,7 @@ In the QAROS Vulkan model, as the public StereoKit branch `feature/qar-vulkan-0.
 
 ## Decision
 
-A `vulkan-device` crate creates a wgpu device on a `VkDevice` the application opens: wgpu creates the instance; a picker chooses the physical device by name, UUID, LUID or index (`VkPhysicalDeviceIDProperties`); extra extensions are checked first, then added through `open_with_callback` with Rerun's own features and limits; the device goes to eframe and the headless harness as `WgpuSetup::Existing`. The crate exposes raw handles, wraps foreign `VkImage`s as wgpu textures, and stages semaphores or raw batches. On Windows the QAROS set is `VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32` (`QAROS_WINDOWS_EXTENSIONS`, from the cube's `renderer.cpp` L128-129).
+A `vulkan-device` crate creates a wgpu device on a `VkDevice` the application opens: wgpu creates the instance; a picker chooses the physical device by name, UUID, LUID or index (`VkPhysicalDeviceIDProperties`); extra extensions are checked first, then added through `open_with_callback` with Rerun's own features and limits; the device goes to eframe and the headless harness as `WgpuSetup::Existing`. The crate exposes raw handles, wraps foreign `VkImage`s as wgpu textures, and stages semaphores or raw batches. On Windows the QAROS set is `VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32` (`QAROS_WINDOWS_EXTENSIONS`, from the cube's `renderer.cpp` L128-129), the same set the `qaros` crate's `vulkan::required_device_extensions()` returns on Windows ([QV] L80-92).
 
 ## Alternatives considered
 
@@ -33,8 +33,10 @@ A `vulkan-device` crate creates a wgpu device on a `VkDevice` the application op
 - [EV] `docs/evidence/vulkan-device-run.log`.
 - [SKQ] StereoKit branch `feature/qar-vulkan-0.4`, `StereoKitC/qar_vulkan.h`.
 - [CUBE] QAROS Vulkan cube example at `b1338df`.
+- [QV] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/crates/qaros/src/vulkan.rs` L80-92 (`required_device_extensions`).
 
 [VD]: ../vulkan-device.md "Vulkan device"
 [EV]: ../evidence/vulkan-device-run.log "Vulkan device run"
 [SKQ]: https://github.com/Quaternar/StereoKit/blob/feature/qar-vulkan-0.4/StereoKitC/qar_vulkan.h "qar_vulkan.h"
 [CUBE]: https://github.com/Quaternar/qaros/tree/b1338df/qar-streaming-c/examples/vulkan_cube "QAROS Vulkan cube example"
+[QV]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-rust/crates/qaros/src/vulkan.rs "qaros Vulkan module"

@@ -121,7 +121,8 @@ pub trait PanelActivity {
 /// whose head is near the app volume, or of any viewer near it once none came for
 /// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]); until such a head is known, views without
 /// a panel wait. A panel an earlier run left is reattached by its common name
-/// as it is. Closing the panels in the Hub Display makes the next run create them afresh.
+/// as it is. A panel closed in the Hub Display is claimed again by its common name, never
+/// replaced under a new one (ADR-0075).
 /// When this value drops the panels stay in the session, hidden or kept as [`PanelsAtStop`]
 /// says.
 pub struct QarosPanels {

@@ -19,20 +19,26 @@ The cube example transitions each sender image from its reported layout and queu
 ## Alternatives considered
 
 - Stage semaphores on wgpu's own submit: they attach to the next submit, possibly egui's or Rerun's.
-- Wait for the GPU before `show_frame`, as the cube does: costs a loop turn per frame; the documentation does not say whether it is required.
+- Wait for the GPU before `show_frame`, as the C cube does: costs a loop turn per frame and is not required. The Rust Vulkan sample "waits on a slot's fence only when it reuses the slot, never for the frame just submitted: the frame's semaphore hands that work to QAROS, which waits for it on the GPU" ([VKT] L790), and the header asks only that layouts, queue ownership and synchronization be updated on the frame before `qar_render_sender_show_frame` ([HDR] L3975-3983).
 - Wrap once and track layouts: wgpu would assume `UNDEFINED` and lose the reported state.
 
 ## Consequences
 
 - Positive: same barriers and order as the cube; pixel-exact on the Windows QAROS package with the Khronos validation layer silent.
-- Negative: relies on QAROS not submitting to the same queue from its own threads (undocumented); a failed read of a frame record leaves its semaphore unsignalled (open).
+- Negative: "QAROS may submit on its own queues" ([VKA] L54); whether those can include wgpu's queue, which our raw batches share, is not documented. A frame whose record cannot be read is dropped and its user's sender released (ADR-0055).
 
 ## Evidence and sources
 
 - [VP] `docs/vulkan-path.md`, "One frame".
 - [HO] `crates/vulkan-device/src/handover.rs`, `crates/vulkan-device/tests/handover.rs`; `crates/qaros-sink/src/vulkan/sink.rs`.
 - [CUBE] QAROS Vulkan cube example at `b1338df`.
+- [VKT] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/tutorials/rust/vulkan-rendering.mdx` L790.
+- [VKA] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/docs/vulkan-api.md` L54.
+- [HDR] QAROS header at `ebfe3bf`, `qar-streaming-c/include/qar_streaming.h` L3975-3983 (`qar_render_sender_frame_vulkan`).
 
 [VP]: ../vulkan-path.md "The QAROS Vulkan path"
 [HO]: ../../crates/vulkan-device/src/handover.rs "Hand-over queue"
 [CUBE]: https://github.com/Quaternar/qaros/tree/b1338df/qar-streaming-c/examples/vulkan_cube "QAROS Vulkan cube example"
+[VKT]: https://github.com/Quaternar/qaros/blob/ebfe3bf/docs/website/docs/developer-guide/tutorials/rust/vulkan-rendering.mdx "Rust Vulkan rendering tutorial"
+[VKA]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-rust/docs/vulkan-api.md "qaros Vulkan API"
+[HDR]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-c/include/qar_streaming.h "QAROS C header"

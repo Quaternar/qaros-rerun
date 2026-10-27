@@ -1,7 +1,8 @@
 ---
 id: ADR-0049
 title: Panels posed by their top-edge midpoint, turned half a turn to face the viewer, named by the LAN address
-status: accepted
+status: superseded
+superseded_by: ADR-0070
 date: 2026-10-14
 repo: qaros-rerun
 ---
@@ -39,6 +40,7 @@ With `--panels 0.0.0.0:<port>` and no `--panel-base-url`, the base URL is named 
 - Positive: headsets on the LAN can load the panel pages whichever side fetches them.
 - Negative: a viewer standing behind the volume (its -Z side) sees the panels' backs; this follows from the assumption above and is unverified on headsets.
 - Negative: a machine with several networks (VPN, virtual adapters) may name the wrong one when it has no default route; the log line shows the choice and `--panel-base-url` corrects it.
+- Superseded by ADR-0070 for the pose: new panels open within reach of a headset user's head, and the mixer turns every panel toward each viewer's head. The pose convention (top-edge midpoint, -Z front) and the LAN-address base URL stand, and ADR-0070 keeps both. `panel_pose_beside_volume` remains as the pose a panel config carries before any head is known; no new panel opens before then, and the Hub ignores it for a panel that exists.
 
 ## Evidence and sources
 
