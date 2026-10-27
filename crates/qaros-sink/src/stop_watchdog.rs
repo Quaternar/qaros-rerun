@@ -1,9 +1,9 @@
 //! A deadline of the viewer's own for every stop request.
 //!
-//! QAROS kills an app it stopped about 1.3 s after the Stop (`onboarding-and-sessions.mdx`
-//! L278 at `b1338df`). A teardown ended by that kill loses the log tail and the exit line, so
-//! the watchdog ends the process itself a little earlier, after one line naming the teardown
-//! step still in progress.
+//! QAROS kills an app it stopped when it has not exited about 1 s after closing its stdin
+//! (`onboarding-and-sessions.mdx` L611 at `ebfe3bf`). A teardown ended by that kill loses the
+//! log tail and the exit line, so the watchdog ends the process itself well before, after one
+//! line naming the teardown step still in progress.
 
 use std::sync::Once;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use crate::process_exit::end_process_after_bounded_flush;
 
-/// How long the process may run after a stop request before the watchdog ends it: inside
-/// QAROS's 1.3 s, with room for the bounded flush.
-pub const STOP_DEADLINE: Duration = Duration::from_secs(1);
+/// How long the process may run after a stop request before the watchdog ends it: with the
+/// bounded flush after it, well inside QAROS's 1 s.
+pub const STOP_DEADLINE: Duration = Duration::from_millis(600);
 
 /// Exit code of a process the watchdog ended before its teardown was done.
 pub const STOP_DEADLINE_CODE: i32 = 1;
@@ -167,7 +167,7 @@ mod tests {
                 STOP_DEADLINE,
                 TeardownStep::SessionDestroy
             ),
-            "qaros: still running 3157 ms after the stop request (deadline 1s), in teardown \
+            "qaros: still running 3157 ms after the stop request (deadline 600ms), in teardown \
              step session destroy; ending the process"
         );
     }
@@ -181,8 +181,12 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_and_its_flush_end_the_process_inside_qaros_kill_window() {
-        let qaros_kill_after_stop = Duration::from_millis(1300);
-        assert!(STOP_DEADLINE + crate::BOUNDED_FLUSH_WAIT < qaros_kill_after_stop);
+    fn the_deadline_and_its_flush_end_the_process_well_inside_qaros_kill_window() {
+        let qaros_kill_after_closing_stdin = Duration::from_secs(1);
+        let margin_for_a_late_watchdog_wake = Duration::from_millis(200);
+        assert!(
+            STOP_DEADLINE + crate::BOUNDED_FLUSH_WAIT + margin_for_a_late_watchdog_wake
+                <= qaros_kill_after_closing_stdin
+        );
     }
 }

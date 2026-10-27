@@ -2,7 +2,8 @@
 //! this test process loads the QAROS package and QuaternAR's test extension, starts an
 //! extension hub and one extension viewer peer per target, mints a launch invite, and starts
 //! the release viewer as a QAROS API app would be started (`--launched-by-qaros`, the invite
-//! on stdin, headless). The viewer finds the targets in the peer list and creates a sender per
+//! on stdin, headless). On Windows a viewer launched by QAROS joins as a local app and never
+//! reads the invite, so there the test needs a Hub that allows it. The viewer finds the targets in the peer list and creates a sender per
 //! target; each peer's render receiver requests frames, and every frame of every target must
 //! arrive in order, with the scene in it.
 //!

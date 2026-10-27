@@ -8,8 +8,8 @@ use std::rc::Rc;
 use frame_sink::{EYE_COUNT, MaxUsers, ShowInfo, SinkError, UserId, UserInfo};
 use qaros::vulkan::{VulkanImage, VulkanStreamParams, assumed_vk_format};
 use qaros::{
-    Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat, RenderSender,
-    RenderSenderConfig, StatusCode, VideoFrameView, ViewKind,
+    AppVolumeId, ColorAlphaMode, Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat,
+    RenderSender, RenderSenderConfig, StatusCode, VideoFrameView, ViewKind,
 };
 use vulkan_device::{VulkanDevice, VulkanDeviceHandles, vk};
 use xr_math::Fov;
@@ -21,6 +21,24 @@ use crate::connection::QarosConnection;
 use crate::pending::{FinishedCreation, PendingSenders};
 use crate::sink::{PoseMapping, PoseSpace};
 use crate::users::{Admission, PeerUsers, ReleaseCause, TargetPeers};
+
+/// The Vulkan render sender's configuration: premultiplied alpha is declared because Rerun's
+/// composite carries it (ADR-0050), and QAROS draws an undeclared stream as opaque.
+fn stream_config(
+    peer: PeerId,
+    volume: AppVolumeId,
+    color_format: PixelFormat,
+) -> RenderSenderConfig {
+    RenderSenderConfig {
+        views: STREAM_VIEWS.to_vec(),
+        app_volume: Some(volume),
+        color_format,
+        depth_format: PixelFormat::D32Float,
+        layout: FrameLayout::SeparatedTextures,
+        alpha_mode: ColorAlphaMode::Premultiplied,
+        ..RenderSenderConfig::new(peer)
+    }
+}
 
 /// One texture per eye and kind, the cube's `QAR_FRAME_LAYOUT_SEPARATED_TEXTURES` request.
 const STREAM_VIEWS: [FrameViewSpec; 4] = [
@@ -224,14 +242,7 @@ impl QarosVulkanStream {
     }
 
     fn start_sender(&mut self, user: UserInfo, peer: PeerId) {
-        let config = RenderSenderConfig {
-            views: STREAM_VIEWS.to_vec(),
-            app_volume: Some(self.connection.volume()),
-            color_format: self.options.color_format,
-            depth_format: PixelFormat::D32Float,
-            layout: FrameLayout::SeparatedTextures,
-            ..RenderSenderConfig::new(peer)
-        };
+        let config = stream_config(peer, self.connection.volume(), self.options.color_format);
         #[allow(unsafe_code)]
         // SAFETY: the parameters are the raw handles of the device `new` was given, under its
         // contract: on the session's adapter, with the required extensions, outliving this
@@ -744,6 +755,12 @@ mod tests {
             layout: vk::ImageLayout::UNDEFINED,
             queue_family_index: vk::QUEUE_FAMILY_IGNORED,
         }
+    }
+
+    #[test]
+    fn the_stream_declares_premultiplied_alpha() {
+        let config = stream_config(PeerId::ZERO, AppVolumeId::ZERO, PixelFormat::R8G8B8A8);
+        assert_eq!(config.alpha_mode, ColorAlphaMode::Premultiplied);
     }
 
     #[test]

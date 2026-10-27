@@ -5,8 +5,9 @@
 //! read the session's adapter (`qar_session_get_graphics_device_id`), then create the viewer's
 //! own Vulkan device on it; the sink renders into each user's Vulkan render sender images.
 //! `--vulkan-device` overrides that: its device exists first and its adapter is chained into
-//! onboarding. With `--launched-by-qaros` the launch invite comes from stdin and the viewer
-//! stops when stdin closes ("Launched by QAROS" in `onboarding-and-sessions.mdx`).
+//! onboarding. With `--launched-by-qaros` the viewer stops when stdin closes; on Windows it
+//! joins as a local app, elsewhere the launch invite comes from stdin ("Launched by QAROS" in
+//! `onboarding-and-sessions.mdx`).
 
 use std::collections::HashMap;
 use std::io::BufRead as _;
@@ -30,7 +31,7 @@ use vulkan_device::{PhysicalDeviceIdentity, PhysicalDeviceSelector, VulkanDevice
 
 use crate::device_setup::GraphicsChoice;
 use crate::headset::HeadsetSink;
-use crate::options::{ColorFormatKind, Options, PoseSpaceKind, QarosGraphics};
+use crate::options::{ColorFormatKind, Options, PoseSpaceKind, QarosGraphics, QarosOptions};
 use crate::viewer_app::{FrameHook, HeadsetFrame, StopRequest};
 
 const PANEL_SYNC_INTERVAL: Duration = Duration::from_secs(1);
@@ -59,12 +60,7 @@ pub async fn build(
     named_vulkan: Option<VulkanDevice>,
 ) -> Result<QarosSetup, String> {
     let qaros_options = &options.qaros;
-    let launch_line = if qaros_options.launched_by_qaros && !qaros_options.local_app {
-        re_log::info!("qaros: waiting for the launch invite on stdin (--launched-by-qaros)");
-        Some(read_launch_line()?)
-    } else {
-        None
-    };
+    let launch_line = launch_line(qaros_options)?;
     // Watched from here on, so a Stop during onboarding is seen as soon as `connect` returns.
     // Ctrl+C takes the same path: the console's default handler would exit with the library
     // loaded and run its unload code.
@@ -101,7 +97,7 @@ pub async fn build(
         unanswered_peers_file: Some(qaros_options.unanswered_peers_file()),
         pairing_code: qaros_options.pairing_code.clone(),
         launch_line,
-        local_app: qaros_options.local_app,
+        local_app: qaros_options.joins_as_local_app(),
         peer_display_name: format!("{} viewer", qaros_options.display_name),
         volume_name: qaros_options.volume_name.clone(),
         volume_display_name: qaros_options.display_name.clone(),
@@ -258,6 +254,20 @@ fn session_adapter(physical_device: &PhysicalDeviceIdentity) -> GraphicsAdapter 
         Some(luid) if cfg!(target_os = "windows") => GraphicsAdapter::Luid(luid),
         _ => GraphicsAdapter::Uuid(physical_device.device_uuid),
     }
+}
+
+/// The launch invite from stdin when the viewer was launched by QAROS and does not join as a
+/// local app; `None` otherwise.
+fn launch_line(qaros_options: &QarosOptions) -> Result<Option<String>, String> {
+    if !qaros_options.launched_by_qaros || qaros_options.local_app {
+        return Ok(None);
+    }
+    if qaros_options.joins_as_local_app() {
+        re_log::info!("qaros: launched by QAROS on Windows; joining as a local app");
+        return Ok(None);
+    }
+    re_log::info!("qaros: waiting for the launch invite on stdin (--launched-by-qaros)");
+    read_launch_line().map(Some)
 }
 
 /// The first line of stdin: the launch invite QAROS writes there (one line of JSON), or a

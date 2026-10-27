@@ -6,8 +6,8 @@ use frame_sink::{
     MaxUsers, RenderPolicy, ShowInfo, SinkError, UserId, UserInfo, ViewRequest,
 };
 use qaros::{
-    Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat, RenderSender,
-    RenderSenderConfig, ShowParams, StatusCode, VideoFrameLayout, ViewKind,
+    AppVolumeId, ColorAlphaMode, Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat,
+    RenderSender, RenderSenderConfig, ShowParams, StatusCode, VideoFrameLayout, ViewKind,
 };
 use xr_math::{Fov, Pose};
 
@@ -94,6 +94,24 @@ pub struct QarosSinkOptions {
     /// Stop streaming after this many shown frames across all users; `None` streams until
     /// the viewer closes.
     pub stop_after_frames: Option<u64>,
+}
+
+/// The CPU render sender's configuration: premultiplied alpha is declared because the eye
+/// images carry it (ADR-0050), and QAROS draws an undeclared stream as opaque.
+fn stream_config(
+    peer: PeerId,
+    volume: AppVolumeId,
+    color_format: PixelFormat,
+) -> RenderSenderConfig {
+    RenderSenderConfig {
+        views: STREAM_VIEWS.to_vec(),
+        app_volume: Some(volume),
+        color_format,
+        depth_format: PixelFormat::D32Float,
+        layout: FrameLayout::SideBySide,
+        alpha_mode: ColorAlphaMode::Premultiplied,
+        ..RenderSenderConfig::new(peer)
+    }
 }
 
 /// Views requested from each render sender: both eyes' color side by side in texture 0, both
@@ -298,14 +316,7 @@ impl QarosSink {
     }
 
     fn start_stream(&mut self, user: UserInfo, peer: PeerId) {
-        let config = RenderSenderConfig {
-            views: STREAM_VIEWS.to_vec(),
-            app_volume: Some(self.connection.volume()),
-            color_format: self.options.color_format,
-            depth_format: PixelFormat::D32Float,
-            layout: FrameLayout::SideBySide,
-            ..RenderSenderConfig::new(peer)
-        };
+        let config = stream_config(peer, self.connection.volume(), self.options.color_format);
         match self.connection.start_render_sender(&config) {
             Ok(creation) => self.pending.insert(user, peer, creation),
             Err(error) => {
@@ -629,6 +640,12 @@ mod tests {
             room_from_app: Pose::IDENTITY,
             app_scale: 4.0,
         }
+    }
+
+    #[test]
+    fn the_stream_declares_premultiplied_alpha() {
+        let config = stream_config(PeerId::ZERO, AppVolumeId::ZERO, PixelFormat::R8G8B8A8);
+        assert_eq!(config.alpha_mode, ColorAlphaMode::Premultiplied);
     }
 
     #[test]

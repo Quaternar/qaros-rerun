@@ -89,9 +89,10 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                reports, with QAROS's device extensions; --vulkan-device names
                                the device instead, created first and chained into onboarding
                                (default vulkan on Windows, cpu elsewhere)
-    --launched-by-qaros        the QAROS API app contract: onboard with the first line of stdin
-                               (the JSON launch invite, or a code typed by hand), stop when
-                               stdin closes; QAROS_STORAGE_DIR moves the runtime's state; runs
+    --launched-by-qaros        the QAROS API app contract: stop when stdin closes; on Windows
+                               join as a local app (as with --local-app), elsewhere onboard
+                               with the first line of stdin (the JSON launch invite, or a code
+                               typed by hand); QAROS_STORAGE_DIR moves the runtime's state; runs
                                headless at 1280x720 unless --window or --headless is given
     --local-app                join the Hub installed on this PC as a local app, with no code
                                or invite; the Hub asks to allow the app on its first start.
@@ -261,7 +262,17 @@ pub const DEFAULT_ONBOARDING_ID_FILE: &str = "qaros-rerun.onboarding-id.txt";
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 pub const UNANSWERED_PEERS_FILE_NAME: &str = "qaros-rerun.unanswered-peers.txt";
 
+/// On Windows QAROS writes no launch invite to a launched app's stdin: the app joins as a
+/// local app and the Hub recognises the process it started.
+const LAUNCHED_APP_JOINS_AS_LOCAL_APP: bool = cfg!(windows);
+
 impl QarosOptions {
+    /// `--local-app`, or `--launched-by-qaros` where QAROS launches apps as local apps.
+    #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+    pub fn joins_as_local_app(&self) -> bool {
+        self.local_app || (self.launched_by_qaros && LAUNCHED_APP_JOINS_AS_LOCAL_APP)
+    }
+
     #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
     pub fn onboarding_id_file(&self) -> PathBuf {
         self.onboarding_id_file_flag
@@ -1267,11 +1278,25 @@ mod tests {
     }
 
     #[test]
+    fn a_qaros_launched_viewer_joins_as_a_local_app_only_on_windows() {
+        let launched = parse(&["--sink", "qaros", "--launched-by-qaros"]).unwrap();
+        assert!(!launched.qaros.local_app);
+        assert_eq!(launched.qaros.joins_as_local_app(), cfg!(windows));
+    }
+
+    #[test]
     fn parses_local_app_onboarding() {
         let local_app = parse(&["--sink", "qaros", "--launched-by-qaros", "--local-app"]).unwrap();
         assert!(local_app.qaros.local_app);
         assert!(local_app.qaros.launched_by_qaros);
+        assert!(local_app.qaros.joins_as_local_app());
         assert!(!parse(&["--sink", "qaros"]).unwrap().qaros.local_app);
+        assert!(
+            !parse(&["--sink", "qaros"])
+                .unwrap()
+                .qaros
+                .joins_as_local_app()
+        );
         assert!(matches!(
             parse(&["--local-app"]),
             Err(ParseOutcome::Error(message)) if message == "--local-app needs --sink qaros"
