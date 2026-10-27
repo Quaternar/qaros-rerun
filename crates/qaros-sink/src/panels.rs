@@ -42,7 +42,7 @@ const REACH_ANCHOR_MAX_DISTANCE_METERS: f32 = 4.0;
 /// Visualizer receiver (the Hub Display on the PC) streams too and its camera can stand near
 /// the volume, but nobody can reach panels placed by it; after this wait, with no headset
 /// seen, any head near the volume places them, so a run without glasses still gets panels.
-pub const HEADSET_WAIT: Duration = Duration::from_secs(20);
+pub const HEADSET_WAIT: Duration = Duration::from_mins(1);
 /// How often a viewer's device is asked of QAROS again while panels wait for a headset: a
 /// target refines its device identity once the device reports its model.
 const DEVICE_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
@@ -55,6 +55,10 @@ const TIMELINE_PANEL_WIDTH_METERS: f32 = 0.45;
 const TIMELINE_PANEL_HEIGHT_METERS: f32 = 0.12;
 /// How far in front of the user's head the timeline panel's centre stands, along the gaze on
 /// the floor plane.
+/// The wait before retrying a failed panel listing, the first time.
+const LISTING_RETRY_FAST: Duration = Duration::from_millis(500);
+/// The wait before every later retry.
+const LISTING_RETRY_SLOW: Duration = Duration::from_secs(30);
 const TIMELINE_FORWARD_METERS: f32 = 0.5;
 /// How far below the user's eyes the timeline panel's centre sits.
 const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
@@ -149,6 +153,9 @@ pub struct QarosPanels {
     far_head_logged: bool,
     /// The timeline page's URL, when this run opens a timeline panel.
     timeline_url: Option<String>,
+    /// Panel listings that failed in a row, and when the next one may be tried.
+    listing_failures: u32,
+    next_listing: Option<Instant>,
 }
 
 /// A claimed panel, and whether it kept the page an earlier run loaded and is visible.
@@ -194,6 +201,8 @@ impl QarosPanels {
             waiting_logged: BTreeSet::new(),
             far_head_logged: false,
             timeline_url: None,
+            listing_failures: 0,
+            next_listing: None,
         }
     }
 
@@ -248,10 +257,23 @@ impl QarosPanels {
         if wanted.is_empty() {
             return;
         }
+        let now = Instant::now();
+        if self.next_listing.is_some_and(|next| now < next) {
+            return;
+        }
         let listed = match self.connection.session().gui_panels().list() {
-            Ok(listed) => listed,
+            Ok(listed) => {
+                self.listing_failures = 0;
+                self.next_listing = None;
+                listed
+            }
             Err(error) => {
-                log::warn!("qaros: cannot list panels ({error}); opening none until the next sync");
+                self.listing_failures += 1;
+                let retry_in = listing_retry_delay(self.listing_failures);
+                self.next_listing = Some(Instant::now() + retry_in);
+                log::warn!(
+                    "qaros: cannot list panels ({error}); opening none, trying again in {retry_in:?}"
+                );
                 return;
             }
         };
@@ -650,6 +672,16 @@ fn gravity_level(head: Pose) -> Pose {
     Pose::new(Quat::from_rotation_y(yaw), head.position)
 }
 
+/// A listing can fail on a panel the Hub cannot describe, and each try blocks the UI thread
+/// while it runs, so after the first quick retry the viewer waits [`LISTING_RETRY_SLOW`].
+fn listing_retry_delay(failures_in_a_row: u32) -> Duration {
+    if failures_in_a_row <= 1 {
+        LISTING_RETRY_FAST
+    } else {
+        LISTING_RETRY_SLOW
+    }
+}
+
 /// Room pose of the panel in `slot` within reach of `head` (gravity-level, see
 /// [`gravity_level`]), in the same convention as [`panel_pose_beside_volume`].
 ///
@@ -797,7 +829,7 @@ mod tests {
         let glasses = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_HEADSET, "METALENSE2");
         let display_receiver = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_VISUALIZER, "");
         let unnamed = device(QarDeviceCategory::QAR_DEVICE_CATEGORY_UNKNOWN, "");
-        assert_eq!(HEADSET_WAIT, Duration::from_secs(20));
+        assert_eq!(HEADSET_WAIT, Duration::from_mins(1));
         let just_short = Duration::from_millis(19_999);
 
         assert!(places_panels(Some(&glasses), Duration::ZERO));
@@ -1054,6 +1086,13 @@ mod tests {
             panel.transform_vector(Vec3::X).y.abs() < EPSILON,
             "the top edge level"
         );
+    }
+
+    #[test]
+    fn a_failed_panel_listing_is_retried_after_half_a_second_then_every_half_minute() {
+        assert_eq!(listing_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(listing_retry_delay(2), Duration::from_secs(30));
+        assert_eq!(listing_retry_delay(9), Duration::from_secs(30));
     }
 
     #[test]

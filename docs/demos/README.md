@@ -39,7 +39,7 @@ With `--panels`, every demo opens a **timeline panel** in front of the first hea
 - Tap Play to resume the loop.
 - The thumb follows the viewer's time a few times a second, during playback and when someone moves the desktop time bar.
 
-Demos with 2D views (structure from motion, air traffic) also open each view as a **panel** within reach of the same headset: 0.8 m away, to the right of the gaze, just below eye height. A Display Receiver places them only when no headset streams within 20 s.
+Demos with 2D views (structure from motion, air traffic) also open each view as a **panel** within reach of the same headset: 0.8 m away, to the right of the gaze, just below eye height. A Display Receiver places them only when no headset streams within 60 s.
 
 The Hub keeps every panel where it is, or where you moved it, across runs. Close the panels in the Hub Display to have the next run open them in front of you again.
 

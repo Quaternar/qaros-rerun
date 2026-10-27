@@ -2780,6 +2780,12 @@ fn a_failed_panel_listing_opens_nothing_and_the_next_sync_reattaches() {
     );
 
     second_run.sync(&views, &published);
+    assert!(
+        second_run.panels().is_empty(),
+        "a sync right after the failure waits for the half-second retry"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(550));
+    second_run.sync(&views, &published);
     assert_eq!(second_run.panels(), &first_run_panels);
     assert_eq!(navigation_count(&fixture), 2, "the retry navigates nothing");
     assert_eq!(

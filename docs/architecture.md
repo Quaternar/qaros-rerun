@@ -92,7 +92,7 @@ With `--panels`, a GUI panel opens for every 2D view the panel server publishes:
 
 **Placement.** The Hub owns a panel's place once the panel exists: it keeps the pose the panel was created with, or wherever a user moved it, across runs, and ignores later pose calls. So a new panel is created at its final place, within reach of one viewer's head:
 
-- that viewer is the first headset whose head is within 4 m of the app volume's center on the floor plane (`qar_peer_spec_get_category` is `QAR_DEVICE_CATEGORY_HEADSET`), or, when no headset streams within 20 s of the first head near the volume, any viewer near it, such as a Display Receiver (`QAR_DEVICE_CATEGORY_VISUALIZER`); a camera across the room never counts;
+- that viewer is the first headset whose head is within 4 m of the app volume's center on the floor plane (`qar_peer_spec_get_category` is `QAR_DEVICE_CATEGORY_HEADSET`), or, when no headset streams within 60 s of the first head near the volume, any viewer near it, such as a Display Receiver (`QAR_DEVICE_CATEGORY_VISUALIZER`); a camera across the room never counts;
 - the log line `new panels open within reach of user-N (peer ..., <category> <device name>)` names that viewer;
 - the panels stand on an arc 0.8 m from the head (on the floor plane), starting 0.25 m to the right of the gaze and going right, 0.1 m apart, top edges 0.1 m below the eyes, each upright and facing the head; the head is midway between that viewer's eyes, levelled to its heading;
 - until such a viewer streams, a view without a panel waits; later viewers change nothing, and panels created later join the same row;
