@@ -306,12 +306,14 @@ pub fn connect(
                     .map(Path::to_path_buf)
             }),
             storage_directory: options.storage_directory.clone(),
+            ephemeral_storage: false,
         })
         .map_err(|error| error.to_string())?;
     let presentation = PeerPresentation {
         display_name: Some(options.peer_display_name.clone()),
         app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         custom_info: None,
+        device_identity: None,
     };
     let session = join_session(&library, &runtime, options, &presentation)?;
     let adapter = session_adapter(&session, options.adapter);
@@ -425,6 +427,7 @@ fn join_session(
             .onboard_on_adapter(
                 &OnboardMethod::LocalApp {
                     approval_timeout: LOCAL_APP_APPROVAL_TIMEOUT,
+                    app_tag: None,
                 },
                 presentation,
                 options.adapter,

@@ -16,6 +16,7 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Changed
 
+- The QAROS Rust binding is pinned to QAROS `main` at `e0c0195a`, whose C header matches the 0.9.0-dev.3184 runtime apart from one added status code. Dropping a sender creation in flight returns at once; the session's teardown waits for its callback.
 - Panels are listed through a raw listing that reads each panel's content type first, so a stream panel in the session no longer makes the listing fail.
 - New panels open within reach of a headset: the viewer asks QAROS for each streaming peer's device category (`qar_peer_spec_get_category`) and places panels by the first `QAR_DEVICE_CATEGORY_HEADSET` head near the app volume. A Display Receiver (a Visualizer receiver) or a viewer whose category QAROS cannot say places them only when no headset streamed within 60 s of the first head near the volume. The log names the viewer, its peer and its device.
 - `--launched-by-qaros` on Windows joins as a local app, as QAROS expects of an app it launches there, and reads no launch invite from stdin; stdin still signals Stop. Other platforms keep the stdin launch invite.

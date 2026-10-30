@@ -27,11 +27,12 @@ use frame_sink::{
     ShowInfo, UserId, stamp_eye,
 };
 use glam::{Quat, Vec3};
+use qaros::qaros_sys::QarDeviceCategory;
 use qaros::{PeerId, PixelFormat};
 use qaros_sink::{
-    BEGIN_WAIT_DRAIN_LIMIT, ConnectOptions, FRAME_FAILURE_MINIMUM, FRAME_FAILURE_PERIOD, PeerEvent,
-    PoseSpace, QarosConnection, QarosSink, QarosSinkOptions, ReleaseCause, TargetPeers,
-    UserEventSource, WakeViewer, connect,
+    BEGIN_WAIT_DRAIN_LIMIT, ConnectOptions, FRAME_FAILURE_MINIMUM, FRAME_FAILURE_PERIOD,
+    PeerDevice, PeerEvent, PoseSpace, QarosConnection, QarosSink, QarosSinkOptions, ReleaseCause,
+    TargetPeers, UserEventSource, WakeViewer, connect,
 };
 use xr_math::{AppPlacement, Pose};
 
@@ -659,13 +660,12 @@ fn the_connection_knows_each_user_peer_and_reads_peer_devices_from_the_peer_list
         Ok(None),
         "a peer the list does not hold"
     );
-    let unreadable = connection
-        .peer_device(VISUALIZER_PEER)
-        .expect_err("qaros-stub implements no device category");
-    assert!(
-        unreadable.starts_with("qar_peer_spec_get_category: ")
-            && unreadable.contains("not implemented in qaros-stub"),
-        "{unreadable}"
+    assert_eq!(
+        connection.peer_device(VISUALIZER_PEER),
+        Ok(Some(PeerDevice {
+            category: QarDeviceCategory::QAR_DEVICE_CATEGORY_VISUALIZER,
+            name: "Stub Visualizer".to_owned(),
+        }))
     );
     submit_both_eyes(&mut sink, request.key);
     sink.show_frame(request.key, show_info()).unwrap();
@@ -804,8 +804,9 @@ fn a_peer_that_leaves_while_its_sender_is_created_gets_no_stream() {
 }
 
 /// A Stop while a target's sender is still being created (a headset listed as running that
-/// does not answer): the sink's drop cancels the creation, which calls back shortly after, and
-/// the connection's drop then leaves the session cleanly instead of leaking it with the library.
+/// does not answer): the sink's drop cancels the creation and returns at once, and the
+/// connection's drop then leaves the session cleanly: the session's destroy waits for the
+/// creation's cancelled callback instead of leaking the session with the library.
 #[test]
 fn a_stop_while_a_sender_is_created_still_destroys_the_session() {
     let fixture = Fixture::new();
@@ -830,7 +831,7 @@ fn a_stop_while_a_sender_is_created_still_destroys_the_session() {
         .expect("the headset's creation called back cancelled");
     let session_destroyed = calls
         .iter()
-        .position(|call| call == "session_handle_destroy")
+        .position(|call| call == "session destroyed")
         .expect("the session is destroyed");
     assert!(cancelled < session_destroyed, "{calls:?}");
 }

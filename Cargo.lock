@@ -6633,7 +6633,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 [[package]]
 name = "qar-streaming-rust-ext"
 version = "0.9.0"
-source = "git+https://github.com/Quaternar/qaros?rev=ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9#ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9"
+source = "git+https://github.com/Quaternar/qaros?rev=e0c0195af5764bd330aac29fcaf5b128e9a14df6#e0c0195af5764bd330aac29fcaf5b128e9a14df6"
 dependencies = [
  "libloading",
  "qaros-sys",
@@ -6642,7 +6642,7 @@ dependencies = [
 [[package]]
 name = "qaros"
 version = "0.9.0"
-source = "git+https://github.com/Quaternar/qaros?rev=ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9#ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9"
+source = "git+https://github.com/Quaternar/qaros?rev=e0c0195af5764bd330aac29fcaf5b128e9a14df6#e0c0195af5764bd330aac29fcaf5b128e9a14df6"
 dependencies = [
  "ash",
  "log",
@@ -6698,7 +6698,7 @@ dependencies = [
 [[package]]
 name = "qaros-stub"
 version = "0.9.0"
-source = "git+https://github.com/Quaternar/qaros?rev=ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9#ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9"
+source = "git+https://github.com/Quaternar/qaros?rev=e0c0195af5764bd330aac29fcaf5b128e9a14df6#e0c0195af5764bd330aac29fcaf5b128e9a14df6"
 dependencies = [
  "ash",
  "libloading",
@@ -6708,7 +6708,7 @@ dependencies = [
 [[package]]
 name = "qaros-sys"
 version = "0.9.0"
-source = "git+https://github.com/Quaternar/qaros?rev=ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9#ebfe3bfb1d6c5d8021279cb8d26a3a488f6092e9"
+source = "git+https://github.com/Quaternar/qaros?rev=e0c0195af5764bd330aac29fcaf5b128e9a14df6#e0c0195af5764bd330aac29fcaf5b128e9a14df6"
 dependencies = [
  "libloading",
 ]
