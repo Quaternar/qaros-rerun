@@ -21,6 +21,10 @@ const GETTER_BUFFER_SIZE: usize = 4096;
 pub enum PanelContent {
     Uri(String),
     Stream(StreamId),
+    /// A stream panel whose stream id QAROS cannot read, with the reason. 0.9.0-dev.3184 reports
+    /// this for a panel that holds no stream id yet ("0 payload bytes"); the panel is still
+    /// listed, so one such panel does not hide the others.
+    UnreadableStream(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,7 +42,7 @@ impl ListedPanel {
     pub fn content_uri(&self) -> &str {
         match &self.content {
             PanelContent::Uri(uri) => uri,
-            PanelContent::Stream(_) => "",
+            PanelContent::Stream(_) | PanelContent::UnreadableStream(_) => "",
         }
     }
 }
@@ -148,8 +152,12 @@ fn read_content(api: &QarApi, handle: *mut QarGuiPanel) -> Result<PanelContent, 
         // SAFETY: as above.
         let read_stream =
             unsafe { (api.qar_impl_gui_panel_get_content_stream_id)(handle, &raw mut stream_id) };
-        check(api, "qar_gui_panel_get_content_stream_id", read_stream)?;
-        return Ok(PanelContent::Stream(StreamId(stream_id.data)));
+        return Ok(
+            match check(api, "qar_gui_panel_get_content_stream_id", read_stream) {
+                Ok(()) => PanelContent::Stream(StreamId(stream_id.data)),
+                Err(reason) => PanelContent::UnreadableStream(reason),
+            },
+        );
     }
     if content_type != QarGuiPanelContentType::QAR_GUI_PANEL_CONTENT_TYPE_WEBSITE_URI {
         return Err(format!(
