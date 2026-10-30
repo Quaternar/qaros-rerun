@@ -31,7 +31,7 @@ Geospatial data at the scale of a region, on a table: a whole airspace in 2.4 m,
 On the Hub PC, from the repository root:
 
 ```powershell
-uv run demos/air_traffic/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/air_traffic/run.py -- --sink qaros --local-app --panels
 ```
 
 The first start downloads the aircraft data (2.7 MB) and the region outlines (30 MB) and records them once, which takes a few minutes; later starts replay the cached recording in seconds without network. Ten minutes of traffic play at 10x, so one loop is a minute. The map panel loads OpenStreetMap tiles and needs internet; the 3D view does not.

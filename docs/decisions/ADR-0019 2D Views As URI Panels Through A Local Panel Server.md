@@ -1,12 +1,15 @@
 ---
 id: ADR-0019
 title: 2D views as URI panels through a local panel server (route B)
-status: accepted
+status: superseded
+superseded_by: ADR-0076
 date: 2026-10-05
 repo: qaros-rerun
 ---
 
 # ADR-0019: 2D views as URI panels through a local panel server (route B)
+
+> Superseded by ADR-0076: panels are video streams of the viewer; the web route and the panel server were removed.
 
 ## Context
 
@@ -29,12 +32,12 @@ Route B. `panel-server` (tiny_http) keeps the latest PNG per view and serves a m
 
 ## Evidence and sources
 
-- [PS] `crates/panel-server/src/` (server, page); `crates/qaros-sink/src/panels.rs` (`QarosPanels`); `crates/qaros-rerun/src/panel_capture.rs`.
+- [PS] `crates/qaros-sink/src/panels.rs` (`QarosPanels`); `crates/qaros-rerun/src/panel_capture.rs`. The panel server crate is removed.
 - [README] `README.md`, "The QAROS sink", panels paragraph.
 - [GP] QAROS GUI panels documentation at `b1338df`.
-- [KI] [Known issues](../known-issues.md): the mixer crash when panels close or navigate, which hiding at Stop also avoids on builds up to 3137.
+- [KI] [Known issues](../known-issues.md#history-why-panels-need-090-dev3177): the mixer's Ultralight renderers on builds up to 3137, behind closing and navigating panels as crash triggers.
 
-[PS]: ../../crates/panel-server/src/server.rs "Panel server"
+[PS]: ../../crates/qaros-sink/src/panels.rs "QAROS panels"
 [README]: ../../README.md "qaros-rerun README"
 [GP]: https://github.com/Quaternar/qaros/blob/b1338df/docs/website/docs/developer-guide/gui-panels.mdx "QAROS GUI panels"
-[KI]: ../known-issues.md#mixer-crash-when-panels-close-or-navigate "Known issues"
+[KI]: ../known-issues.md#history-why-panels-need-090-dev3177 "Known issues"

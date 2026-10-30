@@ -17,7 +17,7 @@ It is also a worked example of bringing an existing desktop renderer to QAROS: [
 
 ## Requirements
 
-- Windows with a QAROS installation (from [quaternar.com](https://www.quaternar.com/)) and a GPU with a Vulkan driver.
+- Windows with QAROS 0.9.0-dev.3177 or later installed (from [quaternar.com](https://www.quaternar.com/)) and a GPU with a Vulkan driver.
 - [Rust](https://rustup.rs): the toolchain pinned in `rust-toolchain.toml` (Rust 1.96) is fetched by the first `cargo` command in the repository.
 - Visual Studio Build Tools 2022 with the "Desktop development with C++" workload.
 - [uv](https://docs.astral.sh/uv/) for the demos, and network access on the first build.
@@ -38,16 +38,15 @@ The first build compiles Rerun and takes several minutes.
 On the PC that runs the QAROS Hub, with the Hub running, in PowerShell:
 
 ```powershell
-$env:QAROS_DLL = "C:\path\to\qaros\bin\qar-streaming-c.dll"
-uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels
 ```
 
+- The viewer loads the QAROS runtime installed on the PC.
 - On its first start the Hub asks a person at the PC to allow the viewer.
 - The first start of a demo downloads its data and records it once (a few minutes).
 - Open the visualizer or a headset's player app to see the scene. Every running target gets a render stream of its own; up to two users are rendered at once by default.
-- With `--panels`, the 2D views open as GUI panels within reach of the first headset near the scene, and a timeline panel opens 0.5 m in front of it, 0.2 m below eye level. Drag its slider to scrub the recording, tap Play to resume; it follows the desktop time slider too.
+- With `--panels`, the 2D views open as GUI panels within reach of the first headset near the scene, and a timeline panel opens 0.5 m in front of it, 0.2 m below eye level. Each panel is a video stream of the viewer: the mixer shows the viewer's own pixels, and taps and drags on the timeline arrive as QAROS panel gestures. Drag along its track to scrub the recording, tap Play to resume; it follows the desktop time slider too. [Panels](docs/integration-guide.md#panels) has the details.
 - The Hub keeps a panel's place across runs. Close the panels in the Hub Display to have the next run open them in front of you again.
-- With QAROS 0.9.0-dev.3177 or later, add `--panel-route stream`: every panel becomes a video stream of the viewer instead of a web page. The mixer shows the viewer's pixels as they are, no port is opened, and taps and drags on the timeline arrive as QAROS panel gestures. [Stream panels](docs/integration-guide.md#stream-panels) has the details.
 
 The demos are [structure from motion](docs/demos/structure-from-motion.md), [drone lidar](docs/demos/drone-lidar.md), [air traffic](docs/demos/air-traffic.md) and [robot arm](docs/demos/robot-arm.md); each page shows what you see and where the data comes from.
 
@@ -56,7 +55,7 @@ The demos are [structure from motion](docs/demos/structure-from-motion.md), [dro
 Start the viewer on its own, then log from any Rerun SDK to port 9876 as usual:
 
 ```powershell
-.\target\release\qaros-rerun.exe --sink qaros --local-app --panels 0.0.0.0:9877
+.\target\release\qaros-rerun.exe --sink qaros --local-app --panels
 .\target\release\log-test-scene.exe 600    # second terminal: a 1 m cube, points, axes
 ```
 
@@ -81,11 +80,9 @@ flowchart LR
     policy[RenderPolicy<br/>MaxUsers] --> vulkan
     policy --> qaros
     viewer --> capture[PanelCapture]
-    capture -->|web route: PNG per view, timeline page| panels[panel-server :9877]
-    panels -->|URI| guipanel[QAROS GUI panels<br/>QarosPanels]
-    capture -->|stream route: BGRA per view| images[PanelImages]
+    capture -->|BGRA per view| images[PanelImages]
     timeline[TimelinePanel<br/>drawn by the viewer] --> images
-    images -->|CPU video sender per panel| guipanel
+    images -->|CPU video sender per panel| guipanel[QAROS GUI panels<br/>QarosPanels]
     guipanel -.->|gestures| timeline
 ```
 
@@ -95,7 +92,6 @@ A small patch to Rerun's 3D view hands its draw data to the headset renderer, wh
 | --- | --- |
 | [`crates/qaros-rerun`](crates/qaros-rerun) | The viewer binary: headset renderer, panel capture, the timeline and its stream panel, `log-test-scene` |
 | [`crates/qaros-sink`](crates/qaros-sink) | The QAROS side: connect, app volume, users from the peer list, CPU and Vulkan render senders, GUI panels, video senders and panel gestures |
-| [`crates/panel-server`](crates/panel-server) | The local web server and pages behind the web route's panels, including the timeline page |
 | [`crates/frame-sink`](crates/frame-sink) | The `FrameSink` seam, users and render policy, the frame stamp, the PNG image sink |
 | [`crates/xr-math`](crates/xr-math) | Poses, fields of view, off-axis projection, depth encodings, room placement |
 | [`patches/`](patches) | `re_view_spatial` and `re_renderer` 0.40.0 with small patches (pristine copy, then the patch) |

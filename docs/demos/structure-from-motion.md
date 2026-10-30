@@ -32,7 +32,7 @@ A 3D reconstruction is hard to judge on a flat screen and easy to judge when you
 On the Hub PC, from the repository root:
 
 ```powershell
-uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels
 ```
 
 The first start downloads the dataset (80 MB) and records it once, which takes a few minutes; later starts replay the cached recording in seconds without network. The 51 photos play at 0.8 per second, so one loop is about a minute.

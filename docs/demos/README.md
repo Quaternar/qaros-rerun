@@ -20,7 +20,7 @@ Four of Rerun's own examples, shown in the glasses through QAROS. Each starts wi
 On the PC that runs the QAROS Hub, with the Hub running, from the repository root in PowerShell:
 
 ```powershell
-uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/structure_from_motion/run.py -- --sink qaros --local-app --panels
 ```
 
 You need [uv](https://docs.astral.sh/uv/) and a release build of the viewer (`cargo build --release -p qaros-rerun`, see [Installation](../INSTALLATION.md)). `uv run` reads each launcher's inline dependency list (Python 3.11 or newer, `rerun-sdk==0.40.0`) and keeps the environment in its own cache. With QAROS installed the viewer finds its runtime library by itself; otherwise set `QAROS_DLL` as in the [integration guide](../integration-guide.md#where-the-qaros-library-comes-from).
@@ -33,17 +33,15 @@ Everything after `--` goes to the viewer unchanged, so every option in `qaros-re
 
 ## Panels in every demo
 
-With `--panels`, every demo opens a **timeline panel** in front of the first headset near the scene: a slider and a Play button, 0.5 m in front of the head and 0.2 m below the eyes, tilted to face them.
+With `--panels`, every demo opens a **timeline panel** in front of the first headset near the scene: a track and a Play button, 0.5 m in front of the head and 0.2 m below the eyes, tilted to face them. Every panel is a video stream of the viewer, and taps and drags arrive as QAROS panel gestures ([Panels](../integration-guide.md#panels)).
 
-- Drag the slider with a finger: the demo pauses and the time cursor moves along the whole recording. The desktop time bar follows.
+- Drag along the track with a finger: the demo pauses and the time cursor moves along the whole recording. The desktop time bar follows.
 - Tap Play to resume the loop.
 - The thumb follows the viewer's time a few times a second, during playback and when someone moves the desktop time bar.
 
 Demos with 2D views (structure from motion, air traffic) also open each view as a **panel** within reach of the same headset: 0.8 m away, to the right of the gaze, just below eye height. A Display Receiver places them only when no headset streams within 60 s.
 
 The Hub keeps every panel where it is, or where you moved it, across runs. Close the panels in the Hub Display to have the next run open them in front of you again.
-
-With QAROS 0.9.0-dev.3177 or later, add `--panel-route stream` after `--`: the panels become video streams of the viewer instead of web pages, and the timeline takes taps and drags as QAROS panel gestures. It looks and works the same in the glasses ([Stream panels](../integration-guide.md#stream-panels)).
 
 ## Placement in the room
 
@@ -57,7 +55,7 @@ See-through glasses add the stream's light to the room: black is transparent, an
 
 1. **First start only:** fetches the example's source from the Rerun repository at tag 0.40.0 into `demos/.cache/`, runs it to download its dataset and record a `.rrd`, and compacts the recording with `rerun rrd optimize` so it loads in seconds. This takes a few minutes per demo.
 2. Stops a viewer left behind by a launcher that was killed or crashed. A viewer whose launcher still runs is another instance of the demo and keeps running.
-3. Starts the viewer on port 9876, or on a free port when something else holds it, with its log in `demos/.cache/<demo>/logs/` (the newest 20 are kept; `demos/.cache/<demo>/viewer.log` links to the newest). With `--panels`, a taken panel port moves the panels to a free port, logged as "panels: ... is taken".
+3. Starts the viewer on port 9876, or on a free port when something else holds it, with its log in `demos/.cache/<demo>/logs/` (the newest 20 are kept; `demos/.cache/<demo>/viewer.log` links to the newest).
 4. Sends the demo's blueprint, replays the recording, and sends the blueprint again so it wins over the one the example recorded. Some demos then log presentation data for the glasses (the drone's basement backdrop, the aircraft altitudes and colours). The recording plays and loops.
 5. Runs until the viewer window is closed or Ctrl+C. The launcher waits up to 5 s for the viewer to leave QAROS before it terminates it; a second Ctrl+C ends both at once.
 

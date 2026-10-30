@@ -28,7 +28,7 @@ Survey and inspection data is large and spatial. This demo streams a building-sc
 On the Hub PC, from the repository root:
 
 ```powershell
-uv run demos/drone_lidar/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/drone_lidar/run.py -- --sink qaros --local-app --panels
 ```
 
 The first start downloads the dataset (157 MB) and records it once, which takes a few minutes; later starts replay the cached recording in seconds without network. The flight plays at 6x, so one loop is a little over a minute.

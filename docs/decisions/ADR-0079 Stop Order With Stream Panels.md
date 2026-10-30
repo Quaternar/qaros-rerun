@@ -32,7 +32,7 @@ The whole Stop, from the request to the end of the process, must fit in 600 ms (
 ## Consequences
 
 - Positive: the stream panels' teardown costs a few milliseconds of the 600 ms budget, and every step is visible in the log.
-- Negative: on builds before 3177 the stream route cannot survive a restart; `--panel-route web` stays the default (ADR-0076).
+- Negative: on builds before 3177 stream panels cannot survive a restart, so 0.9.0-dev.3177 is the minimum the viewer supports (ADR-0076).
 
 ## Evidence and sources
 

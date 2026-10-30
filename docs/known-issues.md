@@ -38,29 +38,6 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **Seen on.** Build 2916.
 - **Status.** Unknown. No QAROS change names an exit or unload crash; the 0.9.0 fix for a pure virtual call concerns cancelling a subscription during delivery, a different trigger ([CL] 0.9.0).
 
-## Mixer crash when panels close or navigate
-
-- **Symptom.** The mixer crashed in `WebCore.dll` (Ultralight) 0.35 to 1 s after the viewer closed GUI panels or set new URLs on reused ones, and streams came back only after a Hub restart. The same crash showed again when a demo stopped with its panels hidden.
-- **Cause.** Ultralight allows one renderer per process; the mixer created one per website panel, and creating or destroying one beside a live one tore down shared WebCore state.
-- **What the viewer does.** Panels are never closed: they are hidden at Stop and claimed again by common name, and a panel is navigated only when its URL differs ([ADR-0054](decisions/ADR-0054%20Panels%20Claimed%20By%20Common%20Name%20With%20Run%20Stable%20View%20Names.md)). `--panels-at-stop keep` makes no panel call at Stop, and `--dead-panels leave` makes no navigation, so either call can be ruled out as a trigger.
-- **Seen on.** Builds 2916 and 3137.
-- **Status.** Fixed in 0.9.0-dev.3177: the mixer shares one Ultralight renderer across its panels (QuaternAR commit `ff91001b` for website panels), so an app can restart and create its panels again without crashing the mixer. Hiding at Stop stays for its own reason: a user's panel placement survives the restart.
-
-## Mixer crash when stream panels restart, before 3177
-
-- **Symptom.** With `--panel-route stream`, the first run worked: panels showed, gestures arrived, Stop took under 300 ms. About a minute after Stop the mixer closed the hidden stream panels, and at the next Start it crashed in `WebCore.dll` while the panels were claimed again.
-- **Cause.** The mixer gives every panel that is not closed a browser with its own Ultralight renderer, stream panels and hidden panels included. A stream whose sender is gone fails to receive once its reconnect window ends, and a receive failure closes the panel, which destroys that renderer; reviving the panel at the next Start creates a new one next to live ones. That is the same WebCore trigger as above, and no start or stop order avoids it: the sender cannot outlive the session, and a stream panel cannot switch to a page.
-- **What the viewer does.** The web route stays the default. On the stream route a Start finds its panels by common name, or by panel id when the mixer cleared the display name, points them at this run's streams (`qar_gui_panels_set_stream`) and shows them again ([ADR-0077](decisions/ADR-0077%20Stream%20Panels%20Claimed%20Under%20Names%20Of%20Their%20Own.md), [ADR-0079](decisions/ADR-0079%20Stop%20Order%20With%20Stream%20Panels.md)).
-- **Seen on.** Build 3137.
-- **Status.** Fixed in 0.9.0-dev.3177, where the mixer shares one renderer: two restarts on the stream route were clean, with Stop between 244 and 261 ms and no crash dumps.
-
-## White panel after a Hub restart
-
-- **Symptom.** A persistent panel whose document failed to load stays white, runs no script, and recovers only by a navigation. It happens when the mixer loads the panel's URL while no viewer runs (a Hub restart restoring the panel), and after a headset's identity changes.
-- **What the viewer does.** A reattached panel whose page asks the panel server for nothing 10 s after the browser is seen running is navigated once to the URL it already shows ([ADR-0054](decisions/ADR-0054%20Panels%20Claimed%20By%20Common%20Name%20With%20Run%20Stable%20View%20Names.md)). A Hub "New session" also clears it.
-- **Seen on.** Builds 2916 and 3137.
-- **Status.** Open. The QAROS docs do not say what a panel does when its page fails to load ([GP] "Manipulating panels").
-
 ## Slow first sender on a fresh mixer
 
 - **Symptom.** The first render sender a freshly started mixer accepted took about 21 s to create; once warm, a creation takes about 1 s (1.3 to 1.4 s for the first sender of a run). Without a cancel token, a creation for a listed target that was not receiving did not return for minutes.
@@ -72,30 +49,34 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 
 - **Symptom.** `gui_panels().list()` of the Rust binding fails whenever any panel in the session shows a video stream instead of a URI, and each failed listing blocked the viewer's UI thread for 3 to 4 s.
 - **Cause.** The binding reads `qar_gui_panel_get_content_uri` for every listed panel ([QP] L333-337), which fails for a stream panel; the header has `qar_gui_panel_get_content_type` to check first ([HDR] L4561).
-- **What the viewer does.** Both panel routes list panels through their own raw listing, which reads `qar_gui_panel_get_content_type` before the URI or the stream id (`crates/qaros-sink/src/panel_listing.rs`). A listing that still fails opens no panel and is retried after 0.5 s, then every 30 s ([ADR-0073](decisions/ADR-0073%20Failed%20Panel%20Listings%20Retried%20After%20Half%20A%20Second%20Then%20Every%2030%20s.md)).
+- **What the viewer does.** The viewer lists panels through its own raw listing, which reads `qar_gui_panel_get_content_type` before the URI or the stream id (`crates/qaros-sink/src/panel_listing.rs`). A listing that still fails opens no panel and is retried after 0.5 s, then every 30 s ([ADR-0073](decisions/ADR-0073%20Failed%20Panel%20Listings%20Retried%20After%20Half%20A%20Second%20Then%20Every%2030%20s.md)).
 - **Seen on.** Build 3137, with the binding at `ebfe3bf`.
 - **Status.** Worked around: the viewer reads the content type first. Open in the binding; the raw listing can go once `GuiPanels::list` reads the content type itself.
 
 ## A stream panel's mixer loses its Vulkan device on a replaced stream
 
 - **Symptom.** When a stream panel connected the stream it had just been pointed at, a mixer failed with `VulkanDeviceLost` and closed the panel. It was intermittent, and was seen in the glasses' mixer and in a Display Receiver's mixer after the headset had left the session ([Quaternar#343]).
-- **What the viewer does.** The panel stays closed until the next run claims it again by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). `--panel-route web` avoids stream panels altogether. Every failure seen came with NVIDIA driver Event 153 as a mixer connected a stream of 1016x665 or 960x256 px, so stream panel images are padded on the right and at the bottom to a width that is a multiple of 64 and a height that is a multiple of 8, and the log names the padded size. The mixer's panel copy has no size-dependent arithmetic, so this is a test that rules out a size mismatch between the exported destination and its alias rather than an expected fix: `MIXER_WIDTH_ALIGNMENT` and `MIXER_HEIGHT_ALIGNMENT` in `crates/qaros-rerun/src/panel_capture.rs` set to 1 turn it off.
+- **What the viewer does.** The panel stays closed until the next run claims it again by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). Every failure seen came with NVIDIA driver Event 153 as a mixer connected a stream of 1016x665 or 960x256 px, so stream panel images are padded on the right and at the bottom to a width that is a multiple of 64 and a height that is a multiple of 8, and the log names the padded size. The mixer's panel copy has no size-dependent arithmetic, so this is a test that rules out a size mismatch between the exported destination and its alias rather than an expected fix: `MIXER_WIDTH_ALIGNMENT` and `MIXER_HEIGHT_ALIGNMENT` in `crates/qaros-rerun/src/panel_capture.rs` set to 1 turn it off.
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS.
 
 ## GUI panel queries block for about 2 s
 
-- **Symptom.** On 0.9.0-dev.3177, `qar_query_gui_panels_count`, `qar_query_gui_panels` and a panel claim each block the calling thread for about 2 s, read from 2.0 s steps between the library's `guiPanel` log lines and 4.0 s gaps in the viewer's frame log. A panel listing every 5 s stopped the viewer's frames for 4 s in every 5, so the glasses' 3D stream stalled and its receiver was treated as lost, and a Stop during a listing overran the 600 ms watchdog.
-- **What the viewer does.** It lists panels only to claim them, at start and when a new view settles; the check for panels the mixer closed (see below) reads those listings and makes none of its own. Each listing is timed under the perf event `panel_listing`, and one over 100 ms is logged. Claims still block the frames while they run, because QAROS handles stay on the thread that created them ([ADR-0017](decisions/ADR-0017%20QAROS%20Sink%20Owned%20On%20The%20UI%20Thread.md)).
+- **Symptom.** On 0.9.0-dev.3177, `qar_query_gui_panels_count`, `qar_query_gui_panels` and a panel claim each block the calling thread for about 2 s ([Quaternar#345]), read from 2.0 s steps between the library's `guiPanel` log lines and 4.0 s gaps in the viewer's frame log. A panel listing every 5 s stopped the viewer's frames for 4 s in every 5, so the glasses' 3D stream stalled and its receiver was treated as lost, and a Stop during a listing overran the 600 ms watchdog.
+- **What the viewer does.** It lists panels only to claim them, and one listing serves every claim for 30 s, so the views and the timeline that settle at the start share one, and a view that settles later lists again at most once in 30 s. The check for panels the mixer closed (see below) reads those listings and makes none of its own. Each listing is timed under the perf event `panel_listing`, and one over 100 ms is logged. Claims still block the frames while they run, because QAROS handles stay on the thread that created them ([ADR-0017](decisions/ADR-0017%20QAROS%20Sink%20Owned%20On%20The%20UI%20Thread.md)).
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS. `qar_gui_panels_subscribe_updates` would report closed panels without a listing.
 
 ## A panel failure in one viewer's mixer closes the panel for everyone
 
 - **Symptom.** A GUI panel that fails in one viewer's mixer, such as a Display Receiver's, is closed for every viewer in the session, the headsets included. The panel list then shows it closed, exactly as if a user had closed it in the Hub Display ([Quaternar#344]).
-- **What the viewer does.** It cannot tell such a close from a user's, so it does not reopen the panel during a run; the next run revives it by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). With a Display Receiver connected, the stream route is more exposed to this through the issue above.
+- **What the viewer does.** It cannot tell such a close from a user's, so it does not reopen the panel during a run; the next run revives it by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). With a Display Receiver connected, panels are more exposed to this through the issue above.
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS.
+
+## History: why panels need 0.9.0-dev.3177
+
+Mixers up to build 3137 gave every GUI panel a browser with its own Ultralight renderer, stream panels included, while Ultralight allows one per process. Closing or reviving a panel next to live ones crashed the mixer in `WebCore.dll`, and a stream panel is closed by the mixer once its sender is gone, so restarting an app with stream panels crashed it. 0.9.0-dev.3177 shares one renderer across the panels, and restarts there are clean. That build is the viewer's minimum, and the viewer logs a warning on an older runtime.
 
 ## Sources
 
@@ -103,7 +84,9 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - [GP] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/gui-panels.mdx`.
 - [CL] QAROS `CHANGELOG.md` at `ebfe3bf`, 0.9.0.
 - [QP] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/crates/qaros/src/panels.rs` (`GuiPanels::list`).
-- [Quaternar#343], [Quaternar#344] QAROS issues filed for the stream route on 0.9.0-dev.3177.
+- [Quaternar#343]: Mixer: VulkanDeviceLost when a GUI stream panel connects its replaced stream (3177).
+- [Quaternar#344]: Mixer: a GUI panel failure in one viewer's mixer closes the panel for every viewer.
+- [Quaternar#345]: SDK: GUI panel queries block the calling thread for about 2 s each (3177).
 
 [HDR]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-c/include/qar_streaming.h "QAROS C header"
 [GP]: https://github.com/Quaternar/qaros/blob/ebfe3bf/docs/website/docs/developer-guide/gui-panels.mdx "GUI Panels"
@@ -111,3 +94,4 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 [QP]: https://github.com/Quaternar/qaros/blob/ebfe3bf/qar-streaming-rust/crates/qaros/src/panels.rs#L333-L337 "qaros GUI panels"
 [Quaternar#343]: https://github.com/Quaternar/Quaternar/issues/343 "Mixer: VulkanDeviceLost when a GUI stream panel connects its replaced stream"
 [Quaternar#344]: https://github.com/Quaternar/Quaternar/issues/344 "A GUI panel failure in one viewer's mixer closes the panel for every viewer"
+[Quaternar#345]: https://github.com/Quaternar/Quaternar/issues/345

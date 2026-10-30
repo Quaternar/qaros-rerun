@@ -27,7 +27,7 @@ Any robot described in URDF can stand in the room as a digital twin, driven by l
 On the Hub PC, from the repository root:
 
 ```powershell
-uv run demos/robot_arm/run.py -- --sink qaros --local-app --panels 0.0.0.0:9877
+uv run demos/robot_arm/run.py -- --sink qaros --local-app --panels
 ```
 
 The first start downloads the URDF and meshes (2.9 MB) and records them once, which takes a few minutes, most of it setting up the Python environment; later starts replay the cached recording in seconds without network.

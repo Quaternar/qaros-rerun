@@ -9,6 +9,8 @@ repo: qaros-rerun
 
 # ADR-0049: Panels posed by their top-edge midpoint, turned half a turn to face the viewer, named by the LAN address
 
+> The LAN-address base URL is superseded by ADR-0076: panels are video streams of the viewer and need no URL; the web route, `--panel-base-url` and the LAN address lookup were removed. The pose convention stands through ADR-0070.
+
 ## Context
 
 The `b1338df` header defines panel space ([HDR] L781-800): the pose origin is the midpoint of the panel's top edge, +X runs along the top edge to the viewer's left, +Y up, and -Z is the front-face normal pointing at the viewer; the surface covers x in ±width/2 and y in [-height, 0]. The Coordinate Systems page repeats it and warns that a volume's pose is its centre while a panel's is its top-edge midpoint ([CS], "GUI panels"). A panel posed as its top-left corner with the volume's orientation sits half a width (0.3 m) too far left, overlapping the volume by 0.2 m, and its front normal points along the volume's -Z.
@@ -40,7 +42,7 @@ With `--panels 0.0.0.0:<port>` and no `--panel-base-url`, the base URL is named 
 - Positive: headsets on the LAN can load the panel pages whichever side fetches them.
 - Negative: a viewer standing behind the volume (its -Z side) sees the panels' backs; this follows from the assumption above and is unverified on headsets.
 - Negative: a machine with several networks (VPN, virtual adapters) may name the wrong one when it has no default route; the log line shows the choice and `--panel-base-url` corrects it.
-- Superseded by ADR-0070 for the pose: new panels open within reach of a headset user's head, and the mixer turns every panel toward each viewer's head. The pose convention (top-edge midpoint, -Z front) and the LAN-address base URL stand, and ADR-0070 keeps both. `panel_pose_beside_volume` remains as the pose a panel config carries before any head is known; no new panel opens before then, and the Hub ignores it for a panel that exists.
+- Superseded by ADR-0070 for the pose: new panels open within reach of a headset user's head, and the mixer turns every panel toward each viewer's head. The pose convention (top-edge midpoint, -Z front) stands, and ADR-0070 keeps it. `panel_pose_beside_volume` remains as the pose a panel config carries before any head is known; no new panel opens before then, and the Hub ignores it for a panel that exists.
 
 ## Evidence and sources
 
@@ -49,7 +51,6 @@ With `--panels 0.0.0.0:<port>` and no `--panel-base-url`, the base URL is named 
 - [GP] QAROS docs at `b1338df`, `docs/website/docs/developer-guide/gui-panels.mdx`, "Attach a panel to your app volume".
 - [OPT] `crates/qaros-rerun/src/options.rs` (`--origin` default, `Options::placement`).
 - [PLC] `crates/xr-math/src/placement.rs` (`with_up_axis_rotation` turns the app pose).
-- [LAN] `crates/qaros-rerun/src/lan_address.rs`.
 - [DEMO] `demos/launcher.py` (the demo's `origin`).
 
 [HDR]: https://github.com/Quaternar/qaros/blob/b1338df/qar-streaming-c/include/qar_streaming.h "QAROS C header"
@@ -57,5 +58,4 @@ With `--panels 0.0.0.0:<port>` and no `--panel-base-url`, the base URL is named 
 [GP]: https://github.com/Quaternar/qaros/blob/b1338df/docs/website/docs/developer-guide/gui-panels.mdx "GUI Panels"
 [OPT]: ../../crates/qaros-rerun/src/options.rs "Viewer options"
 [PLC]: ../../crates/xr-math/src/placement.rs "App placement"
-[LAN]: ../../crates/qaros-rerun/src/lan_address.rs "LAN address"
 [DEMO]: ../../demos/launcher.py "Demo launcher"

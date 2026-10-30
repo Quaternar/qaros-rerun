@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0054: Panels claimed by common name, stable across runs, hidden at Stop instead of closed
 
+> The web parts (URLs and navigation, the dead-page reload and `--dead-panels`, the panel server) are superseded by ADR-0077 (stream panels claimed under names of their own, `set_stream` on every claim); the web route and the panel server were removed. Stable view names, the claim by common name, hiding at Stop and hiding leftovers stand.
+
 ## Context
 
 QAROS keeps GUI panels and app volumes in the session after the app that made them is gone; both are identified by stable common names and created idempotently by them ([CON] "Identity, naming, and persistence"). `get_or_create` returns the existing panel or creates it, and the panel's id is derived from its common name, so "restarting your app reattaches to the same panel instead of spawning duplicates" ([GP] L18-20, L101). The Hub keeps a panel's place, or wherever a user moved it, across runs (ADR-0070).
@@ -65,9 +67,8 @@ Dead pages:
 
 - [PN] `crates/qaros-sink/src/panels.rs` (`QarosPanels::sync`, `open_panel`, `is_left_by_earlier_run`, `hide_panels_left_by_earlier_runs`, `reload_dead_pages`, `PAGE_SILENCE_LIMIT`, `PanelsAtStop`, `DeadPages`).
 - [PC] `crates/qaros-rerun/src/panel_capture.rs` (`readable_panel_name`, stable names), `crates/qaros-rerun/src/qaros_setup.rs` (`PanelServerActivity`).
-- [PS] `crates/panel-server/src/server.rs` (`last_page_request`, `any_page_request`), `crates/panel-server/src/page.html`, `crates/panel-server/tests/page_retry.mjs`.
 - [TS] `crates/qaros-sink/tests/stub.rs` (the tests named above, `a_reattached_page_is_not_reloaded_while_the_headset_is_off`, `a_page_still_silent_after_a_stream_started_is_loaded_again_once_at_the_same_url`, `a_silent_page_beside_a_live_one_is_loaded_again_once`).
-- [KI] [Known issues](../known-issues.md): the mixer crash when panels close or navigate, and the white panel after a Hub restart.
+- [KI] [Known issues](../known-issues.md): why panels need 0.9.0-dev.3177, the mixer's Ultralight renderers on earlier builds.
 - [CON] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/concepts.md`, "Identity, naming, and persistence".
 - [GP] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/gui-panels.mdx` L18-20 (`get_or_create`), L101 (id from the common name), L136 (panel states).
 - [HDR] QAROS header at `ebfe3bf`, `qar-streaming-c/include/qar_streaming.h` L1116-1130 (`QarGuiPanelSize`), L1142-1147 (`QarGuiPanelState`), L4572-4578 (visible-to count).
@@ -76,7 +77,6 @@ Dead pages:
 
 [PN]: ../../crates/qaros-sink/src/panels.rs "QAROS panels"
 [PC]: ../../crates/qaros-rerun/src/panel_capture.rs "Panel capture"
-[PS]: ../../crates/panel-server/src/server.rs "Panel server"
 [TS]: ../../crates/qaros-sink/tests/stub.rs "Sink stub tests"
 [KI]: ../known-issues.md "Known issues"
 [CON]: https://github.com/Quaternar/qaros/blob/ebfe3bf/docs/website/docs/developer-guide/concepts.md "Concepts"

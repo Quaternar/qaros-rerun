@@ -16,12 +16,11 @@ Streaming to headsets needs Windows and QAROS ([Installation](INSTALLATION.md)).
 ```sh
 cargo build -p qaros-rerun
 ./target/debug/qaros-rerun --headless 1600x1000 --out out/headset \
-    --frames 240 --write-every 30 --panels 127.0.0.1:9877 &
+    --frames 240 --write-every 30 &
 ./target/debug/log-test-scene 300
-curl -s http://127.0.0.1:9877/views    # then open http://127.0.0.1:9877/views/<name>
 ```
 
-Drop `--headless` for the normal desktop window. `--sink off` gives a plain viewer. `./target/debug/qaros-rerun --help` lists the options: eye resolution, scripted head motion, simulated users, the frame stamp, placement in the room, near and far, the depth encoding, the panel address and capture interval.
+Drop `--headless` for the normal desktop window. `--sink off` gives a plain viewer. `./target/debug/qaros-rerun --help` lists the options: eye resolution, scripted head motion, simulated users, the frame stamp, placement in the room, near and far, the depth encoding, and the panels.
 
 The sink writes one directory per user (`<out>/user-<n>/`) and, for every n-th shown frame:
 
@@ -51,11 +50,11 @@ User k joins `--join-interval` viewer frames after user k-1 and leaves after `--
 cargo test -p qaros-sink --no-run
 export QAROS_DLL="$(ls -t target/debug/deps/libqaros_stub-*.dylib | head -n 1)"
 ./target/debug/qaros-rerun --headless 1600x1000 --sink qaros --pairing-code ANY-CODE \
-    --frames 150 --quit-when-done --panels 127.0.0.1:9877 &
+    --frames 150 --quit-when-done &
 ./target/debug/log-test-scene 300
 ```
 
-This runs the whole QAROS flow: onboarding (the id lands in `qaros-rerun.onboarding-id.txt`, so the next start rejoins without a code), the app volume, the visualizer found in the peer list, its render sender, 150 frames, a GUI panel per 2D view, and an ordered teardown.
+This runs the whole QAROS flow: onboarding (the id lands in `qaros-rerun.onboarding-id.txt`, so the next start rejoins without a code), the app volume, the visualizer found in the peer list, its render sender, 150 frames, and an ordered teardown. The stub has no video senders, so panels are checked on a QAROS PC.
 
 The stub can also script peers joining and leaving, and check every shown frame's stamp against the frame its sender issued:
 

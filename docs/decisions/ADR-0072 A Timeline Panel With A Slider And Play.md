@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0072: A timeline panel in front of the user drives the viewer's time cursor through the panel server
 
+> The web page, the panel server and the image-load protocol are superseded by ADR-0078 (a timeline drawn by the viewer, driven by panel gestures); the web route and the panel server were removed. The panel's pose, the seek and Play rules and the thumb's hold stand.
+
 ## Context
 
 A recording replays over time, and a user in the headset has no desktop time bar to scrub it with. GUI panels show web content and hand a finger on the panel to the page: as mouse input in the mixer's Ultralight panels and as touch input in its CEF panels. The panel pages are served by the viewer's own panel server (ADR-0019), so a page can talk back to the viewer over the same HTTP connection it loads from. Three panel behaviours seen in the glasses shape the page:
@@ -40,11 +42,11 @@ A recording replays over time, and a user in the headset has no desktop time bar
 ## Evidence and sources
 
 - [PN] `crates/qaros-sink/src/panels.rs` (`QarosPanels::with_timeline_panel`, `timeline_panel_pose_facing`, `TIMELINE_*`).
-- [PG] `crates/panel-server/src/timeline_page.html`, `crates/panel-server/src/timeline.rs` (`TimelineRequests`, `TimelinePosition`), `crates/panel-server/src/server.rs` (routes, `position_response`).
+- [PG] `crates/qaros-rerun/src/timeline_requests.rs` (`TimelineRequests`, `TimelinePosition`), the request queue and the published cursor that stand.
 - [TL] `crates/qaros-rerun/src/timeline_scrub.rs` (`TimelineScrub`, `time_commands`).
-- [TS] `crates/qaros-sink/tests/stub.rs` (`a_timeline_panel_opens_without_views_in_front_of_and_below_the_head_facing_it`, `a_restart_reclaims_the_timeline_panel_where_it_is`).
+- [TS] `crates/qaros-sink/src/panels.rs` tests (`the_timeline_panel_stands_half_a_metre_ahead_and_a_fifth_below_the_eyes_facing_them`).
 
 [PN]: ../../crates/qaros-sink/src/panels.rs "QAROS panels"
-[PG]: ../../crates/panel-server/src/timeline_page.html "Timeline page"
+[PG]: ../../crates/qaros-rerun/src/timeline_requests.rs "Timeline requests"
 [TL]: ../../crates/qaros-rerun/src/timeline_scrub.rs "Timeline scrub"
-[TS]: ../../crates/qaros-sink/tests/stub.rs "Sink stub tests"
+[TS]: ../../crates/qaros-sink/src/panels.rs "QAROS panels"

@@ -54,7 +54,7 @@ The QAROS tests load `qaros-stub`, so no QAROS installation is needed.
 Without a headset, the viewer's default sink writes the eyes as PNGs with scripted head motion. Start it headless, log the included test scene to it, and look at the frames. In PowerShell:
 
 ```powershell
-$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done"
+$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --quit-when-done"
 Start-Sleep 5
 .\target\release\log-test-scene.exe 300
 $viewer.WaitForExit()
@@ -65,14 +65,14 @@ In a Mac or Linux shell:
 
 ```sh
 ./target/release/qaros-rerun --headless 1600x1000 --out out/headset \
-    --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done &
+    --frames 240 --write-every 30 --quit-when-done &
 sleep 5
 ./target/release/log-test-scene 300
 wait
 ls out/headset/user-1
 ```
 
-The viewer exits by itself after 240 shown frames and prints a summary line `headset: frames started 240, shown 240, abandoned 0`. `out/headset/user-1` then holds `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` for every 30th frame. While the viewer runs, `http://127.0.0.1:9877/views` lists the 2D views it serves as panels.
+The viewer exits by itself after 240 shown frames and prints a summary line `headset: frames started 240, shown 240, abandoned 0`. `out/headset/user-1` then holds `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` for every 30th frame.
 
 Drop `--headless` for a desktop window, and see `qaros-rerun --help` for every option.
 

@@ -17,13 +17,12 @@ Your program can run on any machine and any OS. The viewer runs on Windows, on t
 | Machine | Runs | Connections |
 | --- | --- | --- |
 | Any (Linux, macOS, Windows) | Your program with the Rerun SDK 0.40.0 | To the viewer: gRPC, TCP 9876 |
-| Windows, the Hub machine | The QAROS Hub and its visualizer; `qaros-rerun` | `qaros-rerun` to the Hub through QAROS's library `qar-streaming-c.dll`; panel pages served on TCP 9877 |
-| Headset | The QAROS player app | To the Hub (QAROS's own traffic); panel pages from TCP 9877 |
+| Windows, the Hub machine | The QAROS Hub and its visualizer; `qaros-rerun` | `qaros-rerun` to the Hub through QAROS's library `qar-streaming-c.dll`, for the eye streams and the panels' video streams |
+| Headset | The QAROS player app | To the Hub (QAROS's own traffic) |
 
 ```text
 your program ──gRPC :9876──▶ qaros-rerun ──qar-streaming-c──▶ QAROS Hub ──▶ headset
-                             (Windows, the Hub machine)                      │
-                             panel pages :9877 ◀──────── HTTP ───────────────┘
+                             (Windows, the Hub machine)
 ```
 
 QAROS terms used below, with links to the [QAROS documentation][QAROS-DOCS]:
@@ -33,15 +32,15 @@ QAROS terms used below, with links to the [QAROS documentation][QAROS-DOCS]:
 - **Target app**: anything that receives streams, a headset's player app or a visualizer ([Concepts][CONCEPTS]). The viewer renders one stream per running target app.
 - **Peer**: a participant of the session, a device or an application ([Peers][PEERS]).
 - **App volume**: a named box in the room where one application renders; QAROS masks the stream to it ([App volumes][APP-VOLUMES]).
-- **GUI panel**: a flat web page placed in the room ([GUI panels][GUI-PANELS]).
+- **GUI panel**: a flat panel placed in the room, showing a web page or a video stream an app sends ([GUI panels][GUI-PANELS]). The viewer's panels show video streams.
 - **Pairing code**: the Hub's short-lived, single-use code for a first join ([glossary][GLOSSARY]).
 
 ## What you get
 
 - **The 3D view in stereo.** The first 3D view the viewer draws is rendered twice per headset frame, once per eye, with the eye poses and fields of view QAROS hands out for that frame. Color and depth go to QAROS, so the headset can reproject. Pixels where nothing was drawn are transparent, so only your data appears in the room.
 - **One stream per user.** Every running target app in the QAROS session is a user with a render stream of its own. By default the viewer renders for up to two users at a time; a third waits for a free slot. Users who leave are released.
-- **2D views as panels.** With `--panels`, every other view (images, time series, maps) is cropped from the viewer's UI, served as a small web page, and opened as a QAROS GUI panel within reach of the first headset user near the app volume. The Hub keeps each panel where it is, or where a user moved it, across runs.
-- **A timeline you touch.** A timeline panel with a slider and a Play button opens 0.5 m in front of that user and 0.2 m below the eyes. Drag the slider with a finger to scrub the recording; Play resumes. It follows the desktop time, and the desktop follows it.
+- **2D views as panels.** With `--panels`, every other view (images, time series, maps) is cropped from the viewer's UI, sent as a video stream of the viewer, and shown on a QAROS GUI panel within reach of the first headset user near the app volume. The Hub keeps each panel where it is, or where a user moved it, across runs.
+- **A timeline you touch.** A timeline panel with a track and a Play button opens 0.5 m in front of that user and 0.2 m below the eyes. Drag along the track with a finger to scrub the recording; Play resumes. It follows the desktop time, and the desktop follows it.
 - **The desktop viewer.** In a window, the viewer behaves as Rerun's: timeline, blueprint and selection work as usual, and the headset shows the same time point.
 
 What does not reach the headset: Rerun's labels and other overlays drawn after the 3D render. From the glasses, the timeline panel is the way to control the viewer; the 2D view panels show images of the views and do not take input.
@@ -50,15 +49,15 @@ What does not reach the headset: Rerun's labels and other overlays drawn after t
 
 | Machine | For | Needs |
 | --- | --- | --- |
-| Windows (the Hub machine) | Streaming to headsets | QAROS 0.9, a GPU with a Vulkan driver, Visual Studio 2022 Build Tools with the "Desktop development with C++" workload, Git, rustup |
+| Windows (the Hub machine) | Streaming to headsets | QAROS 0.9.0-dev.3177 or later, a GPU with a Vulkan driver, Visual Studio 2022 Build Tools with the "Desktop development with C++" workload, Git, rustup |
 | macOS | Trying the viewer without QAROS | rustup; the viewer writes headset frames as PNGs instead of streaming |
 
 The Vulkan path is developed on NVIDIA GPUs, whose driver ships the Vulkan runtime; no Vulkan SDK is needed.
 
-**Network.** The viewer listens for SDK connections on TCP 9876 (`--port`) on every network interface. With `--panels 0.0.0.0:9877` it also serves panel pages on TCP 9877 to the whole network. Neither port asks for authentication: anyone who reaches 9876 can log data into the viewer, and anyone who reaches 9877 can read the panel pages. Use them on a network you trust. If Windows Defender Firewall blocks inbound connections to `qaros-rerun.exe`, headsets cannot load the panels and SDKs on other machines cannot connect. Allow both ports for the viewer, in an elevated PowerShell:
+**Network.** The viewer listens for SDK connections on TCP 9876 (`--port`) on every network interface. The port asks for no authentication: anyone who reaches it can log data into the viewer, so use it on a network you trust. Panels need no port of their own; their streams go through QAROS. If Windows Defender Firewall blocks inbound connections to `qaros-rerun.exe`, SDKs on other machines cannot connect. Allow the port for the viewer, in an elevated PowerShell:
 
 ```powershell
-New-NetFirewallRule -DisplayName "qaros-rerun" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9876,9877 -Program "C:\path\to\qaros-rerun\target\release\qaros-rerun.exe"
+New-NetFirewallRule -DisplayName "qaros-rerun" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9876 -Program "C:\path\to\qaros-rerun\target\release\qaros-rerun.exe"
 ```
 
 QAROS's own ports are listed on [QAROS's installation page][INSTALLATION].
@@ -88,7 +87,7 @@ The default sink writes PNGs with scripted head motion instead of streaming, so 
 
 ```sh
 ./target/release/qaros-rerun --headless 1600x1000 --out out/headset \
-    --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done &
+    --frames 240 --write-every 30 --quit-when-done &
 sleep 5
 ./target/release/log-test-scene 300
 wait
@@ -98,7 +97,7 @@ ls out/headset/user-1
 In PowerShell:
 
 ```powershell
-$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --panels 127.0.0.1:9877 --quit-when-done"
+$viewer = Start-Process .\target\release\qaros-rerun.exe -PassThru -NoNewWindow -ArgumentList "--headless 1600x1000 --out out\headset --frames 240 --write-every 30 --quit-when-done"
 Start-Sleep 5
 .\target\release\log-test-scene.exe 300
 $viewer.WaitForExit()
@@ -111,12 +110,10 @@ To stop the viewer earlier: `kill %1` in the shell, `Stop-Process -Id $viewer.Id
 
 ```text
 INFO qaros_rerun: listening for Rerun SDK connections on port 9876; headset sink: Images
-INFO qaros_rerun::panel_capture: panels: "camera/image" at http://127.0.0.1:9877/views/camera_image
-INFO qaros_rerun::panel_capture: panels: "plots/sine" at http://127.0.0.1:9877/views/plots_sine
 INFO qaros_rerun::viewer_app: headset: frames started 240, shown 240, abandoned 0; draw data copied 2868 of 2868
 ```
 
-While the viewer runs, `http://127.0.0.1:9877/views` lists the panels as JSON (`["camera_image","plots_sine"]`). `out/headset/user-1` then holds every 30th frame, `frame_00000` to `frame_00210`, each as `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` (poses, fields of view, near and far). A color frame looks like this:
+`out/headset/user-1` then holds every 30th frame, `frame_00000` to `frame_00210`, each as `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` (poses, fields of view, near and far). A color frame looks like this:
 
 ![Left and right eye of the test scene: an orange cube inside a ring of light-blue points](media/test-scene-color.png)
 
@@ -130,7 +127,7 @@ The viewer loads `qar-streaming-c.dll` from QAROS's runtime at run time. It take
 
 The runtime's other binaries are loaded from the same folder, unless `QAROS_RUNTIME_DIR` names another.
 
-The library ships in QAROS's runtime ZIP, in its `bin` folder next to every runtime DLL. [QAROS's installation page][INSTALLATION-SDK] says to request the ZIP from [quaternar.com](https://www.quaternar.com/). Unzip it, keep `bin` whole, and set `QAROS_DLL` to its `bin\qar-streaming-c.dll`. The viewer refuses a library that lacks any function of the QAROS 0.9 header the binding is built against, and names the missing functions.
+Without an installation, the library ships in QAROS's runtime ZIP, in its `bin` folder next to every runtime DLL. [QAROS's installation page][INSTALLATION-SDK] says to request the ZIP from [quaternar.com](https://www.quaternar.com/). Unzip it, keep `bin` whole, and set `QAROS_DLL` to its `bin\qar-streaming-c.dll`. The viewer refuses a library that lacks any function of the QAROS 0.9 header the binding is built against, and names the missing functions. It logs a warning on a runtime older than 0.9.0-dev.3177, the oldest it supports.
 
 ```powershell
 $env:QAROS_DLL = "C:\path\to\qaros\bin\qar-streaming-c.dll"
@@ -141,7 +138,7 @@ $env:QAROS_DLL = "C:\path\to\qaros\bin\qar-streaming-c.dll"
 The viewer joins the QAROS session as an application, creates its app volume "rerun" and streams to every target app it finds. Start it on the Hub machine as a local app of the Hub. No code is needed:
 
 ```powershell
-.\target\release\qaros-rerun.exe --sink qaros --local-app --panels 0.0.0.0:9877
+.\target\release\qaros-rerun.exe --sink qaros --local-app --panels
 ```
 
 On the first start of a viewer executable the Hub asks a person at the machine to allow it, and the viewer waits for that answer (up to 2 minutes by default). Start the viewer in the signed-in desktop session; the Hub refuses a viewer started outside it (`ONBOARDING_HUB_NOT_AUTHENTIC`).
@@ -168,10 +165,10 @@ To stop: Ctrl+C in the viewer's console, closing its window, or Stop in QAROS. T
 **With a pairing code.** Pass the Hub's current code on the first start. The viewer stores its onboarding id in `qaros-rerun.onboarding-id.txt` in the working directory and rejoins with it on later starts, without a code. A code is short-lived, and one failed attempt spends it.
 
 ```powershell
-.\target\release\qaros-rerun.exe --sink qaros --pairing-code <PAIRING-CODE> --panels 0.0.0.0:9877
+.\target\release\qaros-rerun.exe --sink qaros --pairing-code <PAIRING-CODE> --panels
 ```
 
-**Started by QAROS.** In the visualizer, switch to Developer mode and add `qaros-rerun.exe` in the Source Applications panel as a QAROS API app ([Source Applications][SOURCE-APPS]), with its arguments one per line: `--sink`, `qaros`, `--launched-by-qaros`. On Windows the viewer then joins as a local app (the Hub asks to allow it on its first start); elsewhere QAROS passes a launch invite on stdin. Stop in the panel closes stdin, which ends the viewer. Started this way the viewer runs headless at 1280x720 unless you add `--window` or `--headless WxH`. Its working directory is the executable's folder, so set `QAROS_DLL` for the system or add `--qaros-library` and the path as two more lines. The viewer's output lands in the Hub's log folder.
+**Started by QAROS.** In the visualizer, switch to Developer mode and add `qaros-rerun.exe` in the Source Applications panel as a QAROS API app ([Source Applications][SOURCE-APPS]), with its arguments one per line: `--sink`, `qaros`, `--launched-by-qaros`. On Windows the viewer then joins as a local app (the Hub asks to allow it on its first start); elsewhere QAROS passes a launch invite on stdin. Stop in the panel closes stdin, which ends the viewer. Started this way the viewer runs headless at 1280x720 unless you add `--window` or `--headless WxH`. Its working directory is the executable's folder. It finds the installed QAROS by itself; for a runtime elsewhere, set `QAROS_DLL` for the system or add `--qaros-library` and the path as two more lines. The viewer's output lands in the Hub's log folder.
 
 ## Send your own data
 
@@ -213,7 +210,7 @@ headset: frame FrameKey { user: UserId(1), frame_id: 0 }, scene bounds Vec3(-40.
 The middle is `0,0,5`. The extents are 80 (right), 60 (forward) and 10 (up). With the default 2 m volume the scale is the smallest of 2/80, 2/60 and 2/10, which is 0.025:
 
 ```powershell
-.\target\release\qaros-rerun.exe --sink qaros --local-app --panels 0.0.0.0:9877 --center 0,0,5 --scale 0.025
+.\target\release\qaros-rerun.exe --sink qaros --local-app --panels --center 0,0,5 --scale 0.025
 ```
 
 The data then fills 2 m by 1.5 m by 0.25 m of the room. For a larger model, grow the volume and the scale together, for example `--volume-size 4,3,1 --scale 0.05` (4 m by 3 m by 0.5 m); the room must have that space.
@@ -293,20 +290,12 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 
 ### Panels
 
-`--panels ADDRESS` starts the panel server: `http://ADDRESS/views` lists the published 2D views as JSON, and `http://ADDRESS/views/<name>` is a view's page. Views are captured every 250 ms (`--panel-interval-ms`). With `--sink qaros`, each view gets a GUI panel once it has been published for 3 s: 0.45 m wide, created within reach of the first headset user near the app volume (any viewer near it once no headset streamed for 60 s): 0.8 m from the head, to the right of the gaze, top edges just below the eyes, facing the head. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left; close them in the Hub Display for fresh placement.
+`--panels` (with `--sink qaros`) turns the panels on. Views are captured every 250 ms (`--panel-interval-ms`), and each view gets a GUI panel once it has been published for 3 s. The panel's content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into time commands.
 
-- **Reachability.** Bind to `0.0.0.0:<port>` so headsets can load the pages, and allow the port through the firewall. The viewer then names the pages by this machine's LAN address and logs the choice (`panels: pages named by ...`). If that is the wrong network, pass `--panel-base-url http://<reachable address>:<port>`.
-- **Across runs.** A view's panel name and URL stay the same on every run. At Stop the viewer hides its panels instead of closing them (`--panels-at-stop keep` leaves them showing), and the next run reattaches to them. A reattached panel whose page loads nothing within 10 s is loaded again once; `--dead-panels leave` turns that off.
+- **Placement.** A panel is 0.45 m wide and as tall as the view's aspect needs, created within reach of the first headset user near the app volume (any viewer near it once no headset streamed for 60 s): 0.8 m from the head, to the right of the gaze, top edges just below the eyes, facing the head. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left; close them in the Hub Display for fresh placement.
+- **Across runs.** Panels have names that stay the same on every run (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`). At Stop the viewer hides its panels instead of closing them (`--panels-at-stop keep` leaves them showing), and the next run reattaches to them with its new streams.
+- **QAROS build.** Panels need QAROS 0.9.0-dev.3177 or later, the first build whose mixer keeps working when a panel's stream restarts. The viewer logs a warning on an older runtime.
 - **Cost.** Each capture reads the whole viewer UI back from the GPU. A longer `--panel-interval-ms` gives the headset more frames.
-- A taken panel port moves the server to a free port, with a warning in the log.
-
-### Stream panels
-
-`--panel-route stream` takes the panel server out of the path. Each 2D view becomes a GUI panel whose content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture, with no page to load and no second renderer. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into the same time commands. No port is bound for panels, so `--panels` only turns them on, and `--panel-base-url` and `--dead-panels` do not apply.
-
-- **QAROS build.** Use it with QAROS 0.9.0-dev.3177 or later. Earlier mixers give every panel its own Ultralight renderer, and a stream panel's restart crashes the mixer ([known issues](known-issues.md#mixer-crash-when-stream-panels-restart-before-3177)).
-- **Names.** Stream panels have names of their own (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`), so the two routes never take each other's panels. A stream run leaves web panels from earlier runs alone and logs them; close them once in the Hub Display.
-- **Going back.** `--panel-route web` on the same build works in the same Hub session. A build from before stream panels cannot list panels while a stream panel exists in the session, so it needs a Hub "New session" first.
 
 ### Two users
 
@@ -341,7 +330,6 @@ This mode is experimental, off by default, and may change in a later version. By
 | `QAROS handed back app volume "rerun" closed by an earlier run; content may not show` | QAROS returned a volume a previous run closed | Start with another `--volume-name` |
 | Nothing in the headset, the log streams | Data outside the app volume, no 3D view, or left-handed coordinates | See [Place your data in the app volume](#place-your-data-in-the-app-volume) and [What the headset shows](#what-the-headset-shows) |
 | An SDK on another machine cannot connect | Firewall, or the wrong address | Allow TCP 9876 for `qaros-rerun.exe` ([What you need](#what-you-need)); connect to the Hub machine's LAN address |
-| Panels white or empty | The panel's browser cannot reach the panel server | `--panels 0.0.0.0:<port>`, allow the port through the firewall, and `--panel-base-url` with an address the headsets reach |
 | `--decoupled-render with the QAROS Vulkan sink needs --headless ...` | Decoupled render in a window on the Vulkan path | Add `--headless WxH`, or use `--qaros-graphics cpu` |
 | `--qaros-graphics vulkan (the default on Windows) and --image-targets gpu write depth into a depth image ...` | `--depth linear` on the Vulkan path | `--depth forward` or `reverse`, or `--qaros-graphics cpu` |
 | Build fails with E0514 ("found crate compiled by an incompatible version of rustc") | Crates from two toolchains in `target` | Run `cargo` from inside the repository, then `cargo clean` |
@@ -382,10 +370,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--volume-name NAME` | `rerun` | The app volume's name; viewers running at once need different names |
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |
-| `--panel-route web\|stream` | `web` | How 2D views and the timeline reach their panels: `web` serves pages from the panel server, `stream` sends each one as a video stream of the viewer ([Stream panels](#stream-panels)); `stream` needs QAROS 0.9.0-dev.3177 or later |
-| `--panel-base-url URL` | `http://` plus the `--panels` address, `0.0.0.0` replaced by the LAN address | How GUI panels reach the panel server |
 | `--panels-at-stop hide\|keep` | `hide` | What the panels become at Stop; they are never closed |
-| `--dead-panels reload\|leave` | `reload` | Whether a reattached panel whose page loads nothing within 10 s is loaded again once |
 
 **Placement and depth**
 
@@ -404,7 +389,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `--panels ADDRESS` | off | Serve 2D views at `http://ADDRESS/views/<name>`, for example `0.0.0.0:9877` |
+| `--panels` | off | Open the 2D views and a timeline as GUI panels, each a video stream of the viewer; needs `--sink qaros` ([Panels](#panels)) |
 | `--panel-interval-ms MS` | 250 | Capture interval |
 
 **Viewer and graphics device**

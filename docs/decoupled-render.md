@@ -65,7 +65,7 @@ wgpu's own submissions are thread-safe; the QAROS Vulkan path's raw submits and 
 
 - Poses: `begin_frames` runs on the render thread right before the eye views are built, so every eye frame uses the newest poses, whatever the scene's age. The perf log records the scene's age at every eye frame (`scene_age_at_eye_frame`).
 - Eye output resources (composite targets, output uniforms) belong to the render thread's `HeadsetRenderer` and are reused across frames.
-- Panels: capture (cropping the UI image, the panel server) stays on the UI thread; the QAROS GUI panel hook runs once per eye frame on the render thread and syncs once a second.
+- Panels: capture (cropping the UI image) and the timeline panel's drawing stay on the UI thread; the QAROS GUI panel hook runs once per eye frame on the render thread and syncs once a second.
 - Users: joins, leaves and the user cap work as without the flag, inside the sink on the render thread; with two users each gets a frame per eye frame.
 
 ### Stop and teardown
