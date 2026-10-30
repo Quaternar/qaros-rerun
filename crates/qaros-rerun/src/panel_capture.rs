@@ -1,6 +1,5 @@
-//! 2D views as QAROS panels, route B: the viewer's own pixels for each non-3D view, cropped
-//! from a window screenshot and served by the panel server (`--panel-route web`), or handed to
-//! the stream panels' video senders (`--panel-route stream`).
+//! 2D views as QAROS GUI panels: the viewer's own pixels for each non-3D view, cropped from a
+//! window screenshot and handed to the panels' video senders.
 //!
 //! This is the on-screen variant: egui's `Context::request_screenshot` captures the whole
 //! window, and each view's rectangle comes from Rerun's `ViewRectPublisher` (the same source
@@ -12,10 +11,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use panel_server::{PanelServer, TimelinePosition, TimelineRequests, ViewFrames};
 #[cfg(feature = "qaros")]
 use qaros_sink::{PanelGestures, PanelImages};
 use re_viewer_context::{PublishedViewInfo, ViewId, ViewRectPublisher};
+
+use crate::timeline_requests::{TimelinePosition, TimelineRequests};
 
 /// The largest side of a streamed view, in pixels; a larger crop is halved until it fits.
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
@@ -30,47 +30,6 @@ pub const STREAM_PIXEL_CAP: u32 = 1280;
 pub const MIXER_WIDTH_ALIGNMENT: u32 = 64;
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 pub const MIXER_HEIGHT_ALIGNMENT: u32 = 8;
-
-/// Where the captured views go.
-pub trait PanelPublisher {
-    fn publish_view(
-        &self,
-        name: &str,
-        width: u32,
-        height: u32,
-        rgba8: Vec<u8>,
-    ) -> Result<(), String>;
-}
-
-/// The web route: a PNG per view on the panel server.
-impl PanelPublisher for ViewFrames {
-    fn publish_view(
-        &self,
-        name: &str,
-        width: u32,
-        height: u32,
-        rgba8: Vec<u8>,
-    ) -> Result<(), String> {
-        self.publish_rgba8(name, width, height, &rgba8)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
-}
-
-/// The stream route: BGRA images for the video senders, at most [`STREAM_PIXEL_CAP`] a side.
-#[cfg(feature = "qaros")]
-impl PanelPublisher for PanelImages {
-    fn publish_view(
-        &self,
-        name: &str,
-        width: u32,
-        height: u32,
-        rgba8: Vec<u8>,
-    ) -> Result<(), String> {
-        let (width, height, rgba8) = fit_within_cap(width, height, rgba8, STREAM_PIXEL_CAP);
-        publish_padded_for_mixer(self, name, width, height, rgba8)
-    }
-}
 
 /// Publishes a stream panel image padded by [`pad_for_mixer`], and logs the padded size once
 /// per name and size. The panel's metres follow the padded image, so its content area keeps
@@ -123,17 +82,19 @@ pub fn pad_for_mixer(width: u32, height: u32, rgba8: Vec<u8>) -> (u32, u32, Vec<
     (padded_width, padded_height, padded)
 }
 
-/// What the QAROS panel hook reads the published views from, and on the stream route where
-/// the timeline panel's gestures arrive.
+/// What the QAROS panel hook reads the published views from, and where the timeline panel's
+/// gestures arrive.
+#[cfg(feature = "qaros")]
 #[derive(Clone)]
-pub enum PanelOutlet {
-    Web(ViewFrames),
-    #[cfg(feature = "qaros")]
-    Stream {
-        images: PanelImages,
-        gestures: PanelGestures,
-    },
+pub struct PanelOutlet {
+    pub images: PanelImages,
+    pub gestures: PanelGestures,
 }
+
+/// Panels need the QAROS sink, so a build without it has no outlet to capture into.
+#[cfg(not(feature = "qaros"))]
+#[derive(Clone)]
+pub enum PanelOutlet {}
 
 /// Views seen by the 3D observer this frame, so panel capture can skip them.
 #[derive(Default)]
@@ -145,11 +106,9 @@ pub struct ViewDirectory {
 pub type SharedViewDirectory = Arc<Mutex<ViewDirectory>>;
 
 pub struct PanelCapture {
-    /// The web route's panel server; `None` on the stream route.
-    server: Option<PanelServer>,
     outlet: PanelOutlet,
-    /// The panel server's on the web route; the viewer's own on the stream route, where the
-    /// timeline panel is drawn by the viewer.
+    /// The timeline panel's requests and the cursor for its thumb, shared with the viewer's
+    /// own timeline panel.
     timeline_requests: TimelineRequests,
     timeline_position: TimelinePosition,
     capture_interval: Duration,
@@ -162,54 +121,14 @@ pub struct PanelCapture {
 
 impl PanelCapture {
     pub fn new(
-        server: PanelServer,
-        capture_interval: Duration,
-        view_directory: SharedViewDirectory,
-    ) -> Self {
-        let outlet = PanelOutlet::Web(server.frames().clone());
-        let timeline = (
-            server.timeline_requests().clone(),
-            server.timeline_position().clone(),
-        );
-        Self::with_outlet(
-            Some(server),
-            outlet,
-            timeline,
-            capture_interval,
-            view_directory,
-        )
-    }
-
-    /// The stream route: no panel server; the views go to `images`, and the timeline panel's
-    /// gestures arrive in `gestures`.
-    #[cfg(feature = "qaros")]
-    pub fn streaming(
-        images: PanelImages,
-        gestures: PanelGestures,
-        capture_interval: Duration,
-        view_directory: SharedViewDirectory,
-    ) -> Self {
-        Self::with_outlet(
-            None,
-            PanelOutlet::Stream { images, gestures },
-            (TimelineRequests::default(), TimelinePosition::default()),
-            capture_interval,
-            view_directory,
-        )
-    }
-
-    fn with_outlet(
-        server: Option<PanelServer>,
         outlet: PanelOutlet,
-        (timeline_requests, timeline_position): (TimelineRequests, TimelinePosition),
         capture_interval: Duration,
         view_directory: SharedViewDirectory,
     ) -> Self {
         Self {
-            server,
             outlet,
-            timeline_requests,
-            timeline_position,
+            timeline_requests: TimelineRequests::default(),
+            timeline_position: TimelinePosition::default(),
             capture_interval,
             last_request: None,
             arrived_screenshots: Arc::default(),
@@ -219,14 +138,13 @@ impl PanelCapture {
         }
     }
 
-    /// The published views, shared with the HTTP thread or the QAROS thread.
+    /// The published views, shared with the QAROS thread.
     pub fn outlet(&self) -> PanelOutlet {
         self.outlet.clone()
     }
 
     /// The timeline panel's requests and where the viewer's time cursor stands, shared with
-    /// the HTTP thread on the web route and with the viewer's own timeline panel on the stream
-    /// route.
+    /// the viewer's own timeline panel.
     pub fn timeline_link(&self) -> (TimelineRequests, TimelinePosition) {
         (
             self.timeline_requests.clone(),
@@ -234,12 +152,23 @@ impl PanelCapture {
         )
     }
 
-    fn publisher(&self) -> &dyn PanelPublisher {
-        match &self.outlet {
-            PanelOutlet::Web(frames) => frames,
-            #[cfg(feature = "qaros")]
-            PanelOutlet::Stream { images, .. } => images,
-        }
+    /// The stream panels' images, at most [`STREAM_PIXEL_CAP`] a side and padded for the
+    /// mixer.
+    #[cfg(feature = "qaros")]
+    fn publish_view(
+        &self,
+        name: &str,
+        width: u32,
+        height: u32,
+        rgba8: Vec<u8>,
+    ) -> Result<(), String> {
+        let (width, height, rgba8) = fit_within_cap(width, height, rgba8, STREAM_PIXEL_CAP);
+        publish_padded_for_mixer(&self.outlet.images, name, width, height, rgba8)
+    }
+
+    #[cfg(not(feature = "qaros"))]
+    fn publish_view(&self, _: &str, _: u32, _: u32, _: Vec<u8>) -> Result<(), String> {
+        match self.outlet {}
     }
 
     pub fn on_frame(&mut self, egui_ctx: &egui::Context) {
@@ -326,28 +255,17 @@ impl PanelCapture {
             else {
                 continue;
             };
-            if let Err(error) = self
-                .publisher()
-                .publish_view(&panel_name, width, height, rgba8)
-            {
+            if let Err(error) = self.publish_view(&panel_name, width, height, rgba8) {
                 re_log::warn_once!("panels: cannot publish {panel_name}: {error}");
                 continue;
             }
             if !self.announced_views.insert(panel_name.clone()) {
                 continue;
             }
-            if let Some(url) = self
-                .server
-                .as_ref()
-                .and_then(|server| server.view_url(&panel_name))
-            {
-                re_log::info!("panels: {:?} at {url}", view_info.name);
-            } else {
-                re_log::info!(
-                    "panels: {:?} published as {panel_name} at {width}x{height}",
-                    view_info.name
-                );
-            }
+            re_log::info!(
+                "panels: {:?} published as {panel_name} at {width}x{height}",
+                view_info.name
+            );
         }
     }
 }
@@ -612,11 +530,15 @@ mod tests {
         image
     }
 
+    #[cfg(feature = "qaros")]
     #[test]
     fn a_capture_is_due_at_once_then_one_interval_after_it_is_taken() {
-        let server = PanelServer::start("127.0.0.1:0").unwrap();
+        let outlet = PanelOutlet {
+            images: PanelImages::default(),
+            gestures: PanelGestures::default(),
+        };
         let interval = Duration::from_mins(1);
-        let mut capture = PanelCapture::new(server, interval, SharedViewDirectory::default());
+        let mut capture = PanelCapture::new(outlet, interval, SharedViewDirectory::default());
         assert_eq!(capture.until_due(), Duration::ZERO);
         assert!(capture.take_due());
         let until_due = capture.until_due();

@@ -102,8 +102,8 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     /// `QAROS_RERUN_SCENE_DELAY_MS`: a stand-in for a heavy scene, slept after every UI pass.
     pub scene_delay: Option<std::time::Duration>,
     pub panel_capture: Option<PanelCapture>,
-    /// `--panel-route stream`: the timeline panel the viewer draws into its own video stream;
-    /// it turns the panel's gestures into requests for `timeline_scrub`.
+    /// With `--panels`: the timeline panel the viewer draws into its own video stream; it
+    /// turns the panel's gestures into requests for `timeline_scrub`.
     #[cfg(feature = "qaros")]
     pub timeline_panel: Option<TimelinePanel>,
     /// With `--panels`: the timeline panel's requests, applied before the Rerun app's logic.
@@ -157,7 +157,7 @@ impl<Viewer> HeadsetViewerApp<Viewer> {
     /// (`onboarding-and-sessions.mdx` L278 at `b1338df`). Tears down what QAROS sees first: the
     /// headset's sink with its render senders and the frame hooks with the GUI panels; the
     /// connection (session, runtime, library) goes with the last of them. Then exits at once:
-    /// dropping a large Rerun store, the panel server and the async runtime took over a second
+    /// dropping a large Rerun store and the async runtime took over a second
     /// on a heavy scene, enough to miss the window. On Windows the process is terminated
     /// rather than exited, so QAROS DLLs still mapped do not run their unload code
     /// (`qaros_sink::end_process_after_teardown`).
@@ -221,7 +221,7 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
     /// occluded (`eframe` 0.37.0 `wgpu_integration.rs`, `if !show_ui`), so the stop is checked
     /// here: a check in `ui` alone never runs for a minimised window. The Rerun app runs its
     /// pending commands in its `logic`, so the slider's commands go in just before it. The
-    /// stream route's timeline panel is drawn here too: on Legion the desktop window is often
+    /// timeline panel is drawn here too: on Legion the desktop window is often
     /// hidden while the glasses are worn, and then only `logic` runs.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.is_stop_requested() {
@@ -348,7 +348,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::Rc;
 
-    use panel_server::{TimelinePosition, TimelineRequest, TimelineRequests};
+    use crate::timeline_requests::{TimelinePosition, TimelineRequest, TimelineRequests};
     use re_viewer_context::external::re_log_types::{
         AbsoluteTimeRange, StoreId, StoreKind, TimeInt,
     };

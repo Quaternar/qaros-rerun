@@ -1,4 +1,4 @@
-//! The two panel calls of the stream route the `qaros` crate has no safe form of: its
+//! The two stream panel calls the `qaros` crate has no safe form of: its
 //! `GuiPanelConfig` carries no content, and it has no `set_stream` (`qaros/src/panels.rs` at
 //! `ebfe3bf`; "stream panels and panel gestures. Reach them through `library.raw_api()`",
 //! `gui-panels.mdx` L471-474).

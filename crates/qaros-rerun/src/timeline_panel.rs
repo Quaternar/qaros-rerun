@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Shape, Stroke, ViewportId, vec2};
 use frame_sink::perf;
-use panel_server::{TimelinePosition, TimelineRequest, TimelineRequests};
 use qaros_sink::qaros::PeerId;
 use qaros_sink::{
     GesturePhase, PanelGesture, PanelGestureKind, PanelGestures, PanelImages, TIMELINE_IMAGE_KEY,
@@ -24,6 +23,7 @@ use rerun::external::re_viewer::external::re_ui;
 
 use crate::panel_capture::publish_padded_for_mixer;
 use crate::panel_render::OffscreenEguiRenderer;
+use crate::timeline_requests::{TimelinePosition, TimelineRequest, TimelineRequests};
 use crate::timeline_scrub::TimelineSource;
 
 /// The timeline panel's image in pixels: the 0.45 m x 0.12 m panel's aspect (3.75).

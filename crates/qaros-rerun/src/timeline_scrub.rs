@@ -1,9 +1,8 @@
 //! The timeline panel's slider, applied to the viewer: a seek pauses playback and moves
 //! the time cursor to that fraction of the active timeline's data, Play resumes. The desktop
 //! time panel shows the same cursor, since both drive Rerun's one time control. The other way,
-//! the cursor's fraction goes to the panel server each frame for the slider's thumb to follow.
+//! the cursor's fraction is published each frame for the panel's thumb to follow.
 
-use panel_server::{TimelinePosition, TimelineRequest, TimelineRequests};
 use re_viewer_context::external::re_log_types::{AbsoluteTimeRange, StoreId, TimeInt, TimeReal};
 use std::sync::{Mutex, PoisonError};
 
@@ -15,6 +14,8 @@ use re_viewer_context::{
 };
 use rerun::external::re_sdk_types::blueprint::components::PlayState;
 use rerun::external::re_viewer;
+
+use crate::timeline_requests::{TimelinePosition, TimelineRequest, TimelineRequests};
 
 /// The recording the viewer shows, the data range of its active timeline, where its time
 /// cursor stands and whether its time control plays (following counts as playing).
@@ -110,9 +111,9 @@ pub fn register_time_control_probe(viewer: &mut re_viewer::App) {
     }
 }
 
-/// Takes the pages' requests once per viewer frame and sends them to the viewer as time
-/// control commands, through the command channel the Rerun app was built with, and publishes
-/// where the time cursor stands for the pages.
+/// Takes the timeline panel's requests once per viewer frame and sends them to the viewer as
+/// time control commands, through the command channel the Rerun app was built with, and
+/// publishes where the time cursor stands for the panel.
 pub struct TimelineScrub {
     requests: TimelineRequests,
     position: TimelinePosition,

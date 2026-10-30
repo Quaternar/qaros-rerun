@@ -23,7 +23,6 @@ qaros = ["dep:qaros-sink", "qaros-sink/vulkan"]
 [dependencies]
 xr-math.workspace = true
 frame-sink = { workspace = true, features = ["gpu"] }
-panel-server.workspace = true
 qaros-sink = { workspace = true, optional = true }
 vulkan-device.workspace = true
 
@@ -40,7 +39,6 @@ egui-wgpu.workspace = true
 wgpu.workspace = true
 egui_kittest.workspace = true
 image.workspace = true
-if-addrs = "0.15"
 mimalloc.workspace = true
 re_math.workspace = true
 

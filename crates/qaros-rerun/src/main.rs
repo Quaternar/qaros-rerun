@@ -11,17 +11,20 @@ mod eye_output;
 mod eye_render;
 mod headless;
 mod headset;
-#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
-mod lan_address;
 mod memory_budget_log;
 mod memory_knobs;
 mod options;
+// Without the QAROS sink there are no panels: nothing builds a capture or a timeline request.
+#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 mod panel_capture;
 mod panel_render;
 #[cfg(feature = "qaros")]
 mod qaros_setup;
 #[cfg(feature = "qaros")]
 mod timeline_panel;
+#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+mod timeline_requests;
+#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 mod timeline_scrub;
 mod viewer_app;
 
@@ -40,9 +43,7 @@ use crate::headless::{HeadlessOptions, run_headless};
 use crate::headset::{HeadsetRenderer, HeadsetSettings, HeadsetSink};
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::memory_knobs::MemoryKnobs;
-use crate::options::{
-    ImageTargets, MotionKind, Options, PanelRouteKind, ParseOutcome, SinkKind, USAGE,
-};
+use crate::options::{ImageTargets, MotionKind, Options, ParseOutcome, SinkKind, USAGE};
 use crate::panel_capture::{PanelCapture, PanelOutlet, SharedViewDirectory, ViewDirectory};
 use crate::timeline_scrub::TimelineScrub;
 use crate::viewer_app::{
@@ -335,7 +336,7 @@ fn install_view_3d_observer(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut options = match Options::parse(std::env::args().skip(1)) {
+    let options = match Options::parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(ParseOutcome::Help) => {
             print!("{USAGE}");
@@ -358,7 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| error.to_string())?;
     let grpc_address = format!("0.0.0.0:{}", options.grpc_port).parse()?;
     let view_directory = SharedViewDirectory::new(Mutex::new(ViewDirectory::default()));
-    let panel_capture = start_panel_capture(&mut options, &view_directory)?;
+    let panel_capture = start_panel_capture(&options, &view_directory)?;
 
     let loads_qaros = options.sink == SinkKind::Qaros;
     let outcome = run_viewer(
@@ -448,9 +449,7 @@ async fn run_viewer(
     // Headless, the runner keeps the panel capture, so the slider's shared state is taken here.
     let timeline_link = panel_capture.as_ref().map(PanelCapture::timeline_link);
     #[cfg(feature = "qaros")]
-    let stream_timeline = panel_capture
-        .as_ref()
-        .and_then(|capture| StreamTimeline::for_outlet(capture.outlet()));
+    let panel_outlet = panel_capture.as_ref().map(PanelCapture::outlet);
     let build_app = move |creation_context: &eframe::CreationContext<'_>,
                           panel_capture: Option<PanelCapture>|
           -> HeadsetViewerApp {
@@ -478,9 +477,14 @@ async fn run_viewer(
             scene_delay,
             panel_capture,
             #[cfg(feature = "qaros")]
-            timeline_panel: stream_timeline.zip(timeline_link.clone()).map(
-                |(stream_timeline, (requests, position))| {
-                    stream_timeline.into_panel(requests, position)
+            timeline_panel: panel_outlet.zip(timeline_link.clone()).map(
+                |(outlet, (requests, position))| {
+                    timeline_panel::TimelinePanel::new(
+                        outlet.images,
+                        outlet.gestures,
+                        requests,
+                        position,
+                    )
                 },
             ),
             timeline_scrub: timeline_link
@@ -551,92 +555,42 @@ fn startup_options(is_headless: bool) -> re_viewer::StartupOptions {
     startup_options
 }
 
-/// The stream route's timeline panel before the viewer exists: the images it publishes into
-/// and the gestures it reads.
+/// The views go to the panels' video senders, and the timeline panel's gestures come back
+/// from its panel.
 #[cfg(feature = "qaros")]
-struct StreamTimeline {
-    images: qaros_sink::PanelImages,
-    gestures: qaros_sink::PanelGestures,
-}
-
-#[cfg(feature = "qaros")]
-impl StreamTimeline {
-    /// `None` on the web route, where the panel server's page is the timeline panel.
-    fn for_outlet(outlet: PanelOutlet) -> Option<Self> {
-        match outlet {
-            PanelOutlet::Web(_) => None,
-            PanelOutlet::Stream { images, gestures } => Some(Self { images, gestures }),
-        }
-    }
-
-    fn into_panel(
-        self,
-        requests: panel_server::TimelineRequests,
-        position: panel_server::TimelinePosition,
-    ) -> timeline_panel::TimelinePanel {
-        timeline_panel::TimelinePanel::new(self.images, self.gestures, requests, position)
-    }
-}
-
-/// A taken panel port (a second instance of the same demo) moves the panels to a free port, and
-/// the panel pages are named by that port, so the second instance does not fail its start.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the build without the QAROS sink refuses panels"
+)]
 fn start_panel_capture(
-    options: &mut Options,
+    options: &Options,
     view_directory: &SharedViewDirectory,
 ) -> Result<Option<PanelCapture>, Box<dyn std::error::Error>> {
-    let Some(asked_address) = options.panel_address.clone() else {
+    if !options.panels {
         return Ok(None);
-    };
-    if options.qaros.panel_route == PanelRouteKind::Stream {
-        return start_stream_panel_capture(options, &asked_address, view_directory).map(Some);
     }
-    let (server, refusal) = panel_server::PanelServer::start_or_any_free_port(&asked_address)?;
-    let address = server
-        .local_address()
-        .map_or(asked_address.clone(), |bound| bound.to_string());
-    if let Some(refusal) = refusal {
-        re_log::warn!("panels: {asked_address} is taken ({refusal}); serving on {address} instead");
-        options.panel_address = Some(address.clone());
-    }
-    re_log::info!("panels: serving 2D views under http://{address}/views");
+    re_log::info!("panels: 2D views and the timeline go to QAROS GUI panels as video streams");
     Ok(Some(PanelCapture::new(
-        server,
+        PanelOutlet {
+            images: qaros_sink::PanelImages::default(),
+            gestures: qaros_sink::PanelGestures::default(),
+        },
         options.panel_capture_interval,
         Arc::clone(view_directory),
     )))
 }
 
-/// The stream route needs no panel server: the views go to the stream panels' video senders.
-// The `Result` is for the build without the QAROS sink, which refuses the route.
-#[cfg(feature = "qaros")]
-#[allow(clippy::unnecessary_wraps)]
-fn start_stream_panel_capture(
-    options: &Options,
-    asked_address: &str,
-    view_directory: &SharedViewDirectory,
-) -> Result<PanelCapture, Box<dyn std::error::Error>> {
-    re_log::info!(
-        "panels: --panel-route stream: no panel server, {asked_address} unused; 2D views go to \
-         stream panels"
-    );
-    Ok(PanelCapture::streaming(
-        qaros_sink::PanelImages::default(),
-        qaros_sink::PanelGestures::default(),
-        options.panel_capture_interval,
-        Arc::clone(view_directory),
-    ))
-}
-
 #[cfg(not(feature = "qaros"))]
-fn start_stream_panel_capture(
-    _options: &Options,
-    _asked_address: &str,
+fn start_panel_capture(
+    options: &Options,
     _view_directory: &SharedViewDirectory,
-) -> Result<PanelCapture, Box<dyn std::error::Error>> {
-    Err(
-        "--panel-route stream needs the QAROS sink; rebuild with the default `qaros` feature"
-            .into(),
-    )
+) -> Result<Option<PanelCapture>, Box<dyn std::error::Error>> {
+    if options.panels {
+        return Err(
+            "--panels needs the QAROS sink; rebuild with the default `qaros` feature".into(),
+        );
+    }
+    Ok(None)
 }
 
 /// Logs the adapter and the first Vulkan memory budget line; the log goes on with the viewer.

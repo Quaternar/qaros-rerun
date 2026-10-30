@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/xr-math",
     "crates/frame-sink",
-    "crates/panel-server",
     "crates/qaros-sink",
     "crates/qaros-rerun",
     "crates/vulkan-device",
@@ -20,7 +19,6 @@ publish = false
 [workspace.dependencies]
 xr-math = { path = "crates/xr-math" }
 frame-sink = { path = "crates/frame-sink" }
-panel-server = { path = "crates/panel-server" }
 qaros-sink = { path = "crates/qaros-sink" }
 vulkan-device = { path = "crates/vulkan-device" }
 
@@ -33,7 +31,6 @@ qaros-ext = { git = "https://github.com/Quaternar/qaros", rev = "ebfe3bfb1d6c5d8
 
 glam = "0.33.11"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-tiny_http = "0.12.0"
 
 rerun = { version = "=0.40.0", default-features = false }
 re_viewer = { version = "=0.40.0", default-features = false }

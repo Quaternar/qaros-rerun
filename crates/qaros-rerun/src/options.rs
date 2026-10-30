@@ -5,8 +5,6 @@ use glam::Vec3;
 use vulkan_device::PhysicalDeviceSelector;
 use xr_math::{AppPlacement, DepthEncoding, DepthRange, Pose, ViewCoordinates};
 
-use crate::lan_address::{LanAddress, lan_ipv4_address};
-
 pub const USAGE: &str = "\
 qaros-rerun: the Rerun viewer with a headset renderer
 
@@ -75,21 +73,6 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
     --panels-at-stop hide|keep what the GUI panels become at Stop (default hide): hide sets them
                                hidden, keep leaves them showing; either way they stay for the
                                next run to reattach, never closed
-    --dead-panels reload|leave what becomes of a reattached panel whose page asks the panel
-                               server for nothing 10 s after a stream started or another page
-                               asked (default reload): reload loads the same URL once, leave
-                               makes no panel call
-    --panel-route web|stream   how 2D views and the timeline reach their GUI panels (default
-                               web): web serves them as pages from the panel server; stream
-                               sends each view and a timeline the viewer draws as video
-                               streams of this viewer, with no server and no page, and takes
-                               the timeline's taps and drags as panel gestures (the --panels
-                               address is then unused). Use stream with QAROS 0.9.0-dev.3177
-                               or later; earlier mixers crash when stream panels restart
-    --panel-base-url URL       how QAROS GUI panels reach the panel server (default http://--panels,
-                               with 0.0.0.0 replaced by this machine's LAN IPv4 address: the
-                               default route's local address, else the first interface address
-                               that is neither loopback nor link-local, else 127.0.0.1)
     --qaros-graphics cpu|vulkan   frames through the CPU render senders, or rendered straight
                                into the Vulkan render senders' images on a Vulkan device the
                                viewer creates after onboarding, on the adapter the session
@@ -127,8 +110,10 @@ Depth reported to the sink (the QAROS sink converts near and far to the poses' u
     --far METERS               finite far plane in room meters (default 20)
     --depth forward|reverse|linear   depth encoding (default forward)
 
-2D views as panels (route B):
-    --panels ADDRESS           serve non-3D views at http://ADDRESS/views/<name> (e.g. 127.0.0.1:9877)
+2D views as QAROS GUI panels (with --sink qaros; QAROS 0.9.0-dev.3177 or later):
+    --panels                   open each non-3D view and a timeline as GUI panels within reach
+                               of the headset user, each a video stream of this viewer; the
+                               timeline takes taps and drags on its track and Play button
     --panel-interval-ms MS     capture interval (default 250)
 
 Viewer:
@@ -181,23 +166,6 @@ pub enum PoseSpaceKind {
 pub enum PanelsAtStopKind {
     Hide,
     Keep,
-}
-
-/// How 2D views reach their GUI panels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelRouteKind {
-    /// Pages of the panel server, which each panel's browser loads.
-    Web,
-    /// A CPU video sender per view, which each panel shows (`QarGuiPanelStreamIdExt`).
-    Stream,
-}
-
-/// What becomes of a reattached panel whose page asks for nothing; see
-/// `qaros_sink::DeadPages`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeadPanelsKind {
-    Reload,
-    Leave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -258,10 +226,7 @@ pub struct QarosOptions {
     /// The app volume's label for people; the viewer's peer is "<display name> viewer".
     pub display_name: String,
     pub color_format: ColorFormatKind,
-    pub panel_base_url: Option<String>,
     pub panels_at_stop: PanelsAtStopKind,
-    pub dead_panels: DeadPanelsKind,
-    pub panel_route: PanelRouteKind,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -358,25 +323,10 @@ impl QarosOptions {
                 }
                 other => return Err(invalid(flag, other)),
             },
-            "--panel-base-url" => self.panel_base_url = Some(value),
             "--panels-at-stop" => {
                 self.panels_at_stop = match value.as_str() {
                     "hide" => PanelsAtStopKind::Hide,
                     "keep" => PanelsAtStopKind::Keep,
-                    other => return Err(invalid(flag, other)),
-                }
-            }
-            "--panel-route" => {
-                self.panel_route = match value.as_str() {
-                    "web" => PanelRouteKind::Web,
-                    "stream" => PanelRouteKind::Stream,
-                    other => return Err(invalid(flag, other)),
-                }
-            }
-            "--dead-panels" => {
-                self.dead_panels = match value.as_str() {
-                    "reload" => DeadPanelsKind::Reload,
-                    "leave" => DeadPanelsKind::Leave,
                     other => return Err(invalid(flag, other)),
                 }
             }
@@ -411,10 +361,7 @@ impl Default for QarosOptions {
             volume_name: "rerun".to_owned(),
             display_name: "Rerun".to_owned(),
             color_format: ColorFormatKind::Bgra,
-            panel_base_url: None,
             panels_at_stop: PanelsAtStopKind::Hide,
-            dead_panels: DeadPanelsKind::Reload,
-            panel_route: PanelRouteKind::Web,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -458,7 +405,8 @@ pub struct Options {
     pub world_yaw_degrees: f32,
     pub world_coordinates_override: Option<ViewCoordinates>,
     pub depth_range: DepthRange,
-    pub panel_address: Option<String>,
+    /// `--panels`: the 2D views and a timeline as QAROS GUI panels.
+    pub panels: bool,
     pub panel_capture_interval: Duration,
     pub grpc_port: u16,
     pub headless_size: Option<[u32; 2]>,
@@ -504,7 +452,7 @@ impl Default for Options {
                 },
                 encoding: DepthEncoding::ForwardNormalized,
             },
-            panel_address: None,
+            panels: false,
             // Each capture reads the whole window back from the GPU on the UI thread; on air
             // traffic 100 ms cost 15 % of the headset frames, 250 ms 6 %.
             panel_capture_interval: Duration::from_millis(250),
@@ -533,30 +481,6 @@ impl Options {
             ..AppPlacement::default()
         }
         .with_up_axis_rotation(self.world_yaw_degrees.to_radians())
-    }
-
-    /// Where QAROS GUI panels load the 2D view pages from. Whether the headset or the Hub
-    /// fetches the page is not documented, so a server on every interface is named by this
-    /// machine's LAN address, which both can reach; `127.0.0.1` would reach only this machine.
-    #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
-    pub fn panel_base_url(&self) -> Option<String> {
-        self.panel_base_url_with(lan_ipv4_address)
-    }
-
-    fn panel_base_url_with(
-        &self,
-        find_lan_address: impl FnOnce() -> Option<LanAddress>,
-    ) -> Option<String> {
-        if let Some(url) = &self.qaros.panel_base_url {
-            return Some(url.clone());
-        }
-        let address = self.panel_address.as_deref()?;
-        let reachable = if let Some(("0.0.0.0", port)) = address.rsplit_once(':') {
-            lan_host_for_every_interface_server(port, find_lan_address)
-        } else {
-            address.to_owned()
-        };
-        Some(format!("http://{reachable}"))
     }
 
     fn apply_graphics_flag(&mut self, flag: &str, value: String) -> Result<(), ParseOutcome> {
@@ -621,6 +545,11 @@ impl Options {
         if self.qaros.launched_by_qaros && !is_qaros {
             return Err(ParseOutcome::Error(
                 "--launched-by-qaros needs --sink qaros".to_owned(),
+            ));
+        }
+        if self.panels && !is_qaros {
+            return Err(ParseOutcome::Error(
+                "--panels needs --sink qaros: the panels are QAROS GUI panels".to_owned(),
             ));
         }
         if self.qaros.local_app && !is_qaros {
@@ -708,10 +637,7 @@ impl Options {
                 | "--display-name"
                 | "--color-format"
                 | "--begin-frame"
-                | "--panel-base-url"
                 | "--panels-at-stop"
-                | "--dead-panels"
-                | "--panel-route"
                 | "--gpu-priority"
                 | "--qaros-graphics" => options.qaros.apply_flag(&flag, value()?)?,
                 "--launched-by-qaros" => options.qaros.launched_by_qaros = true,
@@ -775,7 +701,7 @@ impl Options {
                         other => return Err(invalid(&flag, other)),
                     }
                 }
-                "--panels" => options.panel_address = Some(value()?),
+                "--panels" => options.panels = true,
                 "--panel-interval-ms" => {
                     options.panel_capture_interval =
                         Duration::from_millis(parse_number(&flag, &value()?)?);
@@ -847,22 +773,6 @@ impl Options {
 /// The off-screen UI size of a viewer QAROS launches without `--window` or `--headless`.
 pub const QAROS_LAUNCH_HEADLESS_SIZE: [u32; 2] = [1280, 720];
 
-/// `host:port` for a server listening on every interface, named by the LAN address.
-fn lan_host_for_every_interface_server(
-    port: &str,
-    find_lan_address: impl FnOnce() -> Option<LanAddress>,
-) -> String {
-    if let Some(lan) = find_lan_address() {
-        re_log::info!("panels: pages named by {lan}; --panel-base-url overrides");
-        return format!("{}:{port}", lan.address);
-    }
-    re_log::warn!(
-        "panels: no LAN IPv4 address found, pages named by 127.0.0.1, which only this machine \
-         reaches; pass --panel-base-url"
-    );
-    format!("127.0.0.1:{port}")
-}
-
 fn invalid(flag: &str, value: &str) -> ParseOutcome {
     ParseOutcome::Error(format!("{flag}: unexpected value {value:?}"))
 }
@@ -928,7 +838,7 @@ mod tests {
             options.depth_range.encoding,
             DepthEncoding::ForwardNormalized
         );
-        assert!(options.panel_address.is_none());
+        assert!(!options.panels);
         assert_eq!(options.panel_capture_interval, Duration::from_millis(250));
         assert_eq!(options.max_users, 2);
         assert_eq!(options.simulated_users, 1);
@@ -1025,8 +935,6 @@ mod tests {
             "50",
             "--depth",
             "linear",
-            "--panels",
-            "127.0.0.1:9877",
             "--panel-interval-ms",
             "400",
             "--port",
@@ -1057,7 +965,6 @@ mod tests {
         );
         assert_eq!(options.depth_range.encoding, DepthEncoding::LinearMeters);
         assert!((options.depth_range.far() - 50.0).abs() < f32::EPSILON);
-        assert_eq!(options.panel_address.as_deref(), Some("127.0.0.1:9877"));
         assert_eq!(options.panel_capture_interval, Duration::from_millis(400));
         assert_eq!(options.grpc_port, 9999);
         assert_eq!(options.headless_size, Some([1280, 720]));
@@ -1142,7 +1049,6 @@ mod tests {
             "--color-format",
             "rgba",
             "--panels",
-            "0.0.0.0:9877",
         ])
         .unwrap();
         assert_eq!(options.qaros.volume_name, "rerun-air_traffic");
@@ -1180,35 +1086,7 @@ mod tests {
         );
         assert_eq!(options.qaros.volume_size, Vec3::new(3.0, 2.0, 1.5));
         assert_eq!(options.qaros.color_format, ColorFormatKind::Rgba);
-        let lan = || {
-            Some(LanAddress {
-                address: std::net::Ipv4Addr::new(192, 168, 1, 23),
-                found_through: "a test".to_owned(),
-            })
-        };
-        assert_eq!(
-            options.panel_base_url_with(lan).as_deref(),
-            Some("http://192.168.1.23:9877"),
-            "0.0.0.0 is named by the LAN address"
-        );
-        assert_eq!(
-            options.panel_base_url_with(|| None).as_deref(),
-            Some("http://127.0.0.1:9877"),
-            "loopback when no LAN address is found"
-        );
-        assert_eq!(
-            parse(&["--panels", "127.0.0.1:9877"])
-                .unwrap()
-                .panel_base_url_with(lan)
-                .as_deref(),
-            Some("http://127.0.0.1:9877"),
-            "an explicit interface is kept"
-        );
-        let explicit = parse(&["--panel-base-url", "http://10.0.0.5:9877"]).unwrap();
-        assert_eq!(
-            explicit.panel_base_url().as_deref(),
-            Some("http://10.0.0.5:9877")
-        );
+        assert!(options.panels);
         assert_eq!(parse(&["--sink", "image"]).unwrap().sink, SinkKind::Images);
         assert!(matches!(
             parse(&["--volume-size", "1,0,1"]),
@@ -1244,36 +1122,18 @@ mod tests {
     }
 
     #[test]
-    fn panels_take_the_web_route_unless_streamed() {
-        assert_eq!(parse(&[]).unwrap().qaros.panel_route, PanelRouteKind::Web);
-        assert_eq!(
-            parse(&["--panels", "0.0.0.0:9877", "--panel-route", "stream"])
-                .unwrap()
-                .qaros
-                .panel_route,
-            PanelRouteKind::Stream
-        );
+    fn panels_are_a_switch_of_the_qaros_sink() {
+        assert!(parse(&["--sink", "qaros", "--panels"]).unwrap().panels);
         assert!(matches!(
-            parse(&["--panel-route", "browser"]),
-            Err(ParseOutcome::Error(_))
+            parse(&["--sink", "image", "--panels"]),
+            Err(ParseOutcome::Error(message)) if message.contains("--sink qaros")
         ));
-    }
-
-    #[test]
-    fn dead_panels_are_reloaded_unless_left() {
-        assert_eq!(
-            parse(&[]).unwrap().qaros.dead_panels,
-            DeadPanelsKind::Reload
-        );
-        assert_eq!(
-            parse(&["--dead-panels", "leave"])
-                .unwrap()
-                .qaros
-                .dead_panels,
-            DeadPanelsKind::Leave
-        );
         assert!(matches!(
-            parse(&["--dead-panels", "close"]),
+            parse(&["--sink", "qaros", "--panels", "0.0.0.0:9877"]),
+            Err(ParseOutcome::Error(message)) if message.contains("unknown option 0.0.0.0:9877")
+        ));
+        assert!(matches!(
+            parse(&["--sink", "qaros", "--panel-route", "stream"]),
             Err(ParseOutcome::Error(_))
         ));
     }

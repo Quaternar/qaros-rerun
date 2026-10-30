@@ -4409,16 +4409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "if-addrs"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
-dependencies = [
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6070,14 +6060,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
-name = "panel-server"
-version = "0.1.0"
-dependencies = [
- "image",
- "tiny_http",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6676,10 +6658,8 @@ dependencies = [
  "egui_kittest",
  "frame-sink",
  "glam",
- "if-addrs",
  "image",
  "mimalloc",
- "panel-server",
  "pollster 0.4.0",
  "qaros-sink",
  "qaros-stub",

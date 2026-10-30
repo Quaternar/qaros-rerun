@@ -16,6 +16,7 @@ use qaros::{
 use xr_math::AppPlacement;
 
 use crate::peer_devices::{PeerDevice, read_peer_device};
+use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 
 /// When a render sender's creation gives up. A creation finishes once the target answers,
@@ -279,12 +280,21 @@ pub fn connect(
         log::info!("qaros: loaded {}", loaded.display());
     }
     match library.runtime_info() {
-        Ok(info) => log::info!(
-            "qaros: runtime {} ({}, C API {})",
-            info.version,
-            info.flavor,
-            info.c_api
-        ),
+        Ok(info) => {
+            log::info!(
+                "qaros: runtime {} ({}, C API {})",
+                info.version,
+                info.flavor,
+                info.c_api
+            );
+            if is_older_than(&info.version, MINIMUM_RUNTIME_VERSION) == Some(true) {
+                log::warn!(
+                    "qaros: runtime {} is older than {MINIMUM_RUNTIME_VERSION}, the oldest this \
+                     viewer supports; its mixer can fail when stream panels restart",
+                    info.version
+                );
+            }
+        }
         Err(error) => log::warn!("qaros: cannot read the runtime's version: {error}"),
     }
     let runtime = library

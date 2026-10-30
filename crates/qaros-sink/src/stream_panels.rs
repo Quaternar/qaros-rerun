@@ -1,4 +1,4 @@
-//! The stream route's panels: one video sender per claimed panel, fed from [`PanelImages`] on
+//! The stream panels: one video sender per claimed panel, fed from [`PanelImages`] on
 //! the QAROS thread, a replacement sender when the image's size settles on a new value or the
 //! sender fails, and the timeline panel's gesture subscription.
 //!
@@ -39,7 +39,7 @@ const FAILURE_REPLACEMENT_LIMIT: u32 = 3;
 /// that drops a live panel once does not stop its stream.
 const ABSENT_LISTINGS_BEFORE_GONE: u32 = 2;
 
-/// A panel's video sender as the stream route uses it.
+/// A panel's video sender as the panels use it.
 pub(crate) trait StreamSender {
     fn stream_id(&self) -> StreamId;
     fn size(&self) -> (u32, u32);
@@ -48,7 +48,7 @@ pub(crate) trait StreamSender {
     fn show_bgra8(&mut self, bgra8: &[u8], width: u32, height: u32) -> Result<bool, String>;
 }
 
-/// Every QAROS call of the stream route.
+/// Every QAROS call of the stream panels.
 pub(crate) trait StreamBackend {
     type Sender: StreamSender;
     type Subscription;

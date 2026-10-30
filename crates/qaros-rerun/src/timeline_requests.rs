@@ -1,6 +1,10 @@
+//! What the timeline panel asks of the viewer's timeline, and where the viewer's time cursor
+//! stands for the panel's thumb. The panel's gestures push requests; the viewer takes them once
+//! per frame ([`crate::timeline_scrub`]) and publishes its cursor back.
+
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// What a panel asked of the viewer's timeline, in the order the panels asked.
+/// What the timeline panel asked of the viewer's timeline, in the order it asked.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TimelineRequest {
     /// Pause and put the time cursor at this fraction of the active timeline, 0 at its first
@@ -9,21 +13,21 @@ pub enum TimelineRequest {
         fraction: f64,
     },
     Play,
-    /// Stop playback where the cursor stands; the stream route's timeline sends it from its
-    /// Play/Pause button while the viewer plays.
+    /// Stop playback where the cursor stands; the timeline panel sends it from its Play/Pause
+    /// button while the viewer plays.
     Pause,
 }
 
-/// Requests a page sent that the viewer has not taken yet. A drag sends many seeks; a seek
+/// Requests the panel sent that the viewer has not taken yet. A drag sends many seeks; a seek
 /// directly after another replaces it, so the queue holds what a frame needs to apply and
-/// stays short however fast a page sends.
+/// stays short however fast the panel sends.
 #[derive(Clone, Default)]
 pub struct TimelineRequests {
     pending: Arc<Mutex<Vec<TimelineRequest>>>,
 }
 
-/// Any LAN client can send requests, and the viewer may not take them for a while (a window
-/// that is not repainting), so the oldest go once this many wait.
+/// The viewer may not take requests for a while (a window that is not repainting), so the
+/// oldest go once this many wait.
 const LONGEST_QUEUE: usize = 32;
 
 impl TimelineRequests {
@@ -46,7 +50,7 @@ impl TimelineRequests {
 }
 
 /// Where the viewer's time cursor stands, as a fraction of the active timeline (the range the
-/// seeks use), for the timeline page's thumb to follow; nothing until the viewer shows a
+/// seeks use), for the timeline panel's thumb to follow; nothing until the viewer shows a
 /// recording with a timeline.
 #[derive(Clone, Default)]
 pub struct TimelinePosition {

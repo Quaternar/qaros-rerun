@@ -260,10 +260,7 @@ impl PendingReadback {
 /// panel renders on the UI thread, which also renders the eye frames.
 #[cfg_attr(
     not(feature = "qaros"),
-    allow(
-        dead_code,
-        reason = "only the stream route's timeline panel draws with it"
-    )
+    allow(dead_code, reason = "only the timeline panel draws with it")
 )]
 pub struct OffscreenEguiRenderer {
     device: wgpu::Device,
@@ -277,7 +274,7 @@ pub struct OffscreenEguiRenderer {
     any(not(test), not(feature = "qaros")),
     allow(
         dead_code,
-        reason = "only the stream route's timeline panel draws with it, once viewer_app runs it"
+        reason = "only the timeline panel draws with it, once viewer_app runs it"
     )
 )]
 impl OffscreenEguiRenderer {

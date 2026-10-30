@@ -1,7 +1,9 @@
-//! The stream route's raw calls against `qaros-stub`, which implements no video sender,
-//! `set_stream`, content type or gesture call: the listing that reads the content type first
-//! agrees with the `qaros` crate's listing for website panels, and the stream route refuses
-//! gracefully, creating no panel. The real behaviour is checked on a QAROS PC.
+//! The panels' raw calls against `qaros-stub`, which implements no video sender, `set_stream`,
+//! content type or gesture call: the listing that reads the content type first agrees with the
+//! `qaros` crate's listing for website panels; panels refuse gracefully, creating none; and the
+//! orchestration around the claims (the wait for a head, the shared listing, the listing
+//! retry, the teardown steps) shows in the calls the stub logs. The claims themselves are
+//! covered with a fake backend in `stream_panels.rs` and checked on a QAROS PC.
 //!
 //! The library is process-wide, so the tests run one at a time.
 
@@ -11,14 +13,14 @@ use std::ffi::c_char;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use frame_sink::UserId;
 use glam::Vec3;
 use qaros::GuiPanelConfig;
 use qaros_sink::{
     ConnectOptions, HEADSET_WAIT, PanelContent, PanelImages, PanelView, QarosConnection,
-    QarosPanels, connect, list_panels,
+    QarosPanels, TeardownStep, connect, current_teardown_step, enter_teardown_step, list_panels,
 };
 use xr_math::{AppPlacement, Pose};
 
@@ -120,6 +122,20 @@ impl Fixture {
             .into_iter()
             .filter(|call| call.starts_with(prefix))
             .collect()
+    }
+
+    fn fail_next(&self, function: &str, code: i64) {
+        let fail_next: unsafe extern "C" fn(*const c_char, i64) = self.symbol("qar_stub_fail_next");
+        let function = std::ffi::CString::new(function).expect("function name");
+        // SAFETY: a NUL-terminated name and a plain value.
+        unsafe { fail_next(function.as_ptr(), code) };
+    }
+
+    fn listings_since(&self, start: usize) -> usize {
+        self.calls()[start..]
+            .iter()
+            .filter(|call| call.as_str() == "query_gui_panels_count")
+            .count()
     }
 
     fn live_handle_count(&self) -> usize {
@@ -236,14 +252,14 @@ fn the_content_type_first_listing_matches_the_crate_listing_for_website_panels()
 }
 
 #[test]
-fn the_stream_route_without_video_senders_refuses_once_and_creates_no_panel() {
+fn without_video_senders_a_view_is_refused_once_and_gets_no_panel() {
     let fixture = Fixture::new();
     let connection = fixture.connect();
     let images = PanelImages::default();
     images
         .publish_rgba8("camera", 4, 2, vec![128; 4 * 2 * 4])
         .unwrap();
-    let mut panels = QarosPanels::streaming(Rc::clone(&connection), images);
+    let mut panels = QarosPanels::new(Rc::clone(&connection), images);
     place_panels(&mut panels);
     let views = [PanelView {
         name: "camera".to_owned(),
@@ -284,7 +300,7 @@ fn the_stream_route_without_video_senders_refuses_once_and_creates_no_panel() {
 }
 
 #[test]
-fn the_stream_route_leaves_web_panels_of_earlier_runs_untouched() {
+fn web_page_panels_of_earlier_builds_get_no_call() {
     let fixture = Fixture::new();
     let connection = fixture.connect();
     open_website_panel(
@@ -293,7 +309,7 @@ fn the_stream_route_leaves_web_panels_of_earlier_runs_untouched() {
         "http://192.168.50.40:9877/views/camera",
     );
     let calls_before = fixture.calls().len();
-    let mut panels = QarosPanels::streaming(Rc::clone(&connection), PanelImages::default());
+    let mut panels = QarosPanels::new(Rc::clone(&connection), PanelImages::default());
     place_panels(&mut panels);
     let views = [PanelView {
         name: "camera".to_owned(),
@@ -309,4 +325,154 @@ fn the_stream_route_leaves_web_panels_of_earlier_runs_untouched() {
         .collect();
     assert!(panel_changes.is_empty(), "{panel_changes:?}");
     fixture.assert_clean_teardown(connection);
+}
+
+fn view(name: &str) -> PanelView {
+    PanelView {
+        name: name.to_owned(),
+        width_in_pixel: 4,
+        height_in_pixel: 2,
+    }
+}
+
+fn images_of(names: &[&str]) -> PanelImages {
+    let images = PanelImages::default();
+    for name in names {
+        images
+            .publish_rgba8(name, 4, 2, vec![128; 4 * 2 * 4])
+            .unwrap();
+    }
+    images
+}
+
+#[test]
+fn a_new_panel_waits_for_a_viewer_near_the_volume() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), images_of(&["map"]));
+    let published = vec!["map".to_owned()];
+
+    panels.sync(&[view("map")], &published);
+    let first_seen = Instant::now();
+    let distant_receiver = Pose::from_translation(Vec3::new(1.2, 2.1, 7.0));
+    panels.consider_head(UserId(1), distant_receiver, first_seen);
+    panels.consider_head(UserId(1), distant_receiver, first_seen + HEADSET_WAIT * 2);
+    panels.sync(&[view("map")], &published);
+    assert!(
+        fixture
+            .calls_starting_with("video_sender_create")
+            .is_empty(),
+        "no head near the volume yet: the new panel waits"
+    );
+
+    // The stub names no device category, so a near head places panels only once no headset
+    // came for HEADSET_WAIT after it first streamed.
+    let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+    panels.consider_head(UserId(2), head, first_seen);
+    panels.consider_head(
+        UserId(2),
+        head,
+        first_seen + HEADSET_WAIT.saturating_sub(Duration::from_millis(1)),
+    );
+    panels.sync(&[view("map")], &published);
+    assert!(
+        fixture
+            .calls_starting_with("video_sender_create")
+            .is_empty(),
+        "no headset yet, and the wait for one not over"
+    );
+    panels.consider_head(UserId(2), head, first_seen + HEADSET_WAIT);
+    panels.sync(&[view("map")], &published);
+    assert_eq!(
+        fixture.calls_starting_with("video_sender_create").len(),
+        1,
+        "the claim starts once a head places panels"
+    );
+
+    drop(panels);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn views_that_settle_one_after_another_share_one_listing() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), images_of(&["map", "camera"]));
+    place_panels(&mut panels);
+    let published = vec!["map".to_owned(), "camera".to_owned()];
+    let calls_before = fixture.calls().len();
+
+    panels.sync(&[view("map")], &published);
+    panels.sync(&[view("map"), view("camera")], &published);
+
+    assert_eq!(
+        fixture.calls_starting_with("video_sender_create").len(),
+        2,
+        "both views were claimed"
+    );
+    assert_eq!(
+        fixture.listings_since(calls_before),
+        1,
+        "the later view reuses the first listing"
+    );
+    drop(panels);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn a_failed_panel_listing_claims_nothing_and_is_retried_after_half_a_second() {
+    const UNCLASSIFIED: i64 = 1;
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), images_of(&["map"]));
+    place_panels(&mut panels);
+    let published = vec!["map".to_owned()];
+    let calls_before = fixture.calls().len();
+
+    fixture.fail_next("query_gui_panels_count", UNCLASSIFIED);
+    panels.sync(&[view("map")], &published);
+    assert!(
+        fixture
+            .calls_starting_with("video_sender_create")
+            .is_empty(),
+        "no claim without the list"
+    );
+    panels.sync(&[view("map")], &published);
+    assert_eq!(
+        fixture.listings_since(calls_before),
+        1,
+        "a sync right after the failure waits for the half-second retry"
+    );
+    std::thread::sleep(Duration::from_millis(550));
+    panels.sync(&[view("map")], &published);
+    assert_eq!(fixture.listings_since(calls_before), 2);
+    assert_eq!(
+        fixture.calls_starting_with("video_sender_create").len(),
+        1,
+        "the retry claims"
+    );
+
+    drop(panels);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn the_teardown_marks_each_step_for_the_stop_watchdog() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect();
+    let mut panels = QarosPanels::new(Rc::clone(&connection), images_of(&["map"]));
+    place_panels(&mut panels);
+    panels.sync(&[view("map")], &["map".to_owned()]);
+    enter_teardown_step(TeardownStep::LeaveSink);
+
+    drop(panels);
+    assert_eq!(current_teardown_step(), TeardownStep::ClosePanelStreams);
+
+    fixture.assert_clean_teardown(connection);
+    assert_eq!(
+        current_teardown_step(),
+        TeardownStep::LibraryDestroy,
+        "the library goes last, after the session"
+    );
+    enter_teardown_step(TeardownStep::NotStarted);
 }
