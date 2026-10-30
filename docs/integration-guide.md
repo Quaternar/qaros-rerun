@@ -300,6 +300,14 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 - **Cost.** Each capture reads the whole viewer UI back from the GPU. A longer `--panel-interval-ms` gives the headset more frames.
 - A taken panel port moves the server to a free port, with a warning in the log.
 
+### Stream panels
+
+`--panel-route stream` takes the panel server out of the path. Each 2D view becomes a GUI panel whose content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture, with no page to load and no second renderer. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into the same time commands. No port is bound for panels, so `--panels` only turns them on, and `--panel-base-url` and `--dead-panels` do not apply.
+
+- **QAROS build.** Use it with QAROS 0.9.0-dev.3177 or later. Earlier mixers give every panel its own Ultralight renderer, and a stream panel's restart crashes the mixer ([known issues](known-issues.md#mixer-crash-when-stream-panels-restart-before-3177)).
+- **Names.** Stream panels have names of their own (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`), so the two routes never take each other's panels. A stream run leaves web panels from earlier runs alone and logs them; close them once in the Hub Display.
+- **Going back.** `--panel-route web` on the same build works in the same Hub session. A build from before stream panels cannot list panels while a stream panel exists in the session, so it needs a Hub "New session" first.
+
 ### Two users
 
 Users are the running target apps in the QAROS peer list. The viewer creates a render sender for each one it finds; the first that answer take the slots (`--max-users`, default 2), and the others wait until a slot frees. Expect these log lines:
@@ -374,6 +382,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--volume-name NAME` | `rerun` | The app volume's name; viewers running at once need different names |
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |
+| `--panel-route web\|stream` | `web` | How 2D views and the timeline reach their panels: `web` serves pages from the panel server, `stream` sends each one as a video stream of the viewer ([Stream panels](#stream-panels)); `stream` needs QAROS 0.9.0-dev.3177 or later |
 | `--panel-base-url URL` | `http://` plus the `--panels` address, `0.0.0.0` replaced by the LAN address | How GUI panels reach the panel server |
 | `--panels-at-stop hide\|keep` | `hide` | What the panels become at Stop; they are never closed |
 | `--dead-panels reload\|leave` | `reload` | Whether a reattached panel whose page loads nothing within 10 s is loaded again once |

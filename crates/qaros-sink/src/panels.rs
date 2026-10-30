@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 
 use frame_sink::UserId;
 use glam::{Quat, Vec3};
-use qaros::{
-    AppVolumeSize, GuiPanelConfig, GuiPanelId, GuiPanelInfo, GuiPanelSize, GuiPanelState, PeerId,
-};
+use qaros::{AppVolumeSize, GuiPanelConfig, GuiPanelId, GuiPanelSize, GuiPanelState, PeerId};
 use xr_math::Pose;
 
 use crate::connection::{QarosConnection, from_qaros_pose, to_qaros_pose};
+use crate::panel_gestures::PanelGestures;
+use crate::panel_images::{PanelImages, TIMELINE_IMAGE_KEY};
+use crate::panel_listing::{ListedPanel, PanelContent, list_panels};
 use crate::peer_devices::PeerDevice;
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
+use crate::stream_panels::{QarosStreamBackend, StreamPanels};
 
 /// A 2D view published by the panel server: its URL-safe name and current size in pixels.
 /// The name is the same on every run (no `.`, unique within a run): it names the view's QAROS
@@ -50,6 +52,11 @@ const DEVICE_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 /// The timeline panel's name before the volume suffix. It holds a dot, which no view name
 /// holds, so it never passes for a view's panel.
 const TIMELINE_PANEL_NAME: &str = "timeline.panel";
+/// The stream route's timeline panel name before the volume suffix (spec 01g, Section 2).
+const STREAM_TIMELINE_PANEL_NAME: &str = "timeline.panel-stream";
+/// A panel listing slower than this is logged: on QAROS 0.9.0-dev.3177 each gui panel query
+/// blocks its thread for about 2 s, and the listing runs on the QAROS thread.
+const SLOW_LISTING: Duration = Duration::from_millis(100);
 /// Wide and short for a slider: the track takes 0.36 m, the Play button 0.09 m by 0.12 m.
 const TIMELINE_PANEL_WIDTH_METERS: f32 = 0.45;
 const TIMELINE_PANEL_HEIGHT_METERS: f32 = 0.12;
@@ -57,6 +64,10 @@ const TIMELINE_PANEL_HEIGHT_METERS: f32 = 0.12;
 const LISTING_RETRY_FAST: Duration = Duration::from_millis(500);
 /// The wait before every later retry.
 const LISTING_RETRY_SLOW: Duration = Duration::from_secs(30);
+/// A listing serves every claim for this long: each one blocks the QAROS thread for about 4 s
+/// on 3177 (QAROS #345), so the views that settle at the start share one, and a view that
+/// settles later lists again at most this often.
+const LISTING_REUSE: Duration = Duration::from_secs(30);
 /// How far in front of the user's head the timeline panel's centre stands, along the gaze on
 /// the floor plane.
 const TIMELINE_FORWARD_METERS: f32 = 0.5;
@@ -111,8 +122,28 @@ pub trait PanelActivity {
     fn user_stream_started(&self) -> bool;
 }
 
-/// One QAROS GUI panel per published 2D view, pointed at the view's page on the panel server,
-/// and with [`QarosPanels::with_timeline_panel`] one timeline panel for the run.
+/// What the panels show.
+pub enum PanelRoute {
+    /// Pages of the panel server. `base_url` is how the panel's browser reaches it (for
+    /// example `http://127.0.0.1:9877`); `timeline_page` is the timeline page's path (for
+    /// example `/timeline-panel`).
+    Web {
+        base_url: String,
+        timeline_page: String,
+    },
+    /// CPU video senders of this viewer, fed from `images`, under common names of their own
+    /// (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`), so the two
+    /// routes never claim each other's panels. The timeline panel's gestures go to
+    /// `timeline_gestures`.
+    Stream {
+        images: PanelImages,
+        timeline_gestures: Option<PanelGestures>,
+    },
+}
+
+/// One QAROS GUI panel per published 2D view, showing the view's page on the panel server or
+/// a video stream of this viewer ([`PanelRoute`]), and with
+/// [`QarosPanels::with_timeline_panel`] one timeline panel for the run.
 ///
 /// The Hub owns a panel's place once it exists: it keeps the pose the panel was created with,
 /// or wherever a user moved it, across runs, and ignores later pose calls, so users find their
@@ -127,7 +158,9 @@ pub trait PanelActivity {
 /// says.
 pub struct QarosPanels {
     connection: Rc<QarosConnection>,
-    base_url: String,
+    route: Route,
+    /// Whether this run opens a timeline panel.
+    timeline: bool,
     panels: BTreeMap<String, GuiPanelId>,
     failed: BTreeSet<String>,
     at_stop: PanelsAtStop,
@@ -152,11 +185,30 @@ pub struct QarosPanels {
     waiting_logged: BTreeSet<String>,
     /// A head too far from the app volume was logged, once per run.
     far_head_logged: bool,
-    /// The timeline page's URL, when this run opens a timeline panel.
-    timeline_url: Option<String>,
     /// Panel listings that failed in a row, and when the next one may be tried.
     listing_failures: u32,
     next_listing: Option<Instant>,
+    /// The last listing, kept up to date with the panels this run hid, and when it was made.
+    listing: Option<(Vec<ListedPanel>, Instant)>,
+    /// Listings made this run, for the log.
+    listings_made: u32,
+}
+
+enum Route {
+    Web {
+        base_url: String,
+        timeline_page: String,
+    },
+    Stream(StreamRoute),
+}
+
+/// The stream route's senders, the images they show, and the timeline's gesture inbox.
+struct StreamRoute {
+    panels: StreamPanels<QarosStreamBackend>,
+    images: PanelImages,
+    timeline_gestures: Option<PanelGestures>,
+    /// Web route panels left visible were logged, once per run.
+    web_leftovers_logged: bool,
 }
 
 /// A claimed panel, and whether it kept the page an earlier run loaded and is visible.
@@ -168,7 +220,7 @@ struct ClaimedPanel {
 /// A panel this run opens: one per settled view, and the timeline panel.
 enum WantedPanel<'view> {
     View(&'view PanelView),
-    Timeline { url: String },
+    Timeline,
 }
 
 impl WantedPanel<'_> {
@@ -176,18 +228,37 @@ impl WantedPanel<'_> {
     fn name(&self) -> &str {
         match self {
             Self::View(view) => &view.name,
-            Self::Timeline { .. } => TIMELINE_PANEL_NAME,
+            Self::Timeline => TIMELINE_PANEL_NAME,
         }
     }
 }
 
 impl QarosPanels {
-    /// `base_url` is how the panel's browser reaches the panel server, for example
-    /// `http://127.0.0.1:9877`.
-    pub fn new(connection: Rc<QarosConnection>, base_url: &str) -> Self {
+    pub fn new(connection: Rc<QarosConnection>, route: PanelRoute) -> Self {
+        let route = match route {
+            PanelRoute::Web {
+                base_url,
+                timeline_page,
+            } => Route::Web {
+                base_url: base_url.trim_end_matches('/').to_owned(),
+                timeline_page,
+            },
+            PanelRoute::Stream {
+                images,
+                timeline_gestures,
+            } => Route::Stream(StreamRoute {
+                panels: StreamPanels::new(QarosStreamBackend {
+                    connection: Rc::clone(&connection),
+                }),
+                images,
+                timeline_gestures,
+                web_leftovers_logged: false,
+            }),
+        };
         Self {
             connection,
-            base_url: base_url.trim_end_matches('/').to_owned(),
+            route,
+            timeline: false,
             panels: BTreeMap::new(),
             failed: BTreeSet::new(),
             at_stop: PanelsAtStop::default(),
@@ -201,20 +272,48 @@ impl QarosPanels {
             reach_slots_used: 0,
             waiting_logged: BTreeSet::new(),
             far_head_logged: false,
-            timeline_url: None,
             listing_failures: 0,
             next_listing: None,
+            listing: None,
+            listings_made: 0,
         }
     }
 
-    /// Also opens one timeline panel, showing the panel server's page at `page_path` (for
-    /// example `/timeline-panel`), whether or not any view is published. A new one opens once
-    /// a head places panels ([`QarosPanels::consider_head`]), [`TIMELINE_FORWARD_METERS`] in
-    /// front of that head and [`TIMELINE_BELOW_EYES_METERS`] below its eyes, facing them; one
-    /// an earlier run left is reattached, kept and hidden at Stop like the views' panels.
+    /// The stream route without a timeline inbox: `new` with
+    /// `PanelRoute::Stream { images, timeline_gestures: None }`.
+    pub fn streaming(connection: Rc<QarosConnection>, images: PanelImages) -> Self {
+        Self::new(
+            connection,
+            PanelRoute::Stream {
+                images,
+                timeline_gestures: None,
+            },
+        )
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        matches!(self.route, Route::Stream(_))
+    }
+
+    /// Shows at most one due image on its panel's sender, and retires replaced senders; a
+    /// no-op on the web route. Called on every viewer frame (every eye frame with
+    /// `--decoupled-render`) on the QAROS thread.
+    pub fn pump_streams(&mut self, now: Instant) {
+        if let Route::Stream(stream) = &mut self.route {
+            stream.panels.pump(&stream.images, now);
+        }
+    }
+
+    /// Also opens one timeline panel, whether or not any view is published: on the web route
+    /// it shows the panel server's timeline page, on the stream route the image published
+    /// under [`TIMELINE_IMAGE_KEY`], once there is one, with its gestures going to the
+    /// route's `timeline_gestures`. A new one opens once a head places panels
+    /// ([`QarosPanels::consider_head`]), [`TIMELINE_FORWARD_METERS`] in front of that head and
+    /// [`TIMELINE_BELOW_EYES_METERS`] below its eyes, facing them; one an earlier run left is
+    /// reattached, kept and hidden at Stop like the views' panels.
     #[must_use]
-    pub fn with_timeline_panel(mut self, page_path: &str) -> Self {
-        self.timeline_url = Some(format!("{}{page_path}", self.base_url));
+    pub fn with_timeline_panel(mut self) -> Self {
+        self.timeline = true;
         self
     }
 
@@ -234,8 +333,16 @@ impl QarosPanels {
         &self.panels
     }
 
+    /// The view's page on the panel server; only the web route has one.
     pub fn view_url(&self, view_name: &str) -> String {
-        format!("{}/views/{view_name}", self.base_url)
+        format!("{}/views/{view_name}", self.base_url())
+    }
+
+    fn base_url(&self) -> &str {
+        match &self.route {
+            Route::Web { base_url, .. } => base_url,
+            Route::Stream(_) => "",
+        }
     }
 
     /// Opens or reattaches a panel for every settled view not seen before. A view whose panel
@@ -247,36 +354,31 @@ impl QarosPanels {
     /// a view published later still finds its hidden panel by name.
     /// While the panel list cannot be read nothing is opened, so the next sync retries:
     /// without the list a reattached panel would pass for a new one, navigated and left hidden.
+    ///
+    /// On the stream route each sync also replaces senders whose image settled on a new size
+    /// or that failed. The claims share one listing for [`LISTING_REUSE`], which also checks
+    /// that the held panels are still listed and not `Closed`; no listing is made for that
+    /// check alone, because a listing blocks the QAROS thread, and with it the eye frames, for
+    /// seconds on 3177. A panel
+    /// closed while held stays closed until the next run (ADR-0075): it is still counted as
+    /// held, so it is not claimed again.
     pub fn sync(&mut self, views: &[PanelView], published_view_names: &[String]) {
+        let now = Instant::now();
+        self.maintain_streams(now);
         let mut wanted: Vec<WantedPanel<'_>> = views.iter().map(WantedPanel::View).collect();
-        if let Some(url) = &self.timeline_url {
-            wanted.push(WantedPanel::Timeline { url: url.clone() });
+        if self.timeline {
+            wanted.push(WantedPanel::Timeline);
         }
         wanted.retain(|panel| {
-            !self.panels.contains_key(panel.name()) && !self.failed.contains(panel.name())
+            !self.panels.contains_key(panel.name())
+                && !self.failed.contains(panel.name())
+                && !self.waits_for_its_timeline_image(panel)
         });
         if wanted.is_empty() {
             return;
         }
-        let now = Instant::now();
-        if self.next_listing.is_some_and(|next| now < next) {
+        let Some(mut listed) = self.listing_for_claims(now) else {
             return;
-        }
-        let listed = match self.connection.session().gui_panels().list() {
-            Ok(listed) => {
-                self.listing_failures = 0;
-                self.next_listing = None;
-                listed
-            }
-            Err(error) => {
-                self.listing_failures += 1;
-                let retry_in = listing_retry_delay(self.listing_failures);
-                self.next_listing = Some(Instant::now() + retry_in);
-                log::warn!(
-                    "qaros: cannot list panels ({error}); opening none, trying again in {retry_in:?}"
-                );
-                return;
-            }
         };
         let mut opened_any = false;
         for panel in wanted {
@@ -291,7 +393,13 @@ impl QarosPanels {
                 continue;
             }
             let slot = self.reach_slots_used;
-            match self.open_panel(&panel, slot, &listed) {
+            let opened = if self.is_streaming() {
+                self.open_stream_panel(&panel, slot, &listed)
+            } else {
+                self.open_panel(&panel, slot, &listed)
+                    .map_err(|error| error.to_string())
+            };
+            match opened {
                 Ok(claimed) => {
                     // The timeline page asks the panel server for nothing until it is touched,
                     // so its silence says nothing about whether it loaded.
@@ -312,8 +420,116 @@ impl QarosPanels {
             }
         }
         if opened_any {
-            self.hide_panels_left_by_earlier_runs(&listed, published_view_names);
+            let hidden = if self.is_streaming() {
+                self.hide_stream_panels_left_by_earlier_runs(&listed, published_view_names)
+            } else {
+                self.hide_panels_left_by_earlier_runs(&listed, published_view_names)
+            };
+            for panel in listed.iter_mut().filter(|panel| hidden.contains(&panel.id)) {
+                panel.state = GuiPanelState::Hidden;
+            }
         }
+        if let Some((kept, _)) = &mut self.listing {
+            *kept = listed;
+        }
+    }
+
+    /// The listing the claims of this sync use: the last one while it is younger than
+    /// [`LISTING_REUSE`], else a new one, which also checks the held panels (#344). `None`
+    /// while the panels cannot be listed.
+    fn listing_for_claims(&mut self, now: Instant) -> Option<Vec<ListedPanel>> {
+        if let Some((listed, made)) = &self.listing
+            && now.saturating_duration_since(*made) < LISTING_REUSE
+        {
+            return Some(listed.clone());
+        }
+        if self.next_listing.is_some_and(|next| now < next) {
+            return None;
+        }
+        self.listings_made += 1;
+        match timed_list_panels(&self.connection, self.listings_made) {
+            Ok(listed) => {
+                self.listing_failures = 0;
+                self.next_listing = None;
+                if let Route::Stream(stream) = &mut self.route {
+                    stream.panels.note_listing(&listed);
+                }
+                self.listing = Some((listed.clone(), now));
+                Some(listed)
+            }
+            Err(error) => {
+                self.listing_failures += 1;
+                let retry_in = listing_retry_delay(self.listing_failures);
+                self.next_listing = Some(Instant::now() + retry_in);
+                log::warn!(
+                    "qaros: cannot list panels ({error}); opening none, trying again in {retry_in:?}"
+                );
+                None
+            }
+        }
+    }
+
+    /// The stream route's per-sync upkeep: sender replacements.
+    fn maintain_streams(&mut self, now: Instant) {
+        let Route::Stream(stream) = &mut self.route else {
+            return;
+        };
+        stream
+            .panels
+            .maintain(&stream.images, now, stream_panel_size);
+    }
+
+    /// The stream route's timeline panel takes its sender's size from its first image, so it
+    /// waits until there is one.
+    fn waits_for_its_timeline_image(&mut self, wanted: &WantedPanel<'_>) -> bool {
+        let Route::Stream(stream) = &self.route else {
+            return false;
+        };
+        let waits = matches!(wanted, WantedPanel::Timeline)
+            && stream.images.latest(TIMELINE_IMAGE_KEY).is_none();
+        if waits && self.waiting_logged.insert(TIMELINE_IMAGE_KEY.to_owned()) {
+            log::info!("qaros: the timeline panel opens once its first image is published");
+        }
+        waits
+    }
+
+    /// Claims the stream panel of a view at the image size the view was published at, or the
+    /// timeline's at its latest image's size.
+    fn open_stream_panel(
+        &mut self,
+        wanted: &WantedPanel<'_>,
+        slot: usize,
+        listed: &[ListedPanel],
+    ) -> Result<ClaimedPanel, String> {
+        let config = self.panel_config(wanted, slot);
+        let Route::Stream(stream) = &mut self.route else {
+            return Err("not on the stream route".to_owned());
+        };
+        let (image_key, pixels, gestures) = match wanted {
+            WantedPanel::View(view) => (
+                view.name.as_str(),
+                (view.width_in_pixel, view.height_in_pixel),
+                None,
+            ),
+            WantedPanel::Timeline => {
+                let image = stream
+                    .images
+                    .latest(TIMELINE_IMAGE_KEY)
+                    .ok_or("no timeline image published yet")?;
+                (
+                    TIMELINE_IMAGE_KEY,
+                    (image.width, image.height),
+                    stream.timeline_gestures.clone(),
+                )
+            }
+        };
+        let id = stream
+            .panels
+            .claim(image_key, &config, listed, pixels, gestures)?;
+        Ok(ClaimedPanel {
+            id,
+            kept_visible_page: false,
+        })
     }
 
     /// Takes `head`, the head of the streaming `user` in room space at `now`, as the place new
@@ -394,12 +610,15 @@ impl QarosPanels {
     /// browser running. A page with any request since the panel server started is alive and
     /// never navigated. The URL stays the one the panel shows, so the next run finds it
     /// unchanged. With [`DeadPages::Leave`] the page is only logged. Returns the views whose
-    /// panels were navigated.
+    /// panels were navigated. A no-op on the stream route, which has no pages.
     pub fn reload_dead_pages(
         &mut self,
         activity: &impl PanelActivity,
         now: Instant,
     ) -> Vec<String> {
+        if self.is_streaming() {
+            return Vec::new();
+        }
         self.kept_pages
             .retain(|view_name, _| activity.last_page_request(view_name).is_none());
         if self.browser_seen_running.is_none()
@@ -461,7 +680,7 @@ impl QarosPanels {
         &self,
         wanted: &WantedPanel<'_>,
         slot: usize,
-        listed: &[GuiPanelInfo],
+        listed: &[ListedPanel],
     ) -> qaros::Result<ClaimedPanel> {
         let panels = self.connection.session().gui_panels();
         let config = self.panel_config(wanted, slot);
@@ -473,7 +692,8 @@ impl QarosPanels {
         let earlier_run_panel = listed.iter().find(|listed_panel| {
             listed_panel.id == panel && listed_panel.state != GuiPanelState::Closed
         });
-        let keeps_page = earlier_run_panel.is_some_and(|earlier| earlier.content_uri == url);
+        let keeps_page = earlier_run_panel
+            .is_some_and(|earlier| earlier.content == PanelContent::Uri(url.clone()));
         if keeps_page {
             log::info!("qaros: panel {panel} reattached, already showing {url}");
         } else {
@@ -500,10 +720,29 @@ impl QarosPanels {
     /// and not common names, and that is how [`QarosPanels::is_left_by_earlier_run`] tells
     /// this volume's panels apart.
     fn panel_config(&self, wanted: &WantedPanel<'_>, slot: usize) -> GuiPanelConfig {
-        let common_name = format!("{}{}", wanted.name(), self.common_name_suffix());
-        let (pose, size) = match wanted {
-            WantedPanel::View(view) => (self.panel_pose(slot), panel_size(view)),
-            WantedPanel::Timeline { .. } => (self.timeline_panel_pose(), timeline_panel_size()),
+        let common_name = self.common_name(wanted.name());
+        let (pose, size) = match (wanted, &self.route) {
+            (WantedPanel::View(view), Route::Stream(_)) => (
+                self.panel_pose(slot),
+                stream_panel_size(view.width_in_pixel, view.height_in_pixel),
+            ),
+            (WantedPanel::View(view), Route::Web { .. }) => {
+                (self.panel_pose(slot), panel_size(view))
+            }
+            // The stream timeline gets the content-area rule too: at the web page's 0.12 m the
+            // chrome would leave the image 0.015 m and the mixer would scroll it.
+            (WantedPanel::Timeline, Route::Stream(stream)) => (
+                self.timeline_panel_pose(),
+                stream
+                    .images
+                    .latest(TIMELINE_IMAGE_KEY)
+                    .map_or_else(timeline_panel_size, |image| {
+                        stream_panel_size(image.width, image.height)
+                    }),
+            ),
+            (WantedPanel::Timeline, Route::Web { .. }) => {
+                (self.timeline_panel_pose(), timeline_panel_size())
+            }
         };
         GuiPanelConfig {
             display_name: Some(common_name.clone()),
@@ -514,19 +753,26 @@ impl QarosPanels {
     }
 
     fn panel_url(&self, wanted: &WantedPanel<'_>) -> String {
-        match wanted {
-            WantedPanel::View(view) => self.view_url(&view.name),
-            WantedPanel::Timeline { url } => url.clone(),
+        match (wanted, &self.route) {
+            (WantedPanel::View(view), _) => self.view_url(&view.name),
+            (
+                WantedPanel::Timeline,
+                Route::Web {
+                    base_url,
+                    timeline_page,
+                },
+            ) => format!("{base_url}{timeline_page}"),
+            (WantedPanel::Timeline, Route::Stream(_)) => String::new(),
         }
     }
 
     /// The open panel of `view_name` in this app volume, if the session has one.
     fn existing_panel<'listed>(
         &self,
-        listed: &'listed [GuiPanelInfo],
+        listed: &'listed [ListedPanel],
         view_name: &str,
-    ) -> Option<&'listed GuiPanelInfo> {
-        let common_name = format!("{view_name}{}", self.common_name_suffix());
+    ) -> Option<&'listed ListedPanel> {
+        let common_name = self.common_name(view_name);
         listed
             .iter()
             .find(|panel| panel.display_name == common_name && panel.state != GuiPanelState::Closed)
@@ -536,16 +782,27 @@ impl QarosPanels {
         format!(".{}.rerun", self.connection.volume_config().common_name)
     }
 
+    /// `<name>.<volume>.rerun` on the web route; on the stream route
+    /// `<view>.stream.<volume>.rerun` and `timeline.panel-stream.<volume>.rerun`: a panel's
+    /// content type is fixed at creation, so a web panel could never become a stream panel
+    /// under its old name.
+    fn common_name(&self, name: &str) -> String {
+        let suffix = self.common_name_suffix();
+        match &self.route {
+            Route::Web { .. } => format!("{name}{suffix}"),
+            Route::Stream(_) if name == TIMELINE_PANEL_NAME => {
+                format!("{STREAM_TIMELINE_PANEL_NAME}{suffix}")
+            }
+            Route::Stream(_) => format!("{name}.stream{suffix}"),
+        }
+    }
+
     /// A panel of this app volume that this process does not hold, for a view it does not
     /// publish, was left by an earlier run whose views differ (another blueprint, a renamed
     /// view). Such panels share the slot poses of this run's panels and would be drawn in the
     /// same plane. View names hold no dot, so a panel of a volume whose name ends like this
     /// one's does not match.
-    fn is_left_by_earlier_run(
-        &self,
-        panel: &GuiPanelInfo,
-        published_view_names: &[String],
-    ) -> bool {
+    fn is_left_by_earlier_run(&self, panel: &ListedPanel, published_view_names: &[String]) -> bool {
         let held = self.panels.values().any(|held| *held == panel.id);
         let view_name = panel.display_name.strip_suffix(&self.common_name_suffix());
         !held
@@ -564,10 +821,11 @@ impl QarosPanels {
     /// its page in place. One a user minimised stays minimised.
     fn hide_panels_left_by_earlier_runs(
         &self,
-        listed: &[GuiPanelInfo],
+        listed: &[ListedPanel],
         published_view_names: &[String],
-    ) {
+    ) -> Vec<GuiPanelId> {
         let panels = self.connection.session().gui_panels();
+        let mut hidden = Vec::new();
         for panel in listed {
             if panel.state != GuiPanelState::Visible
                 || !self.is_left_by_earlier_run(panel, published_view_names)
@@ -575,17 +833,69 @@ impl QarosPanels {
                 continue;
             }
             match panels.set_state(panel.id, GuiPanelState::Hidden) {
-                Ok(()) => log::info!(
-                    "qaros: hid panel {} left by an earlier run, showing {}",
-                    panel.id,
-                    panel.content_uri
-                ),
+                Ok(()) => {
+                    hidden.push(panel.id);
+                    log::info!(
+                        "qaros: hid panel {} left by an earlier run, showing {}",
+                        panel.id,
+                        panel.content_uri()
+                    );
+                }
                 Err(error) => log::warn!(
                     "qaros: cannot hide panel {} left by an earlier run: {error}",
                     panel.id
                 ),
             }
         }
+        hidden
+    }
+
+    /// The stream route hides visible `<view>.stream.<volume>.rerun` panels that this run does
+    /// not hold, for views it does not publish, like the web route does with its own. Web
+    /// route panels get no call at all, because hiding web panels coincided with mixer crashes
+    /// on 3137 (#278); visible ones are logged once.
+    fn hide_stream_panels_left_by_earlier_runs(
+        &mut self,
+        listed: &[ListedPanel],
+        published_view_names: &[String],
+    ) -> Vec<GuiPanelId> {
+        let held: Vec<GuiPanelId> = self.panels.values().copied().collect();
+        let leftovers = classify_stream_route_leftovers(
+            listed,
+            &self.common_name_suffix(),
+            &held,
+            published_view_names,
+        );
+        let Route::Stream(stream) = &mut self.route else {
+            return Vec::new();
+        };
+        if !leftovers.web_panels_visible.is_empty() && !stream.web_leftovers_logged {
+            stream.web_leftovers_logged = true;
+            log::warn!(
+                "qaros: web route panels left visible: {}; close them in the Hub Display or run \
+                 once with --panel-route web",
+                leftovers.web_panels_visible.join(", ")
+            );
+        }
+        let panels = self.connection.session().gui_panels();
+        let mut hidden = Vec::new();
+        for panel in leftovers.stream_panels_to_hide {
+            match panels.set_state(panel.id, GuiPanelState::Hidden) {
+                Ok(()) => {
+                    hidden.push(panel.id);
+                    log::info!(
+                        "qaros: hid stream panel {} ({}) left by an earlier run",
+                        panel.id,
+                        panel.display_name
+                    );
+                }
+                Err(error) => log::warn!(
+                    "qaros: cannot hide stream panel {} left by an earlier run: {error}",
+                    panel.id
+                ),
+            }
+        }
+        hidden
     }
 
     fn panel_pose(&self, slot: usize) -> Pose {
@@ -622,6 +932,51 @@ fn timeline_panel_pose_facing(head: Pose) -> Pose {
     let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(tilt);
     let top_centre = centre + orientation * Vec3::Y * (TIMELINE_PANEL_HEIGHT_METERS * 0.5);
     Pose::new(orientation, top_centre)
+}
+
+/// What the stream route does with the visible panels of earlier runs in its listing.
+struct StreamRouteLeftovers<'listed> {
+    /// `<view>.stream.<volume>.rerun` panels not held, for views not published.
+    stream_panels_to_hide: Vec<&'listed ListedPanel>,
+    /// Display names of the web route's `<view>.<volume>.rerun` and
+    /// `timeline.panel.<volume>.rerun` panels; they get no call.
+    web_panels_visible: Vec<&'listed str>,
+}
+
+/// View names hold no dot, so a panel of another volume whose name ends like this one's, and
+/// the stream timeline (`timeline.panel-stream`), match neither list.
+fn classify_stream_route_leftovers<'listed>(
+    listed: &'listed [ListedPanel],
+    volume_suffix: &str,
+    held: &[GuiPanelId],
+    published_view_names: &[String],
+) -> StreamRouteLeftovers<'listed> {
+    let mut leftovers = StreamRouteLeftovers {
+        stream_panels_to_hide: Vec::new(),
+        web_panels_visible: Vec::new(),
+    };
+    let is_view_name = |name: &str| !name.is_empty() && !name.contains('.');
+    for panel in listed {
+        if panel.state != GuiPanelState::Visible || held.contains(&panel.id) {
+            continue;
+        }
+        let Some(name) = panel.display_name.strip_suffix(volume_suffix) else {
+            continue;
+        };
+        if let Some(view_name) = name.strip_suffix(".stream") {
+            let published = published_view_names
+                .iter()
+                .any(|published| published == view_name);
+            if is_view_name(view_name) && !published {
+                leftovers.stream_panels_to_hide.push(panel);
+            }
+        } else if is_view_name(name) || name == TIMELINE_PANEL_NAME {
+            leftovers
+                .web_panels_visible
+                .push(panel.display_name.as_str());
+        }
+    }
+    leftovers
 }
 
 fn timeline_panel_size() -> GuiPanelSize {
@@ -671,6 +1026,26 @@ fn gravity_level(head: Pose) -> Pose {
         .unwrap_or(Vec3::NEG_Z);
     let yaw = (-level_forward.x).atan2(-level_forward.z);
     Pose::new(Quat::from_rotation_y(yaw), head.position)
+}
+
+/// Lists the panels under the perf event `panel_listing`, and logs each listing with its
+/// number in this run, and one slower than [`SLOW_LISTING`] with its time.
+fn timed_list_panels(
+    connection: &QarosConnection,
+    number_in_run: u32,
+) -> Result<Vec<ListedPanel>, String> {
+    let started = Instant::now();
+    let listed = list_panels(connection);
+    let took = started.elapsed();
+    frame_sink::perf::record("panel_listing", None, took.as_micros());
+    if took > SLOW_LISTING {
+        log::info!(
+            "qaros: panel listing {number_in_run} of this run took {took:?} on the QAROS thread"
+        );
+    } else {
+        log::info!("qaros: panel listing {number_in_run} of this run");
+    }
+    listed
 }
 
 /// A listing can fail on a panel the Hub cannot describe, and each try blocks the UI thread
@@ -747,6 +1122,39 @@ fn panel_size(view: &PanelView) -> GuiPanelSize {
     }
 }
 
+/// Of a stream panel's size, what the 3137 mixer leaves for the video (`Browser.hpp` at
+/// `c6e052d3`): the window's UI padding of 0.005 m on each side (L460, `BrowserUiPadding`), then
+/// a 0.04 m margin from the window's left, right and bottom edges (L465, `ContentEdgeMargin`,
+/// `ContentBoundsWithinMargin` L267-277), and above the content the title bar row: 0.05 m
+/// buttons (L90) plus StereoKit's 0.01 m gutter under them (L1493-1547).
+const STREAM_PANEL_HORIZONTAL_CHROME_METERS: f32 = 2.0 * 0.04;
+const STREAM_PANEL_VERTICAL_CHROME_METERS: f32 = 0.005 + 0.05 + 0.01 + 0.04;
+
+/// A stream panel tall enough that its content area has the view's aspect. The mixer fits the
+/// video to the content width and scrolls it when it is more than 1/0.9 of the content height
+/// (`FitWholeMinimumVisibleFraction`, `GuiPanelScrollbar.hpp` L62-72), so a panel sized by the
+/// image's aspect alone shows a scroll bar: 0.45 m wide for a 1016x665 view leaves
+/// 0.37 m x 0.19 m for an image that needs 0.37 m x 0.24 m.
+fn stream_panel_size(width_in_pixel: u32, height_in_pixel: u32) -> GuiPanelSize {
+    #[allow(clippy::cast_precision_loss)]
+    let aspect = if width_in_pixel == 0 {
+        1.0
+    } else {
+        height_in_pixel as f32 / width_in_pixel as f32
+    };
+    let content_width = PANEL_WIDTH_METERS - STREAM_PANEL_HORIZONTAL_CHROME_METERS;
+    GuiPanelSize {
+        width: PANEL_WIDTH_METERS,
+        height: content_width * aspect.clamp(0.1, 4.0) + STREAM_PANEL_VERTICAL_CHROME_METERS,
+        content_scale: 1.0,
+    }
+}
+
+/// Stop, still on the thread that owns the session (ADR-0060): the panels hidden, then on the
+/// stream route the gesture subscriptions cancelled and the senders destroyed, retiring ones
+/// included, all before the session goes. A sender that outlives its session can crash the
+/// application on 3137. Each step logs its duration as the next one is entered, against the
+/// 600 ms [`STOP_DEADLINE`](crate::STOP_DEADLINE).
 impl Drop for QarosPanels {
     fn drop(&mut self) {
         enter_teardown_step(TeardownStep::HidePanels);
@@ -755,8 +1163,20 @@ impl Drop for QarosPanels {
                 "qaros: keeping {} panel(s) for the next run",
                 self.panels.len()
             );
-            return;
+        } else if let Route::Stream(stream) = &self.route {
+            stream.panels.hide_all();
+        } else {
+            self.hide_held_panels();
         }
+        if let Route::Stream(stream) = &mut self.route {
+            enter_teardown_step(TeardownStep::ClosePanelStreams);
+            stream.panels.close();
+        }
+    }
+}
+
+impl QarosPanels {
+    fn hide_held_panels(&self) {
         let panels = self.connection.session().gui_panels();
         for (view_name, panel) in &self.panels {
             match panels.set_state(*panel, GuiPanelState::Hidden) {
@@ -947,6 +1367,20 @@ mod tests {
         assert!((empty.height - 0.45).abs() < 1e-6);
     }
 
+    #[test]
+    fn a_stream_panel_leaves_its_content_area_the_views_aspect() {
+        let size = stream_panel_size(1016, 665);
+        assert!((size.width - 0.45).abs() < 1e-6);
+        let content_width = size.width - 0.08;
+        let content_height = size.height - 0.105;
+        let content_aspect = content_height / content_width;
+        assert!(
+            (content_aspect - 665.0 / 1016.0).abs() < 1e-4,
+            "content {content_width} x {content_height}"
+        );
+        assert!((size.height - (0.37 * 665.0 / 1016.0 + 0.105)).abs() < 1e-5);
+    }
+
     /// Checks one within-reach panel against `head`: on the arc around the head, its top edge
     /// below the eyes, upright, its front facing the head, and to the right of the gaze.
     fn assert_within_reach(head: Pose, panel: Pose) {
@@ -1094,6 +1528,85 @@ mod tests {
         assert_eq!(listing_retry_delay(1), Duration::from_millis(500));
         assert_eq!(listing_retry_delay(2), Duration::from_secs(30));
         assert_eq!(listing_retry_delay(9), Duration::from_secs(30));
+    }
+
+    fn listed(id: u8, display_name: &str, state: GuiPanelState, stream: bool) -> ListedPanel {
+        ListedPanel {
+            id: GuiPanelId([id; 16]),
+            display_name: display_name.to_owned(),
+            pose: qaros::Pose {
+                orientation: qaros::Quat::IDENTITY,
+                position: qaros::Vec3::new(0.0, 0.0, 0.0),
+            },
+            size: GuiPanelSize::default(),
+            state,
+            content: if stream {
+                PanelContent::Stream(qaros::StreamId([id; 16]))
+            } else {
+                PanelContent::Uri(format!("http://127.0.0.1:9877/views/{id}"))
+            },
+        }
+    }
+
+    #[test]
+    fn the_stream_route_hides_only_its_own_leftovers_and_names_visible_web_panels() {
+        use GuiPanelState::{Closed, Hidden, Visible};
+        let suffix = ".rerun-sfm.rerun";
+        let listed = [
+            listed(1, "camera.stream.rerun-sfm.rerun", Visible, true),
+            listed(2, "plot.stream.rerun-sfm.rerun", Visible, true),
+            listed(3, "chart.stream.rerun-sfm.rerun", Visible, true),
+            listed(4, "image.stream.rerun-sfm.rerun", Hidden, true),
+            listed(5, "old.stream.rerun-sfm.rerun", Closed, true),
+            listed(6, "camera.rerun-sfm.rerun", Visible, false),
+            listed(7, "timeline.panel.rerun-sfm.rerun", Visible, false),
+            listed(8, "map.rerun-sfm.rerun", Hidden, false),
+            listed(9, "timeline.panel-stream.rerun-sfm.rerun", Visible, true),
+            listed(10, "camera.stream.other-sfm.rerun", Visible, true),
+            listed(11, "a.b.stream.rerun-sfm.rerun", Visible, true),
+        ];
+        let held = [GuiPanelId([1; 16])];
+        let published = ["plot".to_owned()];
+
+        let leftovers = classify_stream_route_leftovers(&listed, suffix, &held, &published);
+
+        let hidden: Vec<&str> = leftovers
+            .stream_panels_to_hide
+            .iter()
+            .map(|panel| panel.display_name.as_str())
+            .collect();
+        assert_eq!(hidden, ["chart.stream.rerun-sfm.rerun"]);
+        assert_eq!(
+            leftovers.web_panels_visible,
+            ["camera.rerun-sfm.rerun", "timeline.panel.rerun-sfm.rerun"]
+        );
+    }
+
+    #[test]
+    fn a_mixed_listing_of_both_routes_gives_the_stream_route_nothing_held_to_hide() {
+        use GuiPanelState::Visible;
+        let suffix = ".rerun-sfm.rerun";
+        let listed = [
+            listed(1, "camera.stream.rerun-sfm.rerun", Visible, true),
+            listed(2, "camera.rerun-sfm.rerun", Visible, false),
+        ];
+        let held = [GuiPanelId([1; 16])];
+        let leftovers =
+            classify_stream_route_leftovers(&listed, suffix, &held, &["camera".to_owned()]);
+        assert!(leftovers.stream_panels_to_hide.is_empty());
+        assert_eq!(leftovers.web_panels_visible, ["camera.rerun-sfm.rerun"]);
+    }
+
+    #[test]
+    fn the_stream_timeline_panel_leaves_its_image_the_content_area() {
+        let size = stream_panel_size(960, 256);
+        let content_aspect = (size.height - 0.105) / (size.width - 0.08);
+        assert!(
+            (content_aspect - 256.0 / 960.0).abs() < 1e-4,
+            "{}",
+            size.height
+        );
+        assert!(size.height > timeline_panel_size().height);
     }
 
     #[test]

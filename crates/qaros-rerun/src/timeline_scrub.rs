@@ -5,18 +5,24 @@
 
 use panel_server::{TimelinePosition, TimelineRequest, TimelineRequests};
 use re_viewer_context::external::re_log_types::{AbsoluteTimeRange, StoreId, TimeInt, TimeReal};
+use std::sync::{Mutex, PoisonError};
+
+use re_view_spatial::{SpatialView2D, SpatialView3D};
 use re_viewer_context::{
-    CommandSender, SystemCommand, SystemCommandSender as _, TimeControlCommand,
+    CommandSender, IdentifiedViewSystem, MissingChunkReporter, SystemCommand,
+    SystemCommandSender as _, TimeControlCommand, ViewClass as _, ViewContext, ViewContextSystem,
+    ViewContextSystemOncePerFrameResult, ViewQuery, ViewSystemIdentifier, ViewerContext,
 };
 use rerun::external::re_sdk_types::blueprint::components::PlayState;
 use rerun::external::re_viewer;
 
-/// The recording the viewer shows, the data range of its active timeline and where its time
-/// cursor stands.
+/// The recording the viewer shows, the data range of its active timeline, where its time
+/// cursor stands and whether its time control plays (following counts as playing).
 pub struct ActiveTimeline {
     pub store_id: StoreId,
     pub range: AbsoluteTimeRange,
     pub cursor: TimeInt,
+    pub playing: bool,
 }
 
 /// What a viewer tells the slider about its timeline; the Rerun app, or a stand-in in tests.
@@ -29,11 +35,78 @@ impl TimelineSource for re_viewer::App {
         let store_id = self.active_recording_id()?.clone();
         let query = self.current_query()?;
         let range = self.recording_db()?.time_range_for(&query.timeline()?)?;
+        let playing = time_control_playing(&store_id).unwrap_or(false);
         Some(ActiveTimeline {
             store_id,
             range,
             cursor: query.at(),
+            playing,
         })
+    }
+}
+
+/// The play state of the time control each viewer frame ran with, for the recording it
+/// belongs to. `re_viewer::App` keeps its time controls private; a context system's
+/// once-per-frame step sees them through the `ViewerContext`, on Rerun's worker threads.
+static TIME_CONTROL_PLAY_STATE: Mutex<Option<(StoreId, bool)>> = Mutex::new(None);
+
+fn note_time_control_playing(store_id: &StoreId, playing: bool) {
+    *TIME_CONTROL_PLAY_STATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some((store_id.clone(), playing));
+}
+
+/// `None` until a viewer frame with a view ran for `store_id`.
+fn time_control_playing(store_id: &StoreId) -> Option<bool> {
+    TIME_CONTROL_PLAY_STATE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|(noted, _)| noted == store_id)
+        .map(|(_, playing)| *playing)
+}
+
+/// Reads the time control's play state once per viewer frame in which a view of a class it
+/// extends is shown; it adds nothing to the views.
+#[derive(Default)]
+struct TimeControlProbe;
+
+impl IdentifiedViewSystem for TimeControlProbe {
+    fn identifier() -> ViewSystemIdentifier {
+        re_viewer_context::external::re_string_interner::intern_static!(
+            ViewSystemIdentifier,
+            "QarosTimeControlProbe"
+        )
+    }
+}
+
+impl ViewContextSystem for TimeControlProbe {
+    fn execute_once_per_frame(ctx: &ViewerContext<'_>) -> ViewContextSystemOncePerFrameResult {
+        note_time_control_playing(
+            ctx.store_id(),
+            ctx.time_ctrl.play_state() != PlayState::Paused,
+        );
+        Box::new(())
+    }
+
+    fn execute(
+        &mut self,
+        _ctx: &ViewContext<'_>,
+        _missing_chunk_reporter: &MissingChunkReporter,
+        _query: &ViewQuery<'_>,
+        _once_per_frame_result: &ViewContextSystemOncePerFrameResult,
+    ) {
+    }
+}
+
+/// The 3D and 2D views carry the probe; one of them is on screen whenever a recording is.
+pub fn register_time_control_probe(viewer: &mut re_viewer::App) {
+    for view_class in [SpatialView3D::identifier(), SpatialView2D::identifier()] {
+        if let Err(error) = viewer.extend_view_class(view_class, |registrator| {
+            registrator.register_context_system::<TimeControlProbe>()
+        }) {
+            re_log::warn!("panels: the play state cannot be read from {view_class} views: {error}");
+        }
     }
 }
 
@@ -103,6 +176,7 @@ fn time_commands(request: TimelineRequest, range: AbsoluteTimeRange) -> Vec<Time
             TimeControlCommand::SetTimeClamped(time_at(fraction, range)),
         ],
         TimelineRequest::Play => vec![TimeControlCommand::SetPlayState(PlayState::Playing)],
+        TimelineRequest::Pause => vec![TimeControlCommand::SetPlayState(PlayState::Paused)],
     }
 }
 
@@ -139,6 +213,7 @@ mod tests {
                 store_id: timeline.store_id.clone(),
                 range: timeline.range,
                 cursor: timeline.cursor,
+                playing: timeline.playing,
             })
         }
     }
@@ -155,6 +230,7 @@ mod tests {
                 TimeInt::new_temporal(last),
             ),
             cursor: TimeInt::new_temporal(cursor),
+            playing: false,
         }))
     }
 
@@ -181,6 +257,17 @@ mod tests {
         assert_eq!(position.latest(), Some(0.0), "a single time is the start");
         scrub.publish_position(&StandInViewer(None));
         assert_eq!(position.latest(), Some(0.0), "the last position stays");
+    }
+
+    #[test]
+    fn the_time_control_play_state_is_read_for_its_own_recording_only() {
+        let shown = StoreId::random(StoreKind::Recording, "shown");
+        let other = StoreId::random(StoreKind::Recording, "other");
+        note_time_control_playing(&shown, true);
+        assert_eq!(time_control_playing(&shown), Some(true));
+        assert_eq!(time_control_playing(&other), None);
+        note_time_control_playing(&shown, false);
+        assert_eq!(time_control_playing(&shown), Some(false));
     }
 
     #[test]
@@ -230,6 +317,25 @@ mod tests {
             ]
         );
         assert!(!scrub.apply(&viewer), "nothing new to send");
+    }
+
+    #[test]
+    fn pause_stops_playback_where_the_cursor_stands() {
+        let (sender, receiver) = command_channel();
+        let requests = TimelineRequests::default();
+        let scrub = scrub_with(requests.clone(), sender);
+
+        requests.push(TimelineRequest::Play);
+        requests.push(TimelineRequest::Pause);
+        assert!(scrub.apply(&viewer_with_frames(0, 10)));
+
+        assert_eq!(
+            sent_commands(&receiver),
+            [
+                format!("{:?}", TimeControlCommand::SetPlayState(PlayState::Playing)),
+                format!("{:?}", TimeControlCommand::SetPlayState(PlayState::Paused)),
+            ]
+        );
     }
 
     #[test]

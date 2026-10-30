@@ -43,6 +43,8 @@ Demos with 2D views (structure from motion, air traffic) also open each view as 
 
 The Hub keeps every panel where it is, or where you moved it, across runs. Close the panels in the Hub Display to have the next run open them in front of you again.
 
+With QAROS 0.9.0-dev.3177 or later, add `--panel-route stream` after `--`: the panels become video streams of the viewer instead of web pages, and the timeline takes taps and drags as QAROS panel gestures. It looks and works the same in the glasses ([Stream panels](../integration-guide.md#stream-panels)).
+
 ## Placement in the room
 
 Each demo puts the data's center 0.5 m above and 1.7 m in front of the room origin, scaled to between 1 m and 1.7 m across: a tabletop model you can walk around, readable from 1 to 2 m away, and inside the app volume so QAROS clips nothing that matters. The robot arm sits 0.65 m above the origin, so its base clears the table; the flat drone floor plan 0.25 m above, so it is seen from above.

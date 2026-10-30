@@ -17,13 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use panel_server::ViewFrames;
+use qaros_sink::PanelImages;
 use qaros_sink::qaros::{GraphicsAdapter, PixelFormat};
 use qaros_sink::vulkan::{
     QarosVulkanStream, QarosVulkanStreamOptions, VulkanSink, VulkanSinkOptions,
 };
 use qaros_sink::{
-    ConnectOptions, PanelActivity, PanelView, PoseSpace, QarosConnection, QarosPanels, QarosSink,
-    QarosSinkOptions, WakeViewer, connect, end_process_after_teardown,
+    ConnectOptions, PanelActivity, PanelRoute, PanelView, PoseSpace, QarosConnection, QarosPanels,
+    QarosSink, QarosSinkOptions, WakeViewer, connect, end_process_after_teardown,
     library_path_from_environment, runtime_directory_from_environment, start_stop_watchdog,
     stop_on_console_events, storage_directory_from_environment,
 };
@@ -32,6 +33,7 @@ use vulkan_device::{PhysicalDeviceIdentity, PhysicalDeviceSelector, VulkanDevice
 use crate::device_setup::GraphicsChoice;
 use crate::headset::HeadsetSink;
 use crate::options::{ColorFormatKind, Options, PoseSpaceKind, QarosGraphics, QarosOptions};
+use crate::panel_capture::PanelOutlet;
 use crate::viewer_app::{FrameHook, HeadsetFrame, StopRequest};
 
 const PANEL_SYNC_INTERVAL: Duration = Duration::from_secs(1);
@@ -56,7 +58,7 @@ pub async fn build(
     options: &Options,
     graphics: &GraphicsChoice,
     wake_viewer: WakeViewer,
-    panel_frames: Option<ViewFrames>,
+    panel_outlet: Option<PanelOutlet>,
     named_vulkan: Option<VulkanDevice>,
 ) -> Result<QarosSetup, String> {
     let qaros_options = &options.qaros;
@@ -137,26 +139,54 @@ pub async fn build(
         None => cpu_sink(options, &connection),
     };
 
-    let mut frame_hooks: Vec<Box<dyn FrameHook>> = Vec::new();
-    if let (Some(frames), Some(base_url)) = (panel_frames, options.panel_base_url()) {
-        re_log::info!("qaros: 2D views and the timeline slider open as GUI panels from {base_url}");
-        frame_hooks.push(Box::new(PanelHook {
-            panels: QarosPanels::new(connection, &base_url)
-                .with_panels_at_stop(panels_at_stop(options))
-                .with_dead_pages(dead_pages(options))
-                .with_timeline_panel(panel_server::TIMELINE_PAGE_PATH),
-            frames,
-            last_sync: None,
-            activity: HashMap::new(),
-            user_stream_started: false,
-        }));
-    }
+    let frame_hooks: Vec<Box<dyn FrameHook>> = panel_hook(options, connection, panel_outlet)
+        .into_iter()
+        .collect();
     Ok(QarosSetup {
         sink,
         frame_hooks,
         stop_request,
         vulkan,
     })
+}
+
+/// The GUI panel hook of the route the capture publishes to; `None` without panels, or on the
+/// web route without an address the panels can reach. Both routes open the timeline panel:
+/// the panel server's page on the web route, the viewer's own drawing on the stream route.
+fn panel_hook(
+    options: &Options,
+    connection: Rc<QarosConnection>,
+    panel_outlet: Option<PanelOutlet>,
+) -> Option<Box<dyn FrameHook>> {
+    let (route, views) = match panel_outlet? {
+        PanelOutlet::Web(frames) => {
+            let base_url = options.panel_base_url()?;
+            re_log::info!(
+                "qaros: 2D views and the timeline slider open as GUI panels from {base_url}"
+            );
+            let route = PanelRoute::Web {
+                base_url,
+                timeline_page: panel_server::TIMELINE_PAGE_PATH.to_owned(),
+            };
+            (route, PublishedViews::Web(frames))
+        }
+        PanelOutlet::Stream { images, gestures } => {
+            re_log::info!(
+                "qaros: 2D views and the timeline open as stream panels, each a video stream of \
+                 this viewer (--panel-route stream)"
+            );
+            let route = PanelRoute::Stream {
+                images: images.clone(),
+                timeline_gestures: Some(gestures),
+            };
+            (route, PublishedViews::Stream(images))
+        }
+    };
+    let panels = QarosPanels::new(connection, route)
+        .with_panels_at_stop(panels_at_stop(options))
+        .with_dead_pages(dead_pages(options))
+        .with_timeline_panel();
+    Some(Box::new(PanelHook::new(panels, views)))
 }
 
 /// The physical device of the session's adapter. The launch invite carries the GPU only when
@@ -325,14 +355,76 @@ fn stop_when_closed(
     }
 }
 
-/// Opens a GUI panel for each 2D view the panel server keeps publishing, checked once a second,
-/// and the timeline panel.
+/// Opens a GUI panel for each 2D view that keeps being published, checked once a second, and
+/// the timeline panel. On the stream route it also feeds the panels' video senders on every
+/// call.
 struct PanelHook {
     panels: QarosPanels,
-    frames: ViewFrames,
+    views: PublishedViews,
     last_sync: Option<Instant>,
     activity: HashMap<String, ViewActivity>,
     user_stream_started: bool,
+}
+
+/// Where the hook reads the published views from.
+enum PublishedViews {
+    /// The panel server's PNG frames; their sequence rises on every publish.
+    Web(ViewFrames),
+    /// The stream panels' images; their sequence rises only on change, so settling reads
+    /// `published_at`.
+    Stream(PanelImages),
+}
+
+impl PanelHook {
+    fn new(panels: QarosPanels, views: PublishedViews) -> Self {
+        Self {
+            panels,
+            views,
+            last_sync: None,
+            activity: HashMap::new(),
+            user_stream_started: false,
+        }
+    }
+
+    /// Each published view's size and when it was last published, as the sync sees it now.
+    fn observe_views(&mut self, now: Instant) -> (Vec<PanelView>, Vec<String>) {
+        let mut settled = Vec::new();
+        let published_view_names = match &self.views {
+            PublishedViews::Web(frames) => frames.view_names(),
+            PublishedViews::Stream(images) => images.view_names(),
+        };
+        for name in published_view_names.iter().cloned() {
+            let observed = match &self.views {
+                PublishedViews::Web(frames) => frames.latest(&name).map(|frame| {
+                    let activity = self
+                        .activity
+                        .entry(name.clone())
+                        .and_modify(|activity| activity.observe(frame.sequence, now))
+                        .or_insert_with(|| ViewActivity::new(frame.sequence, now));
+                    (*activity, frame.width, frame.height)
+                }),
+                PublishedViews::Stream(images) => images.latest(&name).map(|image| {
+                    let activity = self
+                        .activity
+                        .entry(name.clone())
+                        .or_insert_with(|| ViewActivity::new(image.sequence, now));
+                    activity.observe_published_at(image.published_at);
+                    (*activity, image.width, image.height)
+                }),
+            };
+            let Some((activity, width_in_pixel, height_in_pixel)) = observed else {
+                continue;
+            };
+            if activity.is_settled(now) {
+                settled.push(PanelView {
+                    name,
+                    width_in_pixel,
+                    height_in_pixel,
+                });
+            }
+        }
+        (settled, published_view_names)
+    }
 }
 
 /// The panel server's requests and whether a user stream has started in this run.
@@ -380,6 +472,12 @@ impl ViewActivity {
         }
     }
 
+    /// The stream route's images keep their sequence while unchanged, so the publish time
+    /// tells whether a view is still published.
+    fn observe_published_at(&mut self, published_at: Instant) {
+        self.last_published = self.last_published.max(published_at);
+    }
+
     /// A view gets a panel once it has been published for `PANEL_SETTLE` and still is. A
     /// replayed recording can carry its own blueprint, active for a moment while it loads; its
     /// views are published briefly and then never again, so they get no panel.
@@ -393,6 +491,7 @@ impl FrameHook for PanelHook {
     fn on_viewer_frame(&mut self, headset: &HeadsetFrame) {
         self.user_stream_started |= headset.is_streaming;
         let now = Instant::now();
+        self.panels.pump_streams(now);
         // New panels open within reach of a headset's head near the app volume, or of any head
         // near it after a wait; QarosPanels ignores heads after the one it takes.
         for head in &headset.heads {
@@ -405,31 +504,15 @@ impl FrameHook for PanelHook {
             return;
         }
         self.last_sync = Some(now);
-        let mut views = Vec::new();
-        let published_view_names = self.frames.view_names();
-        for name in published_view_names.iter().cloned() {
-            let Some(frame) = self.frames.latest(&name) else {
-                continue;
-            };
-            let activity = self
-                .activity
-                .entry(name.clone())
-                .and_modify(|activity| activity.observe(frame.sequence, now))
-                .or_insert_with(|| ViewActivity::new(frame.sequence, now));
-            if activity.is_settled(now) {
-                views.push(PanelView {
-                    name,
-                    width_in_pixel: frame.width,
-                    height_in_pixel: frame.height,
-                });
-            }
-        }
+        let (views, published_view_names) = self.observe_views(now);
         self.panels.sync(&views, &published_view_names);
-        let activity = PanelServerActivity {
-            frames: &self.frames,
-            user_stream_started: self.user_stream_started,
-        };
-        self.panels.reload_dead_pages(&activity, now);
+        if let PublishedViews::Web(frames) = &self.views {
+            let activity = PanelServerActivity {
+                frames,
+                user_stream_started: self.user_stream_started,
+            };
+            self.panels.reload_dead_pages(&activity, now);
+        }
     }
 }
 
@@ -543,6 +626,27 @@ mod tests {
     #[test]
     fn a_view_published_throughout_gets_its_panel_after_the_settle_time() {
         assert_eq!(settled_syncs(10, 5), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn a_streamed_view_whose_image_never_changes_settles_while_it_keeps_being_published() {
+        let start = Instant::now();
+        let mut activity = ViewActivity::new(0, start);
+        let mut settled = Vec::new();
+        for second in 1..=8 {
+            let now = start + Duration::from_secs(second);
+            if second <= 5 {
+                activity.observe_published_at(now);
+            }
+            if activity.is_settled(now) {
+                settled.push(second);
+            }
+        }
+        assert_eq!(
+            settled,
+            vec![3, 4, 5, 6],
+            "settled from 3 s, live 1.5 s past the last publish"
+        );
     }
 
     #[test]

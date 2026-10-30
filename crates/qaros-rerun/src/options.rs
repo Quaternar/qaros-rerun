@@ -79,6 +79,13 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                server for nothing 10 s after a stream started or another page
                                asked (default reload): reload loads the same URL once, leave
                                makes no panel call
+    --panel-route web|stream   how 2D views and the timeline reach their GUI panels (default
+                               web): web serves them as pages from the panel server; stream
+                               sends each view and a timeline the viewer draws as video
+                               streams of this viewer, with no server and no page, and takes
+                               the timeline's taps and drags as panel gestures (the --panels
+                               address is then unused). Use stream with QAROS 0.9.0-dev.3177
+                               or later; earlier mixers crash when stream panels restart
     --panel-base-url URL       how QAROS GUI panels reach the panel server (default http://--panels,
                                with 0.0.0.0 replaced by this machine's LAN IPv4 address: the
                                default route's local address, else the first interface address
@@ -176,6 +183,15 @@ pub enum PanelsAtStopKind {
     Keep,
 }
 
+/// How 2D views reach their GUI panels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelRouteKind {
+    /// Pages of the panel server, which each panel's browser loads.
+    Web,
+    /// A CPU video sender per view, which each panel shows (`QarGuiPanelStreamIdExt`).
+    Stream,
+}
+
 /// What becomes of a reattached panel whose page asks for nothing; see
 /// `qaros_sink::DeadPages`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +261,7 @@ pub struct QarosOptions {
     pub panel_base_url: Option<String>,
     pub panels_at_stop: PanelsAtStopKind,
     pub dead_panels: DeadPanelsKind,
+    pub panel_route: PanelRouteKind,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -349,6 +366,13 @@ impl QarosOptions {
                     other => return Err(invalid(flag, other)),
                 }
             }
+            "--panel-route" => {
+                self.panel_route = match value.as_str() {
+                    "web" => PanelRouteKind::Web,
+                    "stream" => PanelRouteKind::Stream,
+                    other => return Err(invalid(flag, other)),
+                }
+            }
             "--dead-panels" => {
                 self.dead_panels = match value.as_str() {
                     "reload" => DeadPanelsKind::Reload,
@@ -390,6 +414,7 @@ impl Default for QarosOptions {
             panel_base_url: None,
             panels_at_stop: PanelsAtStopKind::Hide,
             dead_panels: DeadPanelsKind::Reload,
+            panel_route: PanelRouteKind::Web,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -686,6 +711,7 @@ impl Options {
                 | "--panel-base-url"
                 | "--panels-at-stop"
                 | "--dead-panels"
+                | "--panel-route"
                 | "--gpu-priority"
                 | "--qaros-graphics" => options.qaros.apply_flag(&flag, value()?)?,
                 "--launched-by-qaros" => options.qaros.launched_by_qaros = true,
@@ -1213,6 +1239,22 @@ mod tests {
         );
         assert!(matches!(
             parse(&["--panels-at-stop", "close"]),
+            Err(ParseOutcome::Error(_))
+        ));
+    }
+
+    #[test]
+    fn panels_take_the_web_route_unless_streamed() {
+        assert_eq!(parse(&[]).unwrap().qaros.panel_route, PanelRouteKind::Web);
+        assert_eq!(
+            parse(&["--panels", "0.0.0.0:9877", "--panel-route", "stream"])
+                .unwrap()
+                .qaros
+                .panel_route,
+            PanelRouteKind::Stream
+        );
+        assert!(matches!(
+            parse(&["--panel-route", "browser"]),
             Err(ParseOutcome::Error(_))
         ));
     }

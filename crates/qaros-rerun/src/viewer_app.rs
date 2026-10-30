@@ -8,6 +8,8 @@ use crate::decoupled::DecoupledHeadset;
 use crate::headset::{HeadsetRenderer, HeadsetSink, ViewerHead, with_sink_lent_to_pass};
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::panel_capture::PanelCapture;
+#[cfg(feature = "qaros")]
+use crate::timeline_panel::TimelinePanel;
 use crate::timeline_scrub::{TimelineScrub, TimelineSource};
 
 #[cfg(all(feature = "qaros", not(test)))]
@@ -100,7 +102,11 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     /// `QAROS_RERUN_SCENE_DELAY_MS`: a stand-in for a heavy scene, slept after every UI pass.
     pub scene_delay: Option<std::time::Duration>,
     pub panel_capture: Option<PanelCapture>,
-    /// With `--panels`: the timeline panel's slider requests, applied before the Rerun app's logic.
+    /// `--panel-route stream`: the timeline panel the viewer draws into its own video stream;
+    /// it turns the panel's gestures into requests for `timeline_scrub`.
+    #[cfg(feature = "qaros")]
+    pub timeline_panel: Option<TimelinePanel>,
+    /// With `--panels`: the timeline panel's requests, applied before the Rerun app's logic.
     pub timeline_scrub: Option<TimelineScrub>,
     pub frame_hooks: Vec<Box<dyn FrameHook>>,
     pub quit_when_done: bool,
@@ -214,13 +220,27 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
     /// eframe calls `logic` before every `ui`, and alone while the window is minimised or
     /// occluded (`eframe` 0.37.0 `wgpu_integration.rs`, `if !show_ui`), so the stop is checked
     /// here: a check in `ui` alone never runs for a minimised window. The Rerun app runs its
-    /// pending commands in its `logic`, so the slider's commands go in just before it.
+    /// pending commands in its `logic`, so the slider's commands go in just before it. The
+    /// stream route's timeline panel is drawn here too: on Legion the desktop window is often
+    /// hidden while the glasses are worn, and then only `logic` runs.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.is_stop_requested() {
             self.exit_after_qaros_teardown();
         }
         if self.has_render_thread_failed() {
             self.exit_after_render_thread_failure();
+        }
+        #[cfg(feature = "qaros")]
+        if let (Some(timeline_panel), Some(render_state)) =
+            (&mut self.timeline_panel, frame.wgpu_render_state())
+        {
+            timeline_panel.on_logic(
+                &self.inner,
+                &render_state.device,
+                &render_state.queue,
+                render_state.target_format,
+                std::time::Instant::now(),
+            );
         }
         if let Some(timeline_scrub) = &self.timeline_scrub
             && timeline_scrub.apply(&self.inner)
@@ -356,6 +376,7 @@ mod tests {
                 store_id: StoreId::random(StoreKind::Recording, "test"),
                 range: AbsoluteTimeRange::new(TimeInt::new_temporal(0), TimeInt::new_temporal(10)),
                 cursor: TimeInt::new_temporal(4),
+                playing: false,
             })
         }
     }
@@ -393,6 +414,8 @@ mod tests {
             decoupled: None,
             scene_delay: None,
             panel_capture: None,
+            #[cfg(feature = "qaros")]
+            timeline_panel: None,
             timeline_scrub: None,
             frame_hooks: vec![Box::new(PanelsHook {
                 dropped: Rc::clone(&hook_dropped),
@@ -485,6 +508,104 @@ mod tests {
             position.latest(),
             Some(0.4),
             "the pass published the cursor the viewer shows"
+        );
+    }
+
+    /// A frame with a wgpu render state, as eframe and the headless harness hand to `logic`;
+    /// `None` without a GPU adapter.
+    #[cfg(feature = "qaros")]
+    fn frame_with_render_state() -> Option<eframe::Frame> {
+        let instance = wgpu::Instance::default();
+        if pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .is_err()
+        {
+            eprintln!("skipped: no wgpu adapter");
+            return None;
+        }
+        let mut frame = eframe::Frame::_new_kittest();
+        frame.wgpu_render_state = Some(egui_kittest::wgpu::create_render_state(
+            egui_wgpu::WgpuSetup::without_display_handle(),
+            egui_wgpu::RendererOptions::PREDICTABLE,
+        ));
+        Some(frame)
+    }
+
+    #[cfg(feature = "qaros")]
+    #[test]
+    fn a_tap_on_the_stream_timeline_track_seeks_and_pauses_through_the_logic_pass() {
+        use qaros_sink::qaros::PeerId;
+        use qaros_sink::{
+            GesturePhase, PanelGesture, PanelGestureKind, PanelGestures, PanelImages,
+            TIMELINE_IMAGE_KEY,
+        };
+
+        use crate::timeline_panel::TIMELINE_RASTER;
+
+        let Some(mut frame) = frame_with_render_state() else {
+            return;
+        };
+        let mut test = test_app();
+        let (command_sender, command_receiver) = command_channel();
+        let requests = TimelineRequests::default();
+        let position = TimelinePosition::default();
+        let images = PanelImages::default();
+        let gestures = PanelGestures::default();
+        test.app.timeline_scrub = Some(TimelineScrub::new(
+            requests.clone(),
+            position.clone(),
+            command_sender,
+        ));
+        test.app.timeline_panel = Some(TimelinePanel::new(
+            images.clone(),
+            gestures.clone(),
+            requests,
+            position,
+        ));
+        let ctx = egui::Context::default();
+
+        eframe::App::logic(&mut test.app, &ctx, &mut frame);
+        test.app
+            .timeline_panel
+            .as_mut()
+            .expect("the timeline panel")
+            .wait_for_render();
+        let drawn = images
+            .latest(TIMELINE_IMAGE_KEY)
+            .expect("the first logic pass drew the timeline");
+        assert_eq!([drawn.width, drawn.height], TIMELINE_RASTER);
+        while command_receiver.recv_system().is_some() {}
+
+        let [width, height] = TIMELINE_RASTER;
+        let on_the_track = [
+            i32::try_from(width * 3 / 4).expect("raster width"),
+            i32::try_from(height / 2).expect("raster height"),
+        ];
+        gestures.push(PanelGesture {
+            source_peer: PeerId([0xa1; 16]),
+            gesture_id: 0,
+            kind: PanelGestureKind::Tap,
+            phase: GesturePhase::Instant,
+            position: on_the_track,
+            start_position: on_the_track,
+            tap_count: 1,
+            received: std::time::Instant::now(),
+        });
+        eframe::App::logic(&mut test.app, &ctx, &mut frame);
+
+        let Some((_, SystemCommand::TimeControlCommands { time_commands, .. })) =
+            command_receiver.recv_system()
+        else {
+            panic!("the tap sent no time control commands");
+        };
+        let sent = format!("{time_commands:?}");
+        assert!(
+            sent.starts_with("[SetPlayState(Paused), SetTimeClamped(TimeReal("),
+            "sent {sent}"
+        );
+        assert_eq!(
+            test.logic_passes.get(),
+            2,
+            "the Rerun app's logic ran each pass"
         );
     }
 }

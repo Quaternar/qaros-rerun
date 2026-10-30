@@ -30,9 +30,10 @@ use glam::{Quat, Vec3};
 use qaros::{GuiPanelState, PeerId, PixelFormat};
 use qaros_sink::{
     BEGIN_WAIT_DRAIN_LIMIT, ConnectOptions, DeadPages, FRAME_FAILURE_MINIMUM, FRAME_FAILURE_PERIOD,
-    HEADSET_WAIT, PAGE_SILENCE_LIMIT, PanelActivity, PanelView, PanelsAtStop, PeerEvent, PoseSpace,
-    QarosConnection, QarosPanels, QarosSink, QarosSinkOptions, ReleaseCause, TargetPeers,
-    TeardownStep, UserEventSource, WakeViewer, connect, current_teardown_step, enter_teardown_step,
+    HEADSET_WAIT, PAGE_SILENCE_LIMIT, PanelActivity, PanelRoute, PanelView, PanelsAtStop,
+    PeerEvent, PoseSpace, QarosConnection, QarosPanels, QarosSink, QarosSinkOptions, ReleaseCause,
+    TargetPeers, TeardownStep, UserEventSource, WakeViewer, connect, current_teardown_step,
+    enter_teardown_step,
 };
 use xr_math::{AppPlacement, Pose};
 
@@ -2321,8 +2322,8 @@ fn opens_a_panel_per_view_within_reach_and_hides_them_at_stop() {
 fn a_timeline_panel_opens_without_views_in_front_of_and_below_the_head_facing_it() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
-    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877/")
-        .with_timeline_panel("/timeline-panel");
+    let mut panels =
+        web_panels(Rc::clone(&connection), "http://127.0.0.1:9877/").with_timeline_panel();
     panels.sync(&[], &[]);
     assert!(
         panels.panels().is_empty(),
@@ -2400,8 +2401,8 @@ fn a_restart_reclaims_the_timeline_panel_where_it_is() {
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let views = panel_views(&["map"]);
     let published = view_names(&["map"]);
-    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877")
-        .with_timeline_panel("/timeline-panel");
+    let mut first_run =
+        panels_with_a_viewer(Rc::clone(&connection), "http://127.0.0.1:9877").with_timeline_panel();
     first_run.sync(&views, &published);
     let first_run_panels = first_run.panels().clone();
     let map_position = panel_position(&connection, "map");
@@ -2409,8 +2410,8 @@ fn a_restart_reclaims_the_timeline_panel_where_it_is() {
     drop(first_run);
     let navigations = navigation_count(&fixture);
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877")
-        .with_timeline_panel("/timeline-panel");
+    let mut second_run =
+        web_panels(Rc::clone(&connection), "http://127.0.0.1:9877").with_timeline_panel();
     second_run.sync(&views, &published);
     assert_eq!(
         second_run.panels(),
@@ -2590,7 +2591,7 @@ fn a_stop_then_start_shows_the_hidden_panels_again_without_navigating_them() {
 fn new_panels_wait_for_a_viewer_near_the_volume_and_open_within_reach() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
-    let mut panels = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
+    let mut panels = web_panels(Rc::clone(&connection), "http://127.0.0.1:9877");
     let published = view_names(&["map", "camera"]);
     panels.sync(&panel_views(&["map"]), &published);
     assert!(
@@ -2683,7 +2684,7 @@ fn a_restart_leaves_a_panel_where_the_user_put_it() {
     let user_calls = fixture.calls_starting_with("gui_panels_update_pose").len();
     drop(first_run);
 
-    let mut second_run = QarosPanels::new(Rc::clone(&connection), "http://127.0.0.1:9877");
+    let mut second_run = web_panels(Rc::clone(&connection), "http://127.0.0.1:9877");
     place_panels_by(
         &mut second_run,
         Pose::from_translation(Vec3::new(1.0, 1.6, 0.5)),
@@ -2714,9 +2715,20 @@ fn viewer_head() -> Pose {
     Pose::from_translation(Vec3::new(0.0, 1.6, 0.0))
 }
 
+/// Web route panels whose timeline page is the panel server's `/timeline-panel`.
+fn web_panels(connection: Rc<QarosConnection>, base_url: &str) -> QarosPanels {
+    QarosPanels::new(
+        connection,
+        PanelRoute::Web {
+            base_url: base_url.to_owned(),
+            timeline_page: "/timeline-panel".to_owned(),
+        },
+    )
+}
+
 /// Panels for a run whose viewer stands near the app volume, so new panels open at once.
 fn panels_with_a_viewer(connection: Rc<QarosConnection>, base_url: &str) -> QarosPanels {
-    let mut panels = QarosPanels::new(connection, base_url);
+    let mut panels = web_panels(connection, base_url);
     place_panels_by(&mut panels, viewer_head());
     panels
 }
@@ -2796,6 +2808,32 @@ fn a_failed_panel_listing_opens_nothing_and_the_next_sync_reattaches() {
         ],
         "shown again by the retry"
     );
+
+    drop(second_run);
+    fixture.assert_clean_teardown(connection);
+}
+
+#[test]
+fn views_that_settle_one_after_another_are_claimed_from_one_listing() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let both_views = panel_views(&["map", "camera"]);
+    let published = view_names(&["map", "camera"]);
+    let mut first_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
+    first_run.sync(&both_views, &published);
+    let first_run_panels = first_run.panels().clone();
+    drop(first_run);
+    let calls_before_restart = fixture.calls().len();
+
+    let mut second_run = panels_with_a_viewer(Rc::clone(&connection), "http://192.168.50.40:9877");
+    second_run.sync(&panel_views(&["map"]), &published);
+    second_run.sync(&both_views, &published);
+    assert_eq!(second_run.panels(), &first_run_panels, "both reattached");
+    let listings = fixture.calls()[calls_before_restart..]
+        .iter()
+        .filter(|call| call.as_str() == "query_gui_panels_count")
+        .count();
+    assert_eq!(listings, 1, "the later view reuses the first listing");
 
     drop(second_run);
     fixture.assert_clean_teardown(connection);

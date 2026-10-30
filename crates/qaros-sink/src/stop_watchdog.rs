@@ -5,8 +5,8 @@
 //! log tail and the exit line, so the watchdog ends the process itself well before, after one
 //! line naming the teardown step still in progress.
 
-use std::sync::Once;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, Once, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::process_exit::end_process_after_bounded_flush;
@@ -27,21 +27,25 @@ pub enum TeardownStep {
     LeaveSink = 1,
     /// The GUI panels are hidden for the next run.
     HidePanels = 2,
+    /// The stream panels' gesture subscriptions are cancelled and their video senders
+    /// destroyed.
+    ClosePanelStreams = 3,
     /// The app volume is closed.
-    CloseVolume = 3,
+    CloseVolume = 4,
     /// The subscriptions are cancelled and the session and its runtime destroyed.
-    SessionDestroy = 4,
+    SessionDestroy = 5,
     /// The library is destroyed (and stays mapped).
-    LibraryDestroy = 5,
+    LibraryDestroy = 6,
     /// The teardown is done; the logs flush and the process ends.
-    EndProcess = 6,
+    EndProcess = 7,
 }
 
 impl TeardownStep {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::NotStarted,
         Self::LeaveSink,
         Self::HidePanels,
+        Self::ClosePanelStreams,
         Self::CloseVolume,
         Self::SessionDestroy,
         Self::LibraryDestroy,
@@ -60,6 +64,7 @@ impl TeardownStep {
             Self::NotStarted => "not started (onboarding, or the viewer frame before the teardown)",
             Self::LeaveSink => "leave sink (render senders)",
             Self::HidePanels => "hide panels",
+            Self::ClosePanelStreams => "close panel streams",
             Self::CloseVolume => "close volume",
             Self::SessionDestroy => "session destroy",
             Self::LibraryDestroy => "library destroy",
@@ -69,10 +74,51 @@ impl TeardownStep {
 }
 
 static CURRENT_STEP: AtomicU8 = AtomicU8::new(TeardownStep::NotStarted as u8);
+/// The step in progress and when it was entered, for the per-step durations.
+static STEP_ENTERED: Mutex<Option<(TeardownStep, Instant)>> = Mutex::new(None);
+static STOP_REQUESTED: OnceLock<Instant> = OnceLock::new();
 
-/// Marks `step` as the teardown step in progress, for the watchdog's line.
+/// Marks `step` as the teardown step in progress, for the watchdog's line, and logs how long
+/// the step before it took, so the [`STOP_DEADLINE`] budget is measured rather than assumed.
 pub fn enter_teardown_step(step: TeardownStep) {
     CURRENT_STEP.store(step as u8, Ordering::Release);
+    let now = Instant::now();
+    let previous = STEP_ENTERED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .replace((step, now));
+    if let Some((previous_step, entered)) = previous
+        && previous_step != step
+        && previous_step != TeardownStep::NotStarted
+    {
+        let since_stop = STOP_REQUESTED
+            .get()
+            .map(|requested| now.saturating_duration_since(*requested));
+        log::info!(
+            "{}",
+            step_duration_line(
+                previous_step,
+                now.saturating_duration_since(entered),
+                since_stop
+            )
+        );
+    }
+}
+
+fn step_duration_line(
+    step: TeardownStep,
+    took: Duration,
+    since_stop_request: Option<Duration>,
+) -> String {
+    let since_stop = since_stop_request.map_or_else(
+        || "no stop request".to_owned(),
+        |since| format!("{} us after the stop request", since.as_micros()),
+    );
+    format!(
+        "qaros: teardown step {} took {} us; {since_stop}",
+        step.describe(),
+        took.as_micros()
+    )
 }
 
 pub fn current_teardown_step() -> TeardownStep {
@@ -86,6 +132,7 @@ static WATCHDOG: Once = Once::new();
 /// flushes for at most [`BOUNDED_FLUSH_WAIT`](crate::BOUNDED_FLUSH_WAIT) and terminates.
 pub fn start_stop_watchdog() {
     WATCHDOG.call_once(|| {
+        let _ = STOP_REQUESTED.set(Instant::now());
         watch(STOP_DEADLINE, |line| {
             end_process_after_bounded_flush(STOP_DEADLINE_CODE, line)
         });
@@ -170,6 +217,31 @@ mod tests {
             "qaros: still running 3157 ms after the stop request (deadline 600ms), in teardown \
              step session destroy; ending the process"
         );
+    }
+
+    #[test]
+    fn a_step_duration_names_the_step_and_the_time_since_the_stop_request() {
+        assert_eq!(
+            step_duration_line(
+                TeardownStep::ClosePanelStreams,
+                Duration::from_micros(1234),
+                Some(Duration::from_millis(87))
+            ),
+            "qaros: teardown step close panel streams took 1234 us; 87000 us after the stop \
+             request"
+        );
+        assert_eq!(
+            step_duration_line(TeardownStep::HidePanels, Duration::from_micros(5), None),
+            "qaros: teardown step hide panels took 5 us; no stop request"
+        );
+    }
+
+    #[test]
+    fn the_panel_streams_close_after_the_hide_and_before_the_volume() {
+        assert_eq!(TeardownStep::ClosePanelStreams as u8, 3);
+        assert!((TeardownStep::HidePanels as u8) < TeardownStep::ClosePanelStreams as u8);
+        assert!((TeardownStep::ClosePanelStreams as u8) < TeardownStep::CloseVolume as u8);
+        assert!((TeardownStep::CloseVolume as u8) < TeardownStep::SessionDestroy as u8);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// What a panel page asked of the viewer's timeline, in the order the pages asked.
+/// What a panel asked of the viewer's timeline, in the order the panels asked.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TimelineRequest {
     /// Pause and put the time cursor at this fraction of the active timeline, 0 at its first
@@ -9,6 +9,9 @@ pub enum TimelineRequest {
         fraction: f64,
     },
     Play,
+    /// Stop playback where the cursor stands; the stream route's timeline sends it from its
+    /// Play/Pause button while the viewer plays.
+    Pause,
 }
 
 /// Requests a page sent that the viewer has not taken yet. A drag sends many seeks; a seek

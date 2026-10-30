@@ -15,8 +15,8 @@ How the viewer gets Rerun's 3D view and 2D views into QAROS, and the pattern to 
 1. **Hook the renderer where the scene is ready.** Find the point where the application has built everything it draws in a frame, in a form that can be drawn again from another camera. Here a small patch to Rerun's 3D view hands its draw data to an observer ([The hook](#the-hook)).
 2. **Render per eye, per user.** Every running target app in the QAROS session (a headset's player app, the Hub's visualizer) is a user with a render sender of its own. Each frame, QAROS hands out two eye poses and fields of view; the scene is drawn once per eye with an off-axis projection built from them (`crates/qaros-rerun/src/headset.rs`, `eye_render.rs`, the math in `crates/xr-math`).
 3. **Hand color and depth to QAROS.** Color is transparent where nothing was drawn, so only your content reaches the room. Depth lets QAROS reproject the frame to the latest head pose. On Windows the eyes are drawn straight into the sender's Vulkan images on the application's own device ([vulkan-path.md](vulkan-path.md)); a CPU path copies them instead (`crates/qaros-sink`).
-4. **2D UI as GUI panels.** A QAROS GUI panel shows a web page. Each 2D view is captured from the viewer's UI and served by a small local web server; the viewer opens a panel per page, placed once near the user's head, and the Hub keeps it there (`crates/panel-server`, `crates/qaros-rerun/src/panel_capture.rs`, `crates/qaros-sink/src/panels.rs`).
-5. **Gestures through the panels.** A panel is touched like a web page, so interaction comes back as requests to the same local server, which the application applies on its own thread. The timeline panel's slider and Play button work this way (`crates/qaros-rerun/src/timeline_scrub.rs`, [The timeline panel](#the-timeline-panel)).
+4. **2D UI as GUI panels.** Each 2D view is captured from the viewer's UI and opened as a QAROS GUI panel, placed once near the user's head; the Hub keeps it there. A panel shows either a web page, served by a small local web server, or a video stream the application owns and writes its pixels into (`--panel-route stream`, [Stream panels](#stream-panels)). The stream is the shorter path: the mixer samples the application's pixels instead of rendering a page (`crates/qaros-rerun/src/panel_capture.rs`, `crates/qaros-sink/src/panels.rs`).
+5. **Gestures through the panels.** A web panel is touched like a web page, so interaction comes back as requests to the same local server. A stream panel reports taps and drags as typed QAROS gesture events, in the stream's pixels. Either way the application applies them on its own thread; the timeline panel's slider and Play button work both ways (`crates/qaros-rerun/src/timeline_scrub.rs`, [The timeline panel](#the-timeline-panel)).
 
 Everything that talks to QAROS sits behind one trait, `FrameSink` ([The seam](#the-seam)), so the renderer runs and is tested the same way with a PNG writer or QAROS's stub runtime in place of a headset.
 
@@ -88,7 +88,7 @@ On the CPU path (`--qaros-graphics cpu`), every rendered user gets a CPU render 
 
 ## Panels
 
-With `--panels`, a GUI panel opens for every 2D view the panel server publishes: 0.45 m wide with the view's aspect, navigated to `<base>/views/<name>`.
+With `--panels`, a GUI panel opens for every 2D view the viewer publishes: 0.45 m wide with the view's aspect. On the default web route it is navigated to `<base>/views/<name>`; on the stream route it shows a video stream of the viewer ([Stream panels](#stream-panels)).
 
 **Placement.** The Hub owns a panel's place once the panel exists: it keeps the pose the panel was created with, or wherever a user moved it, across runs, and ignores later pose calls. So a new panel is created at its final place, within reach of one viewer's head:
 
@@ -112,6 +112,17 @@ Every run with `--panels` also gets a timeline panel: a slider and a Play button
 - The desktop time panel shows the same cursor, since both drive Rerun's one time control.
 - The other way, the viewer posts the cursor's position every frame, and the page polls `/timeline/position` so the thumb follows playback and the desktop time bar. Under the finger, and for a second after the last seek, the thumb stays where the finger put it.
 
+On the stream route the viewer draws the same row of controls itself, with Rerun's style and icons, in an egui context of its own rendered off screen on its wgpu device, and streams it like a view ([ADR-0078](decisions/ADR-0078%20A%20Timeline%20Drawn%20By%20The%20Viewer%20Driven%20By%20Panel%20Gestures.md)). A tap on the track seeks and pauses, a drag scrubs with the thumb under the finger, and the button shows Pause while Rerun reports the recording playing (`StartupOptions::on_event`). One drag owns the cursor at a time, keyed by peer and gesture id, so a second user's touch does not move it. The panel is drawn in the app's `logic`, which runs also while the desktop window is minimised.
+
+### Stream panels
+
+With `--panel-route stream` no panel server runs. Each view's crop, capped at 1280 px a side, goes into `PanelImages` as BGRA; the panel hook, on the thread that owns the QAROS session, copies at most one changed image per viewer frame into the CPU frame of that panel's `QarVideoSender` and shows it, and re-shows an unchanged one once a second so a mixer that connects late gets a frame ([ADR-0076](decisions/ADR-0076%202D%20Views%20As%20Stream%20Panels%20From%20CPU%20Video%20Senders.md)).
+
+- **Names and reattach.** Stream panels have common names of their own, `<view>.stream.<volume>.rerun` and `timeline.panel-stream.<volume>.rerun`. A Start finds its panels by name, or by id when the listing lost the name, points them at this run's streams with `qar_gui_panels_set_stream` and shows them; web panels of earlier runs are left alone and logged ([ADR-0077](decisions/ADR-0077%20Stream%20Panels%20Claimed%20Under%20Names%20Of%20Their%20Own.md)).
+- **Size.** A panel's height follows the content area the mixer draws the stream into, so a view fits whole. A view that changes size for good gets a new sender; the old one stays until the mixer has connected to the new one.
+- **Stop.** Panels are hidden, then the gesture subscription is cancelled and the senders destroyed, all before the session goes; each step's duration is logged. On 0.9.0-dev.3177 a Stop takes about 250 ms in all ([ADR-0079](decisions/ADR-0079%20Stop%20Order%20With%20Stream%20Panels.md)).
+- **QAROS builds.** Use the route with 0.9.0-dev.3177 or later; the [known issues](known-issues.md#mixer-crash-when-stream-panels-restart-before-3177) say why, and list two QAROS issues seen on that build.
+
 ## Tests
 
 ```sh
@@ -120,8 +131,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p qaros-rerun --no-default-features --all-targets -- -D warnings
 ```
 
-- **`qaros-sink`**: unit tests for the pixel copy (BGRA swizzle, row pitch, view offsets, flipped views, depth floats, rejected sizes and formats) and the layout check; stub tests (`crates/qaros-sink/tests/stub.rs`) that load `qaros-stub` and run onboarding, sender creation, frames, users joining, waiting and leaving, frame-stamp pairing, panel placement, reattachment and hiding, the timeline panel, app-space poses and an ordered teardown.
+- **`qaros-sink`**: unit tests for the pixel copy (BGRA swizzle, row pitch, view offsets, flipped views, depth floats, rejected sizes and formats) and the layout check; stub tests (`crates/qaros-sink/tests/stub.rs`) that load `qaros-stub` and run onboarding, sender creation, frames, users joining, waiting and leaving, frame-stamp pairing, panel placement, reattachment and hiding, the timeline panel, app-space poses and an ordered teardown; unit tests of the stream route over a fake backend (claim and reattach order, replacement and retirement of senders, round-robin shows, Stop order) and of the gesture decoding; stub tests of the raw panel listing and of the stream route's graceful refusal on a runtime without video senders.
 - **`panel-server`**: the routes, and the panel page's own script under Node with stand-ins for images and timers (`crates/panel-server/tests/page_retry.mjs`, run by `cargo test` when `node` is on the path).
 - **`frame-sink`**: the user roster and render policy, the image sink with users joining at their tick, and the frame stamp decoding back to user, frame and eye.
-- **`qaros-rerun`**: each eye image carries the stamp of its own user, frame and eye; readback and view builder ids differ per user, frame and eye; the timeline scrub; per-user statistics.
+- **`qaros-rerun`**: each eye image carries the stamp of its own user, frame and eye; readback and view builder ids differ per user, frame and eye; the timeline scrub; the stream timeline panel's gesture mapping, and a tap on it reaching Rerun's command channel in one `logic` pass; the stream route's pixel cap and settling; per-user statistics.
 - **`xr-math`**: the projection decomposition equals an explicit off-axis matrix, a point straight ahead lands on each eye's principal point, scale does not change reported room depth, depth encodings round-trip. `qaros-rerun` checks the same decomposition against `re_renderer`'s own `Projection` and `RectTransform` matrices.

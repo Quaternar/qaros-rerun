@@ -5,11 +5,10 @@
 use std::ffi::{CStr, c_char};
 
 use qaros::PeerId;
-use qaros::qaros_sys::{
-    QarApi, QarDeviceCategory, QarPeerSpec, QarResult, QarStatusCode, defaults,
-};
+use qaros::qaros_sys::{QarApi, QarDeviceCategory, QarPeerSpec, defaults};
 
 use crate::connection::QarosConnection;
+use crate::raw_result::check;
 
 /// A peer's device as QAROS reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,24 +114,4 @@ fn device_of_spec_if_peer(
         }
     };
     Ok(Some(PeerDevice { category, name }))
-}
-
-/// Read from the status code, as the `qaros` crate does, rather than through
-/// `qar_result_is_success`, which `qaros-stub` does not implement.
-fn is_success(result: QarResult) -> bool {
-    result.code == QarStatusCode::QAR_STATUS_SUCCESS
-}
-
-fn check(api: &QarApi, function: &str, result: QarResult) -> Result<(), String> {
-    if is_success(result) {
-        return Ok(());
-    }
-    let mut buffer = [0 as c_char; 256];
-    // SAFETY: the buffer is writable for its full length, which is passed, and is NUL-terminated
-    // by the call.
-    let message = unsafe {
-        (api.qar_impl_result_message)(result, buffer.as_mut_ptr(), buffer.len());
-        CStr::from_ptr(buffer.as_ptr())
-    };
-    Err(format!("{function}: {}", message.to_string_lossy()))
 }
