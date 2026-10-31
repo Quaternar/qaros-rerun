@@ -1,0 +1,10 @@
+/target/
+/out/
+*.onboarding-id.txt
+*.unanswered-peers.txt
+stub-report.txt
+validation.txt
+.worktrees/
+.DS_Store
+/demos/.cache/
+__pycache__/

@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/xr-math",
+    "crates/frame-sink",
+    "crates/qaros-sink",
+    "crates/qaros-rerun",
+    "crates/vulkan-device",
+]
+exclude = ["patches"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+xr-math = { path = "crates/xr-math" }
+frame-sink = { path = "crates/frame-sink" }
+qaros-sink = { path = "crates/qaros-sink" }
+vulkan-device = { path = "crates/vulkan-device" }
+
+# The Rust binding to qar-streaming-c, its stub and its test extension, from
+# `qar-streaming-rust/` in the QAROS repository, pinned by revision.
+qaros = { git = "https://github.com/Quaternar/qaros", rev = "e0c0195af5764bd330aac29fcaf5b128e9a14df6" }
+qaros-stub = { git = "https://github.com/Quaternar/qaros", rev = "e0c0195af5764bd330aac29fcaf5b128e9a14df6" }
+# Test-only: the QAROS test extension, for the end-to-end test of the sink.
+qaros-ext = { git = "https://github.com/Quaternar/qaros", rev = "e0c0195af5764bd330aac29fcaf5b128e9a14df6", package = "qar-streaming-rust-ext" }
+
+glam = "0.33.11"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+rerun = { version = "=0.40.0", default-features = false }
+re_viewer = { version = "=0.40.0", default-features = false }
+re_renderer = { version = "=0.40.0", default-features = false }
+re_viewer_context = { version = "=0.40.0", default-features = false }
+re_view_spatial = { version = "=0.40.0", default-features = false }
+re_log = { version = "=0.40.0", default-features = false }
+# The facade re_log's macros log through; `tracing::enabled!` asks its installed filter.
+tracing = "0.1.44"
+egui = "=0.37.0"
+egui-wgpu = "=0.37.0"
+# The wgpu re_renderer 0.40.0 and egui-wgpu 0.37.0 use.
+wgpu = "=30.0.0"
+egui_kittest = { version = "=0.37.0", features = ["wgpu", "eframe"] }
+mimalloc = "0.1"
+re_math = "0.33.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+
+[patch.crates-io]
+re_view_spatial = { path = "patches/re_view_spatial" }
+re_renderer = { path = "patches/re_renderer" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

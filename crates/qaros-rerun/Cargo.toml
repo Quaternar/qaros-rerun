@@ -1,0 +1,52 @@
+[package]
+name = "qaros-rerun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "qaros-rerun"
+path = "src/main.rs"
+
+[[bin]]
+name = "log-test-scene"
+path = "src/bin/log_test_scene.rs"
+
+[features]
+default = ["qaros"]
+# The QAROS sink (--sink qaros). Compiles everywhere, since the library is loaded at runtime;
+# streams only where qar-streaming-c runs (Windows), or against qaros-stub for tests.
+qaros = ["dep:qaros-sink", "qaros-sink/vulkan"]
+
+[dependencies]
+xr-math.workspace = true
+frame-sink = { workspace = true, features = ["gpu"] }
+qaros-sink = { workspace = true, optional = true }
+vulkan-device.workspace = true
+
+glam.workspace = true
+rerun = { workspace = true, features = ["native_viewer", "sdk", "server", "log_setup", "glam", "map_view"] }
+re_viewer.workspace = true
+re_renderer.workspace = true
+re_viewer_context.workspace = true
+re_view_spatial.workspace = true
+re_log.workspace = true
+tracing.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
+egui_kittest.workspace = true
+image.workspace = true
+mimalloc.workspace = true
+re_math.workspace = true
+
+[dev-dependencies]
+pollster = "0.4"
+qaros-sink = { workspace = true, features = ["stub-control"] }
+# Built next to the test executable, where `stub_control` finds it.
+qaros-stub.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+# qaros-rerun --headless 1600x1000 --out out/vk-own --frames 60 --write-every 30 --motion still
+#     --quit-when-done --port 19876 --vulkan-device name:apple --vulkan-extension VK_EXT_metal_objects
+# with DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib, Homebrew vulkan-loader 1.4.363 and molten-vk 1.4.2,
+# Apple M5 Pro, 2026-10-06; log-test-scene 300 against port 19876. MoltenVK pipeline warnings omitted.
+# Color and depth PNGs of frames 0 and 30 are byte-identical to a Metal run with the same arguments minus
+# --vulkan-device; frame 0 also to stereo_frame_000_color.png and stereo_frame_000_depth.png here.
+INFO vulkan_device::picker: vulkan-device: candidate Apple M5 Pro (INTEGRATED_GPU, vendor 0x106b, device 0x1a04020a, Vulkan 1.3.357, uuid 0000106b1a04020a0000000000000000, luid 000000010000074b)
+INFO vulkan_device::device: vulkan-device: creating the device on Apple M5 Pro (INTEGRATED_GPU, vendor 0x106b, device 0x1a04020a, Vulkan 1.3.357, uuid 0000106b1a04020a0000000000000000, luid 000000010000074b)
+INFO vulkan_device::device: vulkan-device: enabling device extensions VK_KHR_swapchain, VK_KHR_swapchain_mutable_format, VK_EXT_robustness2, VK_EXT_memory_budget, VK_KHR_portability_subset, VK_EXT_metal_objects
+INFO qaros_rerun::device_setup: vulkan-device: viewer device created here on Apple M5 Pro (...); handles VulkanDeviceHandles { instance: 0x112469c60, get_instance_proc_addr: 0x116e88040, instance_api_version: 4211051, physical_device: 0x8450c4780, device: 0x8450f0018, queue_family_index: 0, queue_index: 0, queue: 0x1124757a8, enabled_device_extensions: ["VK_KHR_swapchain", "VK_KHR_swapchain_mutable_format", "VK_EXT_robustness2", "VK_EXT_memory_budget", "VK_KHR_portability_subset", "VK_EXT_metal_objects"] }
+INFO qaros_rerun: wgpu adapter: backend: Vulkan, device_type: IntegratedGpu, name: "Apple M5 Pro", driver: "MoltenVK", driver_info: "1.4.2"
+INFO qaros_rerun::viewer_app: headset: frames started 60, shown 60, abandoned 0; 15.4 shown per second; begin to show 37.3 ms and 1.00 viewer frames on average; draw data copied 720 of 720

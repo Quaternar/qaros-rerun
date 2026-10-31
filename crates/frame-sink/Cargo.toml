@@ -1,0 +1,21 @@
+[package]
+name = "frame-sink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# GpuFrameSink, for sinks whose wgpu textures the renderer draws into.
+gpu = ["dep:wgpu"]
+
+[dependencies]
+xr-math.workspace = true
+glam.workspace = true
+image.workspace = true
+log = "0.4"
+wgpu = { workspace = true, optional = true }
+
+[lints]
+workspace = true
