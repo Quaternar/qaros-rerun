@@ -161,12 +161,14 @@ impl<Stream: VulkanFrameStream> VulkanSink<Stream> {
             pose: eye.pose,
             fov: eye.fov,
         });
+        let volume = frame.volume;
         self.open_frames.insert(user, OpenFrame { frame_id, frame });
         Ok(Some(GpuFrameRequest {
             request: FrameRequest {
                 key: FrameKey { user, frame_id },
                 views,
                 resolution_in_pixel,
+                volume,
             },
             eyes,
         }))

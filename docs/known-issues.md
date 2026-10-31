@@ -74,6 +74,13 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS.
 
+## A two-hand spread ends before it scales the scene
+
+- **Symptom.** With hand tracking on METALENSE 2, a one-hand grab moves the scene smoothly, but a two-hand spread barely scales it. QAROS starts the spread and ends it 50 to 80 ms later; the one-hand grab then passes from one hand to the other every 60 to 100 ms while both hands pinch. In a two-minute run the app scale changed once, by about 3 %.
+- **What the viewer does.** Nothing to work around: QAROS's default rules apply both gestures, and the viewer only follows the volume's live transform. Scaling stays with `--scale` at start.
+- **Seen on.** 0.9.0-dev.3184, METALENSE 2.
+- **Status.** Under investigation in the QAROS gesture detector.
+
 ## History: why panels need 0.9.0-dev.3177
 
 Mixers up to build 3137 gave every GUI panel a browser with its own Ultralight renderer, stream panels included, while Ultralight allows one per process. Closing or reviving a panel next to live ones crashed the mixer in `WebCore.dll`, and a stream panel is closed by the mixer once its sender is gone, so restarting an app with stream panels crashed it. 0.9.0-dev.3177 shares one renderer across the panels, and restarts there are clean. That build is the viewer's minimum, and the viewer logs a warning on an older runtime.

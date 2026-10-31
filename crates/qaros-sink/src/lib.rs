@@ -1,8 +1,9 @@
 //! The QAROS side of the headset stream, over the `qaros` crate from the QAROS repository.
 //!
 //! - [`connect`] loads `qar-streaming-c`, rejoins with the persisted onboarding id or onboards
-//!   with a pairing code, gets or creates the app volume Rerun's world lives in, and subscribes
-//!   to peer updates and render stream requests.
+//!   with a pairing code, gets or creates the app volume Rerun's world lives in, follows the
+//!   volume's transform as QAROS holds it, and subscribes to peer updates and render stream
+//!   requests.
 //! - [`QarosSink`] implements [`frame_sink::FrameSink`] over one CPU render sender per user:
 //!   stereo color and depth, written into the frame textures the negotiated layout describes.
 //!   Users come from a [`UserEventSource`] ([`TargetPeers`]: the running target apps in the
@@ -14,8 +15,8 @@
 //!   over one Vulkan render sender per user: the renderer draws into the senders' own images.
 //!
 //! QAROS handles are not `Send`. Everything here runs on the viewer's UI thread; the only
-//! cross-thread surfaces are the library callbacks (render requests, peer updates, sender
-//! creations), which forward into channels and wake the viewer.
+//! cross-thread surfaces are the library callbacks (render requests, peer updates, app volume
+//! updates, sender creations), which forward into channels and wake the viewer.
 
 mod begin_drain;
 mod connection;
@@ -55,6 +56,10 @@ mod users;
 // Video senders stay raw in the binding: create, the CPU frame cycle and destroy.
 #[allow(unsafe_code)]
 mod video_sender;
+// App volume gestures stay raw in the binding: subscribe and the event getters.
+#[allow(unsafe_code)]
+mod volume_gestures;
+mod volume_transform;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 

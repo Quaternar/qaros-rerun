@@ -31,7 +31,50 @@ impl Default for AppPlacement {
     }
 }
 
+/// The QAROS app volume's part of an [`AppPlacement`]: the volume pose in the room, the app
+/// pose in unscaled volume meters and the app scale (room meters per app meter). QAROS holds
+/// these values and a person may change them in the Hub while the viewer runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeTransform {
+    pub volume_pose: Pose,
+    pub app_pose: Pose,
+    pub app_scale: f32,
+}
+
+impl VolumeTransform {
+    pub fn room_from_app(self) -> Pose {
+        self.volume_pose * self.app_pose
+    }
+
+    pub fn is_valid(self) -> bool {
+        self.app_scale.is_finite()
+            && self.app_scale > 0.0
+            && self.volume_pose.is_finite()
+            && self.app_pose.is_finite()
+    }
+}
+
 impl AppPlacement {
+    pub fn volume_transform(self) -> VolumeTransform {
+        VolumeTransform {
+            volume_pose: self.volume_pose,
+            app_pose: self.app_pose,
+            app_scale: self.app_scale,
+        }
+    }
+
+    /// This placement in the app volume `volume`; `world_coordinates` and `world_center`, the
+    /// viewer's own placement of Rerun's world, stay.
+    #[must_use]
+    pub fn with_volume_transform(self, volume: VolumeTransform) -> Self {
+        Self {
+            volume_pose: volume.volume_pose,
+            app_pose: volume.app_pose,
+            app_scale: volume.app_scale,
+            ..self
+        }
+    }
+
     /// The rigid part of `room_from_world`; the full transform is this pose applied after a
     /// uniform scale by `app_scale`. Uniform scale commutes with rotation, so the coordinate
     /// rotation can be folded into the rigid part, and the center offset becomes a
@@ -64,11 +107,7 @@ impl AppPlacement {
     }
 
     pub fn is_valid(self) -> bool {
-        self.app_scale.is_finite()
-            && self.app_scale > 0.0
-            && self.volume_pose.is_finite()
-            && self.app_pose.is_finite()
-            && self.world_center.is_finite()
+        self.volume_transform().is_valid() && self.world_center.is_finite()
     }
 
     #[must_use]
@@ -172,6 +211,28 @@ mod tests {
             .unwrap()
             .transform_point3(Vec3::NEG_Z);
         assert!(room_point.abs_diff_eq(Vec3::NEG_X, EPSILON));
+    }
+
+    #[test]
+    fn a_volume_transform_replaces_the_volume_part_and_keeps_the_world_placement() {
+        let requested = table_placement();
+        let live = VolumeTransform {
+            volume_pose: Pose::from_translation(Vec3::new(-1.0, 0.8, -2.0)),
+            app_pose: Pose::new(Quat::from_rotation_y(1.2), Vec3::new(0.1, 0.0, 0.0)),
+            app_scale: 0.001,
+        };
+        let followed = requested.with_volume_transform(live);
+        assert_eq!(followed.volume_transform(), live);
+        assert_eq!(followed.world_coordinates, requested.world_coordinates);
+        assert_eq!(followed.world_center, requested.world_center);
+        assert!(followed.is_valid());
+        assert!(
+            !VolumeTransform {
+                app_scale: f32::NAN,
+                ..live
+            }
+            .is_valid()
+        );
     }
 
     #[test]

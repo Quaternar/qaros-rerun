@@ -34,7 +34,7 @@ use qaros_sink::{
     PeerDevice, PeerEvent, PoseSpace, QarosConnection, QarosSink, QarosSinkOptions, ReleaseCause,
     TargetPeers, UserEventSource, WakeViewer, connect,
 };
-use xr_math::{AppPlacement, Pose};
+use xr_math::{AppPlacement, Pose, VolumeTransform};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -2344,6 +2344,228 @@ fn rejoins_with_the_stored_id_and_maps_app_space_poses_into_the_room() {
             .any(|call| call == "shown near=0.025 far=10 depth_scale=1"),
         "near and far go back in app units, room meters / app scale 2: {:?}",
         fixture.calls_starting_with("shown")
+    );
+    drop(sink);
+    fixture.assert_clean_teardown(connection);
+}
+
+/// The volume as a person left it in the Hub: moved, turned and scaled away from
+/// [`placement`].
+fn dragged_volume(app_scale: f32) -> VolumeTransform {
+    VolumeTransform {
+        volume_pose: Pose::new(Quat::from_rotation_y(0.4), Vec3::new(0.3, 0.9, -2.0)),
+        app_pose: Pose::new(Quat::from_rotation_y(-0.2), Vec3::new(0.0, -0.1, 0.0)),
+        app_scale,
+    }
+}
+
+fn qaros_pose(pose: Pose) -> qaros::Pose {
+    let orientation = pose.orientation;
+    let position = pose.position;
+    qaros::Pose {
+        orientation: qaros::Quat {
+            x: orientation.x,
+            y: orientation.y,
+            z: orientation.z,
+            w: orientation.w,
+        },
+        position: qaros::Vec3::new(position.x, position.y, position.z),
+    }
+}
+
+/// Changes the volume as the Hub does for another peer; the stub delivers the update to every
+/// app volume subscription before each setter returns.
+fn change_volume(connection: &QarosConnection, volume: VolumeTransform) {
+    let volumes = connection.session().app_volumes();
+    volumes
+        .set_pose(connection.volume(), qaros_pose(volume.volume_pose))
+        .unwrap();
+    volumes
+        .set_app_pose(connection.volume(), qaros_pose(volume.app_pose))
+        .unwrap();
+    volumes
+        .set_app_scale(connection.volume(), volume.app_scale)
+        .unwrap();
+}
+
+/// The room pose of the stub's left eye in `volume`: x = -0.032, y = 1.6 and, 1 mm back per
+/// frame the sender issued, z = 0.001 times the frame index, in app units.
+#[allow(clippy::cast_precision_loss)]
+fn left_eye_in_room(volume: VolumeTransform, frame_index: u64) -> Pose {
+    let eye_in_app = Vec3::new(-0.032, 1.6, 0.001 * frame_index as f32);
+    volume.room_from_app() * Pose::from_translation(eye_in_app * volume.app_scale)
+}
+
+fn assert_left_eye_mapped_with(request: &FrameRequest, volume: VolumeTransform) {
+    let expected = left_eye_in_room(volume, request.key.frame_id);
+    let pose = request.views[0].pose;
+    assert!(
+        (pose.position - expected.position).length() < 1e-5,
+        "{:?} against {:?}",
+        pose.position,
+        expected.position
+    );
+    assert!(pose.orientation.abs_diff_eq(expected.orientation, 1e-5));
+    assert_eq!(request.volume, Some(volume));
+}
+
+/// `get_or_create` hands back an existing volume as QAROS holds it. A volume a person moved
+/// and scaled in the Hub during an earlier run keeps that transform, so the eyes are mapped,
+/// and near and far reported, with it rather than with the requested placement.
+#[test]
+fn a_volume_held_with_another_transform_maps_eyes_with_the_live_one() {
+    let fixture = Fixture::new();
+    let first = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    assert_eq!(
+        first.volume_transform(),
+        placement().volume_transform(),
+        "a new volume has the requested transform"
+    );
+    let live = dragged_volume(4.0);
+    change_volume(&first, live);
+    fixture.assert_clean_teardown(first);
+
+    let connection = fixture.connect(None).unwrap();
+    assert_eq!(connection.volume_transform(), live);
+    let mut sink = new_sink(&connection, PoseSpace::App);
+    let request = single_request(&mut sink).expect("a frame");
+    assert_left_eye_mapped_with(&request, live);
+    submit_both_eyes(&mut sink, request.key);
+    sink.show_frame(request.key, show_info()).unwrap();
+    assert!(
+        fixture
+            .calls()
+            .iter()
+            .any(|call| call == "shown near=0.0125 far=5 depth_scale=1"),
+        "near and far in app units at the live app scale 4: {:?}",
+        fixture.calls_starting_with("shown")
+    );
+    drop(sink);
+    fixture.assert_clean_teardown(connection);
+}
+
+/// A change while the viewer runs applies from the next frame begun; a frame begun before it
+/// is shown with the scale it began with.
+#[test]
+fn an_app_volume_change_mid_run_maps_the_next_frame_with_it() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let mut sink = new_sink(&connection, PoseSpace::App);
+    let requested = placement().volume_transform();
+    let before = single_request(&mut sink).expect("a frame before the change");
+    assert_left_eye_mapped_with(&before, requested);
+
+    let live = dragged_volume(0.5);
+    change_volume(&connection, live);
+    submit_both_eyes(&mut sink, before.key);
+    sink.show_frame(before.key, show_info()).unwrap();
+    let after = single_request(&mut sink).expect("a frame after the change");
+    assert_left_eye_mapped_with(&after, live);
+    submit_both_eyes(&mut sink, after.key);
+    sink.show_frame(after.key, show_info()).unwrap();
+
+    assert_eq!(
+        fixture.calls_starting_with("shown"),
+        [
+            "shown near=0.025 far=10 depth_scale=1",
+            "shown near=0.1 far=40 depth_scale=1"
+        ],
+        "the first frame at the requested scale 2, the next at the changed scale 0.5"
+    );
+    drop(sink);
+    fixture.assert_clean_teardown(connection);
+}
+
+/// The Hub can deliver app volume updates out of order, so an update only triggers a read of
+/// the latest values: when that read fails, the update's own values are not applied, and the
+/// next successful read brings the change.
+#[test]
+fn an_app_volume_update_is_applied_only_through_a_fresh_read() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let requested = placement().volume_transform();
+    assert_eq!(connection.volume_transform(), requested);
+
+    let live = dragged_volume(0.5);
+    change_volume(&connection, live);
+    fixture.fail_next("app_volume_get_latest_app_scale", UNCLASSIFIED);
+    assert_eq!(
+        connection.volume_transform(),
+        requested,
+        "the update's values are not applied when the read fails"
+    );
+
+    connection
+        .session()
+        .app_volumes()
+        .set_app_scale(connection.volume(), live.app_scale)
+        .unwrap();
+    assert_eq!(connection.volume_transform(), live);
+    fixture.assert_clean_teardown(connection);
+}
+
+/// The Vulkan path follows the same transform: a frame begun after a change carries it and
+/// reports near and far at its scale.
+#[cfg(feature = "vulkan")]
+#[test]
+fn a_vulkan_frame_after_an_app_volume_change_maps_with_it() {
+    use common::{color_of, render_eyes};
+    use frame_sink::GpuFrameSink;
+    use qaros_sink::vulkan::{
+        QarosVulkanStream, QarosVulkanStreamOptions, VulkanSink, VulkanSinkOptions,
+    };
+
+    let Some(vulkan) = common::create_device() else {
+        return;
+    };
+    let fixture = Fixture::new();
+    let mut options = connect_options(&fixture.scratch, Some("ABCD-EFGH"));
+    options.adapter = Some(qaros::GraphicsAdapter::Uuid(
+        vulkan.physical_device.device_uuid,
+    ));
+    let connection = Rc::new(connect(&options, wake_counter().1).unwrap());
+    let stream = QarosVulkanStream::on_device(
+        Rc::clone(&connection),
+        &vulkan,
+        QarosVulkanStreamOptions {
+            pose_space: PoseSpace::App,
+            color_format: PixelFormat::R8G8B8A8,
+            max_users: 1,
+        },
+    )
+    .unwrap();
+    let mut sink = VulkanSink::new(
+        &vulkan.device,
+        &vulkan.queue,
+        stream,
+        VulkanSinkOptions {
+            depth_range: depth_range(),
+            stop_after_frames: None,
+        },
+    )
+    .unwrap();
+    let show_next = |sink: &mut VulkanSink<QarosVulkanStream>, volume: VolumeTransform| {
+        let mut requests = begin_until_requested(sink);
+        assert_eq!(requests.len(), 1, "one visualizer, one frame");
+        let request = requests.remove(0);
+        assert_left_eye_mapped_with(&request.request, volume);
+        let colors = [color_of([200, 100, 50, 255]); 2];
+        let commands = render_eyes(&vulkan.device, &request, colors, 0.5);
+        let key = request.request.key;
+        drop(request);
+        sink.submit_and_show(key, commands, show_info()).unwrap();
+    };
+    show_next(&mut sink, placement().volume_transform());
+    let live = dragged_volume(0.5);
+    change_volume(&connection, live);
+    show_next(&mut sink, live);
+
+    assert_eq!(
+        fixture.calls_starting_with("shown"),
+        [
+            "shown near=0.025 far=10 depth_scale=1",
+            "shown near=0.1 far=40 depth_scale=1"
+        ]
     );
     drop(sink);
     fixture.assert_clean_teardown(connection);

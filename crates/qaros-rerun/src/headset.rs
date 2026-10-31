@@ -425,6 +425,15 @@ pub fn placement_for_view(
     })
 }
 
+/// The scene's placement in the app volume transform the sink mapped the frame's poses with,
+/// so eyes and depth are converted with the transform QAROS renders the frame with, on both
+/// the default and the `--decoupled-render` path.
+fn placement_for_request(scene_placement: AppPlacement, request: &FrameRequest) -> AppPlacement {
+    request.volume.map_or(scene_placement, |volume| {
+        scene_placement.with_volume_transform(volume)
+    })
+}
+
 /// Begins the sink's frames only for a view that can be placed in the room, so a view that
 /// cannot be placed (left-handed coordinates) costs no user a QAROS frame. The sink's
 /// `begin_frames` runs exactly when `placement` is `Ok`.
@@ -832,11 +841,11 @@ impl HeadsetRenderer {
         pending: PendingRequest,
         viewer_frame: u64,
     ) {
-        let placement = scene.placement;
         let PendingRequest {
             request,
             gpu_targets,
         } = pending;
+        let placement = placement_for_request(scene.placement, &request);
         // A user released and admitted again starts its frame ids over; a frame still in
         // flight under the same key belongs to the old stream, whose sink frame is gone.
         self.in_flight
@@ -1290,6 +1299,7 @@ mod tests {
                 },
             ],
             resolution_in_pixel: [64, 64],
+            volume: None,
         }
     }
 
@@ -1466,6 +1476,61 @@ mod tests {
             "the refused view left the user's frame unbegun"
         );
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Both paths place every frame through `prepare_frame`: the sink's live volume transform
+    /// replaces the volume part of the scene's placement for that frame, so a volume scaled to
+    /// 0.001 in the Hub puts the near plane 1000 times farther out in Rerun-world units.
+    #[test]
+    fn a_frame_is_placed_in_the_volume_transform_its_poses_were_mapped_with() {
+        let scene_placement = AppPlacement {
+            world_coordinates: ViewCoordinates::RIGHT_FORWARD_UP,
+            world_center: glam::Vec3::new(1.0, 2.0, 3.0),
+            ..AppPlacement::default()
+        };
+        let live = xr_math::VolumeTransform {
+            volume_pose: xr_math::Pose::from_translation(glam::Vec3::new(0.0, 1.0, -2.0)),
+            app_pose: xr_math::Pose::new(glam::Quat::from_rotation_y(0.3), glam::Vec3::ZERO),
+            app_scale: 0.001,
+        };
+        let view = ViewRequest {
+            pose: xr_math::Pose::from_translation(glam::Vec3::new(0.0, 1.6, 0.0)),
+            fov: xr_math::Fov::symmetric(1.5, 1.5),
+        };
+        let mapped = FrameRequest {
+            key: FrameKey {
+                user: UserId(1),
+                frame_id: 0,
+            },
+            views: [view; EYE_COUNT],
+            resolution_in_pixel: [64, 64],
+            volume: Some(live),
+        };
+        let placement = placement_for_request(scene_placement, &mapped);
+        assert_eq!(placement.volume_transform(), live);
+        assert_eq!(
+            placement.world_coordinates,
+            scene_placement.world_coordinates
+        );
+        assert_eq!(placement.world_center, scene_placement.world_center);
+
+        let depth_range =
+            DepthRange::new(0.1, 100.0, xr_math::DepthEncoding::ForwardNormalized).unwrap();
+        let camera = EyeCamera::new(view.pose, view.fov, placement, depth_range).unwrap();
+        assert!(
+            (camera.near_plane_in_world_units - 100.0).abs() < 1e-3,
+            "{}",
+            camera.near_plane_in_world_units
+        );
+
+        let unmapped = FrameRequest {
+            volume: None,
+            ..mapped
+        };
+        assert_eq!(
+            placement_for_request(scene_placement, &unmapped),
+            scene_placement
+        );
     }
 
     /// Counts `update_users` calls; begins nothing.

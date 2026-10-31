@@ -12,7 +12,7 @@ use qaros::{
     RenderSender, RenderSenderConfig, StatusCode, VideoFrameView, ViewKind,
 };
 use vulkan_device::{VulkanDevice, VulkanDeviceHandles, vk};
-use xr_math::Fov;
+use xr_math::{Fov, VolumeTransform};
 
 use super::sink::{signal_discarded_frame, wait_for_device};
 use super::stream::{ImageState, SenderEye, SenderFrame, SenderImage, VulkanFrameStream};
@@ -75,10 +75,12 @@ pub struct QarosVulkanStreamOptions {
     pub max_users: usize,
 }
 
-/// A begun frame and its semaphore, signalled when the frame goes unshown with its sender.
+/// A begun frame and its semaphore, signalled when the frame goes unshown with its sender,
+/// and the mapping its poses were taken through, which its show reports near and far with.
 struct OpenSenderFrame {
     frame: OwnedFrame,
     semaphore: vk::Semaphore,
+    pose_mapping: PoseMapping,
 }
 
 /// One user's render sender.
@@ -118,7 +120,6 @@ pub struct QarosVulkanStream {
     device: wgpu::Device,
     parameters: VulkanStreamParams,
     options: QarosVulkanStreamOptions,
-    pose_mapping: PoseMapping,
     users: PeerUsers,
     pending: PendingSenders,
     senders: BTreeMap<UserId, UserSender>,
@@ -154,7 +155,6 @@ impl QarosVulkanStream {
                 missing.join(", ")
             )));
         }
-        let pose_mapping = PoseMapping::new(connection.volume_config(), options.pose_space);
         let users = PeerUsers::new(
             Box::new(TargetPeers::new(Rc::clone(&connection))),
             Box::new(MaxUsers {
@@ -168,7 +168,6 @@ impl QarosVulkanStream {
                 device: handles.device,
             },
             options,
-            pose_mapping,
             users,
             pending: PendingSenders::default(),
             senders: BTreeMap::new(),
@@ -452,9 +451,10 @@ impl QarosVulkanStream {
     }
 
     fn sender_frame(
-        &self,
         frame: &OwnedFrame,
         record: &FrameRecord,
+        volume: VolumeTransform,
+        pose_mapping: PoseMapping,
     ) -> Result<SenderFrame, SinkError> {
         let images = record
             .images
@@ -472,7 +472,7 @@ impl QarosVulkanStream {
             // The view index selects the pose and field of view (`frame.view(index)`).
             let view = frame.view(color_view).map_err(|error| backend(&error))?;
             eyes.push(SenderEye {
-                pose: self.pose_mapping.room_from_eye(view.pose),
+                pose: pose_mapping.room_from_eye(view.pose),
                 fov: Fov {
                     angle_left: view.fov.angle_left,
                     angle_right: view.fov.angle_right,
@@ -489,6 +489,7 @@ impl QarosVulkanStream {
             eyes,
             images,
             semaphore: record.semaphore,
+            volume: Some(volume),
         })
     }
 }
@@ -657,12 +658,15 @@ impl VulkanFrameStream for QarosVulkanStream {
                 return Err(error);
             }
         };
-        match self.sender_frame(&frame, &record) {
+        let volume = self.connection.volume_transform();
+        let pose_mapping = PoseMapping::new(volume, self.options.pose_space);
+        match Self::sender_frame(&frame, &record, volume, pose_mapping) {
             Ok(sender_frame) => {
                 if let Some(user_sender) = self.senders.get_mut(&user) {
                     user_sender.open_frame = Some(OpenSenderFrame {
                         frame,
                         semaphore: record.semaphore,
+                        pose_mapping,
                     });
                 }
                 self.users.frame_begun(user);
@@ -686,14 +690,14 @@ impl VulkanFrameStream for QarosVulkanStream {
         states: &[ImageState],
         show: ShowInfo,
     ) -> Result<(), SinkError> {
-        let frame = self
+        let open = self
             .senders
             .get_mut(&user)
             .and_then(|user_sender| user_sender.open_frame.take())
-            .map(|open| open.frame)
             .ok_or_else(|| SinkError::Backend(format!("no frame of {user} is open")))?;
         // The Vulkan sink refuses linear depth, so depth here is always normalized.
-        let show_params = self.pose_mapping.show_params(show, false);
+        let show_params = open.pose_mapping.show_params(show, false);
+        let frame = open.frame;
         if let Err(error) = write_back_and_show(frame, states, &show_params) {
             // The release batch has signalled the frame's semaphore, and the header does not
             // say whether the sender consumes it for a frame that was not shown, nor whether

@@ -13,11 +13,13 @@ use qaros::{
     PeerPresentation, PendingRenderSender, RenderRequest, RenderSenderConfig, Runtime,
     RuntimeConfig, Session, StatusCode, Subscription,
 };
-use xr_math::AppPlacement;
+use xr_math::{AppPlacement, VolumeTransform};
 
 use crate::peer_devices::{PeerDevice, read_peer_device};
 use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
+use crate::volume_gestures::{RunningGestures, VolumeGestureSubscription, VolumeGestures};
+use crate::volume_transform::{FollowedVolume, LiveVolume, read_latest};
 
 /// When a render sender's creation gives up. A creation finishes once the target answers,
 /// which can take a while for a target that is still starting up. The creation runs in the
@@ -86,8 +88,9 @@ pub struct ConnectOptions {
     pub volume_display_name: String,
     /// Width, length, height in room meters.
     pub volume_size: [f32; 3],
-    /// Volume pose, app pose and app scale of the volume; the renderer places Rerun's world
-    /// with the same values.
+    /// Volume pose, app pose and app scale requested for the volume, and Rerun's world in it.
+    /// The frames are mapped with the volume's transform as QAROS holds it, which may differ
+    /// (`QarosConnection::volume_transform`).
     pub placement: AppPlacement,
     pub console_logging: bool,
     /// Sets the process's GPU scheduling priority to high on Windows (a diagnostic).
@@ -103,13 +106,19 @@ pub struct ConnectOptions {
 /// The session and what hangs off it. Fields drop in declaration order: the subscriptions are
 /// cancelled before the session is destroyed, and the library goes last.
 pub struct QarosConnection {
+    /// `None` when the subscription failed; the transform then follows the update poll only.
+    volume_gestures: Option<VolumeGestureSubscription>,
+    gesture_inbox: VolumeGestures,
+    running_gestures: RefCell<RunningGestures>,
     request_subscription: Subscription,
     peer_subscription: Subscription,
+    volume_subscription: Subscription,
     requests: Receiver<RenderRequest>,
     peer_updates: Receiver<PeerInfo>,
     wake_viewer: WakeViewer,
     volume: AppVolumeId,
     volume_config: AppVolumeConfig,
+    live_volume: RefCell<LiveVolume>,
     adapter: Option<GraphicsAdapter>,
     unanswered_peers_file: Option<PathBuf>,
     /// The peer each user the sink created a sender for streams to. User ids are never reused,
@@ -136,6 +145,7 @@ impl std::fmt::Debug for QarosConnection {
             .debug_struct("QarosConnection")
             .field("request_subscription", &self.request_subscription)
             .field("peer_subscription", &self.peer_subscription)
+            .field("volume_subscription", &self.volume_subscription)
             .field("volume", &self.volume)
             .field("session", &self.session)
             .finish_non_exhaustive()
@@ -172,8 +182,24 @@ impl QarosConnection {
         self.volume
     }
 
+    /// What the volume was requested with; its transform may differ by now (see
+    /// [`Self::volume_transform`]).
     pub fn volume_config(&self) -> &AppVolumeConfig {
         &self.volume_config
+    }
+
+    /// The volume's pose, app pose and app scale as QAROS holds them, for the frames begun now:
+    /// read at connect, then again on every update of the volume, on every frame while a grab
+    /// or spread runs, and at least every 100 ms (`LATEST_VALUES_POLL_PERIOD`). Gesture events
+    /// are logged as they are drained here. Each change of the transform is logged once.
+    pub fn volume_transform(&self) -> VolumeTransform {
+        let gestures = self.gesture_inbox.take();
+        let mut running = self.running_gestures.borrow_mut();
+        let transform_may_have_changed = running.absorb(&gestures);
+        let read_now = transform_may_have_changed || running.any_running();
+        self.live_volume
+            .borrow_mut()
+            .refresh(&self.session, self.volume, read_now)
     }
 
     /// The adapter the session's GPU devices live on (`qar_session_get_graphics_device_id`),
@@ -324,6 +350,15 @@ pub fn connect(
         .get_or_create(&volume_config)
         .map_err(|error| error.to_string())?;
     warn_if_volume_closed(&session, volume, &volume_config.common_name);
+    // Subscribed before the first read, so no change falls between the two.
+    let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
+        session.app_volumes().subscribe(forward)
+    })?;
+    let followed_volume = FollowedVolume::new(
+        &volume_config.common_name,
+        options.placement.volume_transform(),
+        read_latest(&session, volume).map_err(|error| error.to_string()),
+    );
 
     // Peer updates first: a peer that requests a stream right away is then already listed.
     let (peer_subscription, peer_updates) = forward_and_wake(&wake_viewer, |forward| {
@@ -336,20 +371,43 @@ pub fn connect(
     let library_dropped_last = LibraryDroppedLast {
         _library: session.library(),
     };
-    Ok(QarosConnection {
+    let mut connection = QarosConnection {
+        volume_gestures: None,
+        gesture_inbox: VolumeGestures::default(),
+        running_gestures: RefCell::new(RunningGestures::default()),
         request_subscription,
         peer_subscription,
+        volume_subscription,
         requests,
         peer_updates,
         wake_viewer,
         volume,
         volume_config,
+        live_volume: RefCell::new(LiveVolume::new(followed_volume, volume_updates)),
         adapter,
         unanswered_peers_file: options.unanswered_peers_file.clone(),
         peers_by_user: RefCell::new(BTreeMap::new()),
         session,
         _library_dropped_last: library_dropped_last,
-    })
+    };
+    follow_volume_gestures(&mut connection);
+    Ok(connection)
+}
+
+/// Subscribes to the volume's gestures, so the transform is read every frame while one runs
+/// and each event is logged. Without the subscription the transform follows the update poll.
+fn follow_volume_gestures(connection: &mut QarosConnection) {
+    match VolumeGestureSubscription::subscribe(
+        connection,
+        connection.volume,
+        connection.gesture_inbox.clone(),
+        Arc::clone(&connection.wake_viewer),
+    ) {
+        Ok(subscription) => connection.volume_gestures = Some(subscription),
+        Err(error) => {
+            log::warn!("qaros: gestures on the app volume are not followed or logged: {error}");
+        }
+    }
 }
 
 /// A stopped viewer closes its volume, and the header does not say whether `get_or_create`

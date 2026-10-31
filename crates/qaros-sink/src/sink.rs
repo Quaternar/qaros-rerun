@@ -9,7 +9,7 @@ use qaros::{
     AppVolumeId, ColorAlphaMode, Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat,
     RenderSender, RenderSenderConfig, ShowParams, StatusCode, VideoFrameLayout, ViewKind,
 };
-use xr_math::{Fov, Pose};
+use xr_math::{Fov, Pose, VolumeTransform};
 
 use crate::begin_drain::{BEGIN_WAIT_DRAIN_LIMIT, drain_begin_waits};
 use crate::connection::{QarosConnection, from_qaros_pose};
@@ -35,7 +35,8 @@ pub enum PoseSpace {
 }
 
 /// Maps stream view poses into room space according to [`PoseSpace`], with the volume's
-/// placement (volume pose times app pose, and app scale).
+/// transform as QAROS holds it when the frame begins (volume pose times app pose, and app
+/// scale). A frame keeps the mapping it began with until it is shown.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PoseMapping {
     pose_space: PoseSpace,
@@ -44,10 +45,10 @@ pub(crate) struct PoseMapping {
 }
 
 impl PoseMapping {
-    pub(crate) fn new(volume: &qaros::AppVolumeConfig, pose_space: PoseSpace) -> Self {
+    pub(crate) fn new(volume: VolumeTransform, pose_space: PoseSpace) -> Self {
         Self {
             pose_space,
-            room_from_app: from_qaros_pose(volume.pose) * from_qaros_pose(volume.app_pose),
+            room_from_app: volume.room_from_app(),
             app_scale: volume.app_scale,
         }
     }
@@ -146,6 +147,7 @@ struct OpenFrame {
     frame_id: FrameId,
     frame: OwnedFrame,
     submitted: [bool; EYE_COUNT],
+    pose_mapping: PoseMapping,
 }
 
 /// Where a user's current QAROS frame stands. The frame ends as shown or dropped (released
@@ -183,7 +185,6 @@ struct UserStream {
 /// holds the last reference the app volume is closed after its senders.
 pub struct QarosSink {
     options: QarosSinkOptions,
-    pose_mapping: PoseMapping,
     users: PeerUsers,
     pending: PendingSenders,
     streams: BTreeMap<UserId, UserStream>,
@@ -211,10 +212,8 @@ impl QarosSink {
         events: Box<dyn UserEventSource>,
         policy: Box<dyn RenderPolicy>,
     ) -> Self {
-        let pose_mapping = PoseMapping::new(connection.volume_config(), options.pose_space);
         Self {
             options,
-            pose_mapping,
             users: PeerUsers::new(events, policy),
             pending: PendingSenders::default(),
             streams: BTreeMap::new(),
@@ -419,8 +418,12 @@ impl QarosSink {
     }
 
     /// Moves one user's frame lifecycle forward: polls for a frame when idle, and returns the
-    /// request once a frame is open.
-    fn advance(&mut self, user: UserId) -> Result<Option<FrameRequest>, qaros::Error> {
+    /// request once a frame is open, its poses mapped with `volume`.
+    fn advance(
+        &mut self,
+        user: UserId,
+        volume: VolumeTransform,
+    ) -> Result<Option<FrameRequest>, qaros::Error> {
         let Some(stream) = self.streams.get_mut(&user) else {
             return Ok(None);
         };
@@ -435,11 +438,12 @@ impl QarosSink {
         let frame_id = stream.frames_delivered;
         stream.frames_delivered += 1;
         let resolution_in_pixel = stream.resolution_in_pixel;
+        let pose_mapping = PoseMapping::new(volume, self.options.pose_space);
         let mut views = Vec::with_capacity(EYE_COUNT);
         for eye_index in 0..EYE_COUNT {
             let view = frame.view(eye_index)?;
             views.push(ViewRequest {
-                pose: self.pose_mapping.room_from_eye(view.pose),
+                pose: pose_mapping.room_from_eye(view.pose),
                 fov: to_fov(view.fov),
             });
         }
@@ -451,12 +455,14 @@ impl QarosSink {
                 frame_id,
                 frame,
                 submitted: [false; EYE_COUNT],
+                pose_mapping,
             });
         }
         Ok(Some(FrameRequest {
             key: FrameKey { user, frame_id },
             views,
             resolution_in_pixel,
+            volume: Some(volume),
         }))
     }
 
@@ -556,10 +562,11 @@ impl FrameSink for QarosSink {
             return Ok(Vec::new());
         }
         self.release_stalled_users();
+        let volume = self.connection.volume_transform();
         let users: Vec<UserId> = self.streams.keys().copied().collect();
         let mut requests = Vec::with_capacity(users.len());
         for user in users {
-            match self.advance(user) {
+            match self.advance(user, volume) {
                 Ok(Some(request)) => {
                     self.users.frame_begun(user);
                     requests.push(request);
@@ -600,7 +607,7 @@ impl FrameSink for QarosSink {
         let depth_is_linear = self.options.depth_range.encoding == DepthEncoding::LinearMeters;
         let shown = open
             .frame
-            .show(&self.pose_mapping.show_params(show, depth_is_linear));
+            .show(&open.pose_mapping.show_params(show, depth_is_linear));
         if let Err(error) = shown {
             self.frame_failed(key.user, &error);
             return Err(backend(&error));

@@ -1302,6 +1302,9 @@ mod tests {
             use super::*;
             use crate::viewer_app::{FrameHook, HeadsetFrame};
 
+            /// The stub's state is process-wide, so its tests run one at a time.
+            static STUB_SERIAL: Mutex<()> = Mutex::new(());
+
             /// Holds the last reference to the connection, as the GUI panel hooks do, and
             /// records the thread it goes on and the teardown step reached once it went.
             struct ConnectionHook {
@@ -1354,6 +1357,7 @@ mod tests {
                 let Some(gpu) = test_device() else {
                     return;
                 };
+                let _serial = STUB_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
                 let stub = StubControl::open().expect("the stub");
                 let scratch = std::env::temp_dir()
                     .join(format!("qaros-rerun-decoupled-test-{}", std::process::id()));
@@ -1449,6 +1453,111 @@ mod tests {
                     "sender at {sender_destroyed}, volume at {volume_closed}, session at \
                      {session_destroyed}"
                 );
+                assert_eq!(stub.live_handle_count().expect("the handle count"), 0);
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+
+            /// Changes the app volume's scale once the headset has streamed for a few eye
+            /// frames, from the render thread, as a person scaling the volume in the Hub would.
+            struct VolumeScalingHook {
+                connection: Rc<QarosConnection>,
+                streaming_frames: u32,
+                scaled: Arc<AtomicBool>,
+            }
+
+            impl FrameHook for VolumeScalingHook {
+                fn on_viewer_frame(&mut self, headset: &HeadsetFrame) {
+                    if !headset.is_streaming || self.scaled.load(Ordering::Acquire) {
+                        return;
+                    }
+                    self.streaming_frames += 1;
+                    if self.streaming_frames == 3 {
+                        self.connection
+                            .session()
+                            .app_volumes()
+                            .set_app_scale(self.connection.volume(), 0.5)
+                            .expect("the stub changes the app scale");
+                        self.scaled.store(true, Ordering::Release);
+                    }
+                }
+            }
+
+            /// With the sink on the render thread, a change of the app volume reaches the
+            /// frames begun there: near and far go back at the requested scale 1 before it and
+            /// at the changed scale 0.5 after it.
+            #[test]
+            fn an_app_volume_change_reaches_the_frames_begun_on_the_render_thread() {
+                let Some(gpu) = test_device() else {
+                    return;
+                };
+                let _serial = STUB_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+                let stub = StubControl::open().expect("the stub");
+                let scratch = std::env::temp_dir().join(format!(
+                    "qaros-rerun-decoupled-volume-test-{}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&scratch).expect("a scratch directory");
+                let handoff = Arc::new(SceneHandoff::default());
+                let scaled = Arc::new(AtomicBool::new(false));
+                let (hook_scaled, thread_scratch) = (Arc::clone(&scaled), scratch.clone());
+                let (mut decoupled, ()) = DecoupledHeadset::start(
+                    HeadsetSettings::default(),
+                    Arc::clone(&handoff),
+                    move || {
+                        let connection =
+                            Rc::new(connect(&connect_options(&thread_scratch), Arc::new(|| {}))?);
+                        let sink = QarosSink::new(
+                            Rc::clone(&connection),
+                            QarosSinkOptions {
+                                depth_range: frame_sink::DepthRange::new(
+                                    0.05,
+                                    20.0,
+                                    xr_math::DepthEncoding::ForwardNormalized,
+                                )
+                                .ok_or("no depth range")?,
+                                pose_space: PoseSpace::App,
+                                color_format: qaros_sink::qaros::PixelFormat::B8G8R8A8,
+                                max_users: 1,
+                                stop_after_frames: None,
+                            },
+                        );
+                        let hook = VolumeScalingHook {
+                            connection,
+                            streaming_frames: 0,
+                            scaled: hook_scaled,
+                        };
+                        Ok((
+                            RenderThreadSink {
+                                sink: HeadsetSink::Cpu(Box::new(sink)),
+                                frame_hooks: vec![Box::new(hook)],
+                            },
+                            (),
+                        ))
+                    },
+                )
+                .expect("the render thread starts");
+                decoupled.send_device(shared_device(&gpu));
+                let shown_at = |calls: &[String], line: &str| calls.iter().any(|call| call == line);
+                let mut sequence = 0;
+                wait_until("a frame at the changed scale is shown", || {
+                    sequence += 1;
+                    handoff.publish(Some(empty_scene(sequence)));
+                    let calls = stub.calls().expect("the call log");
+                    shown_at(&calls, "shown near=0.1 far=40 depth_scale=1")
+                });
+                assert!(scaled.load(Ordering::Acquire));
+                drop(decoupled);
+
+                let calls = stub.calls().expect("the call log");
+                assert!(
+                    shown_at(&calls, "shown near=0.05 far=20 depth_scale=1"),
+                    "frames before the change at the requested scale 1"
+                );
+                let errors: Vec<&String> = calls
+                    .iter()
+                    .filter(|call| call.starts_with("ERROR"))
+                    .collect();
+                assert!(errors.is_empty(), "{errors:?}");
                 assert_eq!(stub.live_handle_count().expect("the handle count"), 0);
                 let _ = std::fs::remove_dir_all(&scratch);
             }

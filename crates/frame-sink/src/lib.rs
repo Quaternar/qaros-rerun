@@ -28,7 +28,7 @@ pub use gpu_readback::{GpuReadbackSink, READBACK_COLOR_FORMAT, READBACK_DEPTH_FO
 pub use image_sink::{ImageSink, ImageSinkOptions, SimulatedUser, depth_visualization};
 pub use pose_source::{HeadMotion, PoseSource, ScriptedHeadMotion, camera_like_fov};
 pub use users::{MaxUsers, RenderPolicy, RosterChange, UserEvent, UserId, UserInfo, UserRoster};
-pub use xr_math::{DepthEncoding, DepthRange, Fov, NearFar, Pose};
+pub use xr_math::{DepthEncoding, DepthRange, Fov, NearFar, Pose, VolumeTransform};
 
 /// Counts one user's frames from `begin_frames` until each is shown or abandoned. Ids are
 /// per user and start at 0 when the user is admitted.
@@ -63,6 +63,9 @@ pub struct FrameRequest {
     pub views: [ViewRequest; EYE_COUNT],
     /// Per-eye texture size, as the stream layout dictates.
     pub resolution_in_pixel: [u32; 2],
+    /// The app volume transform the sink mapped this frame's poses with, which the renderer
+    /// places Rerun's world in for this frame; `None` keeps the renderer's own placement.
+    pub volume: Option<VolumeTransform>,
 }
 
 /// One rendered eye: tightly packed rows, top row first.

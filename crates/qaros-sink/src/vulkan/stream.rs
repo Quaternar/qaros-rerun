@@ -4,7 +4,7 @@
 
 use frame_sink::{EYE_COUNT, ShowInfo, SinkError, UserId};
 use vulkan_device::vk;
-use xr_math::{Fov, Pose};
+use xr_math::{Fov, Pose, VolumeTransform};
 
 /// One image of a sender frame, as `QarVideoTextureVulkan` describes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +38,8 @@ pub struct SenderFrame {
     /// `synchronization.semaphore`: signalled exactly once for every begun frame, shown or
     /// discarded, so the sender can consume it.
     pub semaphore: vk::Semaphore,
+    /// The app volume transform the eyes' poses were mapped with (`FrameRequest::volume`).
+    pub volume: Option<VolumeTransform>,
 }
 
 /// An image's layout and queue family after the frame's last batch, written back into the

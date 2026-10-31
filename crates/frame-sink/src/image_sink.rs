@@ -251,6 +251,7 @@ impl FrameSink for ImageSink {
                 key,
                 views: scheduled.simulated.pose_source.views(key.frame_id),
                 resolution_in_pixel: self.options.resolution_in_pixel,
+                volume: None,
             };
             stream.in_flight = Some(InFlightFrame {
                 request,

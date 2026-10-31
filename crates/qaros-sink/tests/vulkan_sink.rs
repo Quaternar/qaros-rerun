@@ -112,6 +112,7 @@ impl VulkanFrameStream for LocalStream {
             eyes: [eye(0, -0.032), eye(1, 0.032)],
             images,
             semaphore: self.semaphore,
+            volume: None,
         }))
     }
 
