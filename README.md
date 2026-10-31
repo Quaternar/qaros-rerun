@@ -52,7 +52,7 @@ The demos are [structure from motion](docs/demos/structure-from-motion.md), [dro
 
 ## Your own data
 
-Start the viewer on its own, then log from any Rerun SDK to port 9876 as usual:
+The [quick start](docs/quick-start.md) takes your Rerun project to the headset in five steps. Start the viewer on its own, then log from any Rerun SDK to port 9876 as usual:
 
 ```powershell
 .\target\release\qaros-rerun.exe --sink qaros --local-app --panels
@@ -114,6 +114,7 @@ The tests load `qaros-stub` instead of QAROS, so they need no Hub and no headset
 | Document | What it covers |
 | --- | --- |
 | [docs/INSTALLATION.md](docs/INSTALLATION.md) | Prerequisites, build, tests and a first run |
+| [docs/quick-start.md](docs/quick-start.md) | Your Rerun project in a QAROS headset in five steps |
 | [docs/integration-guide.md](docs/integration-guide.md) | From a build to your own Rerun data in a QAROS headset; options and troubleshooting |
 | [docs/demos/](docs/demos/README.md) | The demos: what each shows, how to run it, its panels and its data |
 | [docs/architecture.md](docs/architecture.md) | The integration pattern, the 3D view hook, the sink seam, coordinates and depth, the QAROS sink and panels |
