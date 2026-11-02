@@ -70,7 +70,8 @@ These live in the same vendored `re_renderer`. They are smaller asks or specific
 | Change | Size | Why |
 | --- | --- | --- |
 | Pool reuse grace of 4 frames instead of 1 (`wgpu_resources/dynamic_resource_pool.rs`, `REUSE_GRACE_FRAMES`) | +87/-33, about half of it tests | Eye views are drawn every second to fourth viewer frame per user, so with one frame of grace their full-resolution targets were destroyed and created again almost every eye frame. A configurable grace would serve any renderer with views that are not drawn every frame. |
-| `RenderContext::new_sharing_device` and `queue_submission_lock()` (`context.rs`) | part of +75/-10 | A second context on the same device for a render thread, without replacing the first context's uncaptured error handler; a lock so raw Vulkan submissions from another thread never interleave with Rerun's. Used only by our experimental `--decoupled-render`. |
+| `queue_submission_lock()` (`context.rs`) | part of +75/-10 | Held around every queue submission of a `RenderContext`. Our eye and panel submits take it on every path, but it only matters when another thread or raw Vulkan submissions share the queue, so staged semaphores never interleave with Rerun's; that is our experimental `--decoupled-render`. |
+| `RenderContext::new_sharing_device` (`context.rs`) | part of +75/-10 | A second context on the same device for a render thread, without replacing the first context's uncaptured error handler. Used only by our experimental `--decoupled-render`. |
 | Hand-written `Clone` for `PointCloudDrawData` and `GaussianSplatDrawData` | +14/-1, +13/-1 | A clone shares its `SortedDrawables` (`Arc<Mutex<_>>`) with the original, so two contexts drawing clones clear and refill one list. A clone that starts its own list fixes that; this may be worth having regardless. |
 | `POLL_DEVICE_WAIT_MICROS`, `POOL_RESOURCES_CREATED` counters | a few lines | Our frame timing log. Not proposed. |
 
