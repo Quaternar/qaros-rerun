@@ -6,7 +6,7 @@ sidebar_position: 1
 
 # Installation
 
-How to build `qaros-rerun` from source and run it once, before any headset is involved. Streaming to headsets through QAROS is covered by the [integration guide](integration-guide.md).
+How to build `qaros-rerun` from source and run it once, before any headset is involved. Streaming to headsets through QAROS is covered by the [integration guide](integration-guide.md). To run the viewer on Windows without building it, [download a build](#download-a-build).
 
 ## Prerequisites
 
@@ -75,6 +75,17 @@ ls out/headset/user-1
 The viewer exits by itself after 240 shown frames and prints a summary line `headset: frames started 240, shown 240, abandoned 0`. `out/headset/user-1` then holds `frame_NNNNN_color.png` (left and right eye side by side), `frame_NNNNN_depth.png` and `frame_NNNNN.txt` for every 30th frame.
 
 Drop `--headless` for a desktop window, and see `qaros-rerun --help` for every option.
+
+## Download a build
+
+Every CI run on a pull request or on `main` uploads the Windows x64 release viewer as an artifact, kept for 14 days. Download `qaros-rerun-windows-x64-<commit>` from **Artifacts** on the run's page under the repository's **Actions** tab, or with the GitHub CLI:
+
+```powershell
+gh run list -R Quaternar/qaros-rerun --branch <branch> --workflow CI
+gh run download <run-id> -R Quaternar/qaros-rerun --pattern "qaros-rerun-windows-x64-*"
+```
+
+The artifact keeps the repository's layout (`target/release/qaros-rerun.exe`, `target/release/log-test-scene.exe` and `demos/`), so the Windows commands in [First run](#first-run) and the [demos](demos/README.md) run unchanged from its directory, with no Rust toolchain or build tools. Its `README.md` lists what the PC needs: the Visual C++ Redistributable, and QAROS for streaming, whose `qar-streaming-c.dll` the viewer loads from the QAROS installation (the artifact does not ship it). `BUILD.txt` names the commit.
 
 ## Next steps
 
