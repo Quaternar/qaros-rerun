@@ -115,7 +115,7 @@ The viewer draws the row of controls itself, with Rerun's style and icons, in an
 - The desktop time panel shows the same cursor, since both drive Rerun's one time control. The other way, the viewer publishes the cursor every frame, so the thumb follows playback and the desktop time bar; under the finger, and for a second after the last seek, the thumb stays where the finger put it.
 - The button shows Pause while the time control plays, read from it once per viewer frame.
 - One drag owns the cursor at a time, keyed by peer and gesture id, so a second user's touch does not move it.
-- The panel is drawn in the app's `logic`, which runs also while the desktop window is minimised.
+- The panel is drawn in the app's `logic`, which runs also while the desktop window is minimised. While a headset is attached, a hidden window also runs the viewer's `ui`, so time, the 3D scene and the 2D views keep following the recording ([ADR-0097](decisions/ADR-0097%20A%20Hidden%20Viewer%20Window%20Keeps%20Running%20The%20Viewer%20For%20The%20Headset.md)).
 
 ### Stream panels
 

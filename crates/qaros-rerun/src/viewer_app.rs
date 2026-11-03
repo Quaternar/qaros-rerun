@@ -6,6 +6,7 @@ use rerun::external::{eframe, re_viewer};
 
 use crate::decoupled::DecoupledHeadset;
 use crate::headset::{HeadsetRenderer, HeadsetSink, ViewerHead, with_sink_lent_to_pass};
+use crate::hidden_window::HiddenWindow;
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::panel_capture::PanelCapture;
 #[cfg(feature = "qaros")]
@@ -113,6 +114,9 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     pub stop_request: Option<StopRequest>,
     pub summary_printed: bool,
     pub memory_budget_log: Option<MemoryBudgetLog>,
+    /// Set where the viewer owns the window's surface status handler: a hidden window keeps
+    /// running `ui` for the headset (ADR-0097).
+    pub hidden_window: Option<HiddenWindow>,
 }
 
 impl<Viewer> HeadsetViewerApp<Viewer> {
@@ -183,6 +187,26 @@ impl<Viewer> HeadsetViewerApp<Viewer> {
         end_process_after_teardown(1);
     }
 
+    /// A hidden window gets only `logic` from eframe, while the time, the scene the eyes are
+    /// drawn from and the views the panels capture advance in the Rerun app's `ui`: so while a
+    /// headset is attached, each hidden pass asks for the next one to run `ui` and paint.
+    fn keep_ui_running_while_hidden(&self, ctx: &egui::Context) {
+        let Some(hidden_window) = &self.hidden_window else {
+            return;
+        };
+        let is_hidden = ctx.input(|input| input.viewport().visible() == Some(false));
+        let headset_is_attached = self.headset.is_some() || self.decoupled.is_some();
+        let headset_is_streaming = self.headset_is_streaming();
+        hidden_window.update(is_hidden, headset_is_streaming);
+        if !(is_hidden && headset_is_attached) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
+        if headset_is_streaming {
+            ctx.request_repaint();
+        }
+    }
+
     fn has_render_thread_failed(&self) -> bool {
         self.decoupled
             .as_ref()
@@ -222,7 +246,8 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
     /// here: a check in `ui` alone never runs for a minimised window. The Rerun app runs its
     /// pending commands in its `logic`, so the slider's commands go in just before it. The
     /// timeline panel is drawn here too: on Legion the desktop window is often
-    /// hidden while the glasses are worn, and then only `logic` runs.
+    /// hidden while the glasses are worn, and then only `logic` runs until the pass asks for
+    /// the next one to run `ui` (`keep_ui_running_while_hidden`).
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.is_stop_requested() {
             self.exit_after_qaros_teardown();
@@ -230,6 +255,7 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
         if self.has_render_thread_failed() {
             self.exit_after_render_thread_failure();
         }
+        self.keep_ui_running_while_hidden(ctx);
         #[cfg(feature = "qaros")]
         if let (Some(timeline_panel), Some(render_state)) =
             (&mut self.timeline_panel, frame.wgpu_render_state())
@@ -424,6 +450,7 @@ mod tests {
             stop_request: Some(Arc::clone(&stop_request)),
             summary_printed: false,
             memory_budget_log: None,
+            hidden_window: None,
         };
         TestApp {
             app,
@@ -477,6 +504,69 @@ mod tests {
             1,
             "the Rerun app's logic does not run once the stop is seen"
         );
+    }
+
+    /// A `logic` pass as eframe runs it, with the window minimised or shown.
+    fn logic_pass_with_window(
+        app: &mut HeadsetViewerApp<RecordingViewer>,
+        is_minimised: bool,
+    ) -> egui::LogicOutput {
+        let ctx = egui::Context::default();
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut raw_input = egui::RawInput::default();
+        raw_input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                minimized: Some(is_minimised),
+                ..Default::default()
+            },
+        );
+        ctx.run_logic(&raw_input, |ctx| eframe::App::logic(app, ctx, &mut frame))
+    }
+
+    fn asks_for_ui_while_hidden(output: &egui::LogicOutput) -> bool {
+        output
+            .viewport_commands
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|commands| {
+                commands.iter().any(|command| {
+                    matches!(command, egui::ViewportCommand::RequestPaintWhileHidden)
+                })
+            })
+    }
+
+    #[test]
+    fn a_minimised_window_with_a_streaming_headset_asks_for_ui_and_headset_rate_passes() {
+        let mut test = test_app();
+        let hidden_window = HiddenWindow::default();
+        test.app.hidden_window = Some(hidden_window.clone());
+        test.app.decoupled = Some(DecoupledHeadset::streaming_without_a_thread());
+
+        let output = logic_pass_with_window(&mut test.app, true);
+        assert!(asks_for_ui_while_hidden(&output));
+        assert!(hidden_window.is_hidden());
+        assert!(hidden_window.wants_headset_frames());
+        assert_eq!(test.logic_passes.get(), 1, "the Rerun app's logic ran too");
+
+        let output = logic_pass_with_window(&mut test.app, false);
+        assert!(!asks_for_ui_while_hidden(&output), "eframe runs ui anyway");
+        assert!(!hidden_window.is_hidden());
+        assert!(!hidden_window.wants_headset_frames());
+    }
+
+    #[test]
+    fn a_minimised_window_without_a_headset_keeps_eframes_logic_only_passes() {
+        let mut test = test_app();
+        let hidden_window = HiddenWindow::default();
+        test.app.hidden_window = Some(hidden_window.clone());
+
+        let output = logic_pass_with_window(&mut test.app, true);
+        assert!(!asks_for_ui_while_hidden(&output));
+        assert!(
+            hidden_window.is_hidden(),
+            "the surface still skips its frames"
+        );
+        assert!(!hidden_window.wants_headset_frames());
     }
 
     #[test]

@@ -533,6 +533,14 @@ impl DecoupledHeadset {
             scenes_published: FrameCount::default(),
         }
     }
+
+    /// A handle whose render thread streams to a user, with no thread behind it.
+    pub fn streaming_without_a_thread() -> Self {
+        let headset = Self::failed_without_a_thread();
+        headset.status.failed.store(false, Ordering::Release);
+        headset.status.streaming.store(true, Ordering::Release);
+        headset
+    }
 }
 
 /// Raw Vulkan submissions of a GPU sink on wgpu's own queue (acquire and release batches,

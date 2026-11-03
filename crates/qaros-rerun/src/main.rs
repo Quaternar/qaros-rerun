@@ -11,6 +11,7 @@ mod eye_output;
 mod eye_render;
 mod headless;
 mod headset;
+mod hidden_window;
 mod memory_budget_log;
 mod memory_knobs;
 mod options;
@@ -46,6 +47,7 @@ use crate::decoupled::{
 use crate::device_setup::GraphicsChoice;
 use crate::headless::{HeadlessOptions, run_headless};
 use crate::headset::{HeadsetRenderer, HeadsetSettings, HeadsetSink};
+use crate::hidden_window::HiddenWindow;
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::memory_knobs::MemoryKnobs;
 use crate::options::{ImageTargets, MotionKind, Options, ParseOutcome, SinkKind, USAGE};
@@ -517,6 +519,7 @@ async fn run_viewer(
             stop_request,
             summary_printed: false,
             memory_budget_log: log_wgpu_device(creation_context),
+            hidden_window: None,
         }
     };
 
@@ -632,7 +635,8 @@ fn log_wgpu_device(creation_context: &eframe::CreationContext<'_>) -> Option<Mem
 }
 
 /// `wgpu_setup` replaces Rerun's own; `None` keeps it. With a render thread, a window resize
-/// parks it before eframe reconfigures the surface (`window_resize`).
+/// parks it before eframe reconfigures the surface (`window_resize`). A hidden window keeps
+/// running the viewer's `ui` for the headset (`hidden_window`, ADR-0097).
 fn run_windowed(
     main_thread_token: rerun::MainThreadToken,
     wgpu_setup: Option<egui_wgpu::WgpuSetup>,
@@ -656,9 +660,15 @@ fn run_windowed(
     if let Some(wgpu_setup) = wgpu_setup {
         native_options.wgpu_options.wgpu_setup = wgpu_setup;
     }
+    let hidden_window = HiddenWindow::default();
+    native_options.wgpu_options.on_surface_status = hidden_window
+        .surface_status_handler(Arc::clone(&native_options.wgpu_options.on_surface_status));
+    let app_hidden_window = hidden_window.clone();
     let app_creator: eframe::AppCreator<'_> = Box::new(move |creation_context| {
         re_viewer::customize_eframe_and_setup_renderer(creation_context)?;
-        Ok(Box::new(build_app(creation_context, panel_capture.take())))
+        let mut app = build_app(creation_context, panel_capture.take());
+        app.hidden_window = Some(app_hidden_window);
+        Ok(Box::new(app))
     });
     match render_thread_pause {
         Some(render_thread) => window_resize::run_native_parking_render_thread_on_resize(
@@ -666,6 +676,7 @@ fn run_windowed(
             native_options,
             app_creator,
             render_thread,
+            hidden_window,
         )?,
         None => eframe::run_native("Rerun", native_options, app_creator)?,
     }
