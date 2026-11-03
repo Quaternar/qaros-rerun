@@ -155,7 +155,7 @@ Depth reported to the sink (the QAROS sink converts near and far to the poses' u
     --move-far-panels          also move a panel an earlier run left whose centre is farther
                                than 1.5 m from the eyes to where new panels open; without it
                                such a panel stays where it was left
-    --panel-interval-ms MS     capture interval (default 250)
+    --panel-interval-ms MS     capture interval (default 50)
 
 Viewer:
     --port PORT                gRPC port the logging SDKs connect to (default 9876)
@@ -575,9 +575,10 @@ impl Default for Options {
                 encoding: DepthEncoding::ReverseInfinite,
             },
             panels: false,
-            // Each capture reads the whole window back from the GPU on the UI thread; on air
-            // traffic 100 ms cost 15 % of the headset frames, 250 ms 6 %.
-            panel_capture_interval: Duration::from_millis(250),
+            // Each capture reads the whole window back from the GPU on the UI thread. On Legion's
+            // mid-range GPU, 50 ms streams about 17 panel frames a second while the render thread
+            // keeps the eyes at 60 to 70.
+            panel_capture_interval: Duration::from_millis(50),
             grpc_port: 9876,
             headless_size: None,
             graphics_backend: None,
@@ -1024,7 +1025,7 @@ mod tests {
         assert!((options.depth_range.near() - 0.05).abs() < f32::EPSILON);
         assert!((options.depth_range.far() - 20.0).abs() < f32::EPSILON);
         assert!(!options.panels);
-        assert_eq!(options.panel_capture_interval, Duration::from_millis(250));
+        assert_eq!(options.panel_capture_interval, Duration::from_millis(50));
         assert_eq!(options.max_users, 2);
         assert_eq!(options.simulated_users, 1);
         assert!(!options.frame_stamp);

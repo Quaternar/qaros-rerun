@@ -300,7 +300,7 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 
 ### Panels
 
-`--panels` (with `--sink qaros`) turns the panels on. Views are captured every 250 ms (`--panel-interval-ms`), and each view gets a GUI panel once it has been published for 3 s. The panel's content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into time commands.
+`--panels` (with `--sink qaros`) turns the panels on. Views are captured every 50 ms (`--panel-interval-ms`), about 17 frames a second on a mid-range GPU, and each view gets a GUI panel once it has been published for 3 s. The panel's content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into time commands.
 
 - **Placement.** A panel is 0.45 m wide and as tall as the view's aspect needs, created within reach of the first headset user near the app volume (any viewer near it once no headset streamed for 60 s), tilted to face the eyes. For a standing user (the default) every top edge is at least 0.30 m below the eyes: the timeline straight ahead and nearest, the views 0.95 m away beside it, alternately right and left, a step out so AR glasses see them as they open. `--panel-posture sitting` places the views 0.8 m from the head, to the right of the gaze, top edges just below the eyes, so they clear a desk. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left, as long as each is no nearer than 0.2 m to the eyes, no more than 1.5 m below them (at the floor or under it), and at the run's size, however far away it was left. `--move-far-panels` also moves a panel whose centre is farther than 1.5 m from the eyes back within reach, for one left in another headset's tracking origin or another part of the room. Close a panel in the Hub Display, or start once with `--reset-panels`, for fresh placement.
 - **Across runs.** Panels have names that stay the same on every run (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`). At Stop the viewer hides its panels instead of closing them (`--panels-at-stop keep` leaves them showing), and the next run reattaches to them with its new streams.
@@ -408,7 +408,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--panels` | off | Open the 2D views and a timeline as GUI panels, each a video stream of the viewer; needs `--sink qaros` ([Panels](#panels)) |
-| `--panel-interval-ms MS` | 250 | Capture interval |
+| `--panel-interval-ms MS` | 50 | Capture interval |
 
 **Viewer and graphics device**
 
