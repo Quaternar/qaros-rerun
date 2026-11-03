@@ -104,6 +104,8 @@ pub async fn build(
         volume_display_name: qaros_options.display_name.clone(),
         volume_size: qaros_options.volume_size.to_array(),
         placement: options.placement(),
+        volume_placement_file: Some(qaros_options.volume_placement_file()),
+        reset_placement: qaros_options.reset_placement,
         console_logging: true,
         raise_gpu_priority: qaros_options.raise_gpu_priority,
         adapter,

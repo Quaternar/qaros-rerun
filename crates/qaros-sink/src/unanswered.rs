@@ -15,10 +15,11 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use qaros::PeerId;
+
+use crate::state_files::replace_file_contents;
 
 /// How long a peer whose creation timed out is held back.
 pub const UNANSWERED_MEMORY: Duration = Duration::from_mins(10);
@@ -152,15 +153,7 @@ impl UnansweredPeers {
                 .map_or(0, |since_epoch| since_epoch.as_secs());
             let _ = writeln!(text, "{seconds} {peer} {}", unanswered.version_id);
         }
-        let temporary = file.with_file_name(temporary_file_name(file));
-        let written =
-            std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, file));
-        if let Err(error) = written {
-            if let Err(cleanup) = std::fs::remove_file(&temporary)
-                && cleanup.kind() != ErrorKind::NotFound
-            {
-                log::warn!("qaros: cannot remove {}: {cleanup}", temporary.display());
-            }
+        if let Err(error) = replace_file_contents(file, &text) {
             log::warn!(
                 "qaros: cannot store the unanswered peers in {}: {error}; they are held back \
                  in this run only",
@@ -168,19 +161,6 @@ impl UnansweredPeers {
             );
         }
     }
-}
-
-/// Unique per process and write, so viewers sharing a directory do not write into each
-/// other's temporary file.
-fn temporary_file_name(file: &std::path::Path) -> std::ffi::OsString {
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    let mut name = file.file_name().unwrap_or_default().to_owned();
-    name.push(format!(
-        ".{}.{}.tmp",
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
-    name
 }
 
 fn parse_unanswered(text: &str, file: &std::path::Path) -> BTreeMap<PeerId, Unanswered> {
@@ -325,19 +305,6 @@ mod tests {
         ));
         assert!(remembered.is_retry_due(DEAD_RECEIVER, timed_out_at + period, period));
         assert!(remembered.is_retry_due(OTHER_RECEIVER, timed_out_at, period));
-    }
-
-    #[test]
-    fn temporary_file_names_differ_per_write_and_carry_the_process_id() {
-        let file = std::path::Path::new("directory/peers.txt");
-        let first = temporary_file_name(file).into_string().unwrap();
-        let second = temporary_file_name(file).into_string().unwrap();
-        assert_ne!(first, second);
-        let write_counter = first
-            .strip_prefix(&format!("peers.txt.{}.", std::process::id()))
-            .and_then(|rest| rest.strip_suffix(".tmp"))
-            .unwrap_or_else(|| panic!("{first}"));
-        assert!(write_counter.parse::<u64>().is_ok(), "{first}");
     }
 
     #[test]

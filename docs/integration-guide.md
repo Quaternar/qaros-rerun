@@ -219,6 +219,8 @@ The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.
 
 `--origin X,Y,Z` moves the volume, and the data with it, in the room (meters, OpenXR axes: Y up, -Z forward; default `0,0.5,-1.6`). `--yaw DEGREES` turns the data about the room's up axis.
 
+A volume a user grabbed and moved starts where it was left at the next run under the same `--volume-name`, as long as `--origin` and `--yaw` are the ones it was moved from. The viewer keeps its last pose and app pose in `qaros-rerun.volume-placements.json` next to the onboarding id file; the app scale always starts at `--scale`. Other `--origin` or `--yaw` values start at the new place, and `--reset-placement` starts at `--origin` and forgets the kept place (ADR-0085).
+
 ### What the headset shows
 
 - **One 3D view.** The first 3D view drawn keeps the stream for as long as it is drawn every frame. The log does not name the view being streamed, so with several 3D views on screen, send a blueprint with a single 3D view. A recording without a 3D view streams nothing and opens no panels.
@@ -361,7 +363,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | --- | --- | --- |
 | `--local-app` | off | Join the Hub on this machine as a local app, with no code or invite; excludes `--pairing-code` and `--onboarding-id-file` |
 | `--pairing-code CODE` | none | The Hub's current pairing code for the first start; also used when a stored id cannot be rejoined |
-| `--onboarding-id-file PATH` | `qaros-rerun.onboarding-id.txt` | Where the onboarding id is kept; `qaros-rerun.unanswered-peers.txt` goes next to it |
+| `--onboarding-id-file PATH` | `qaros-rerun.onboarding-id.txt` | Where the onboarding id is kept; `qaros-rerun.unanswered-peers.txt` and `qaros-rerun.volume-placements.json` go next to it |
 | `--launched-by-qaros` | off | Join as QAROS expects of an app it launches (as a local app on Windows; elsewhere with the first line of stdin, the launch invite or a code typed by hand) and stop when stdin closes; runs headless at 1280x720 unless `--window` or `--headless` is given |
 | `--qaros-library PATH` | `QAROS_DLL`, else the default lookup | The `qar-streaming-c` library |
 | `--qaros-graphics cpu\|vulkan` | `vulkan` on Windows, `cpu` elsewhere | How frames reach QAROS ([Choose the path](#choose-the-path-vulkan-or-cpu)) |
@@ -380,6 +382,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--center X,Y,Z` | `0,0,0` | Point of the data (Rerun units) placed at `--origin` |
 | `--scale S` | 1 | Room meters per Rerun unit; must be positive |
 | `--yaw DEGREES` | 0 | Turn the data about the room's up axis |
+| `--reset-placement` | off | Start the app volume at `--origin` and `--yaw` and forget where it was last moved to |
 | `--up CODE` | the view's own | Override the view coordinates, for example `RFU` |
 | `--near METERS` | 0.05 | Near plane in room meters |
 | `--far METERS` | 20 | Finite far plane in room meters |

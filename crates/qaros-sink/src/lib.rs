@@ -42,8 +42,10 @@ mod process_exit;
 // The status message of a raw call.
 #[allow(unsafe_code)]
 mod raw_result;
+mod remembered_placement;
 mod runtime_version;
 mod sink;
+mod state_files;
 mod stop_watchdog;
 // The stream panel's get-or-create with its stream extension, and set_stream.
 #[allow(unsafe_code)]

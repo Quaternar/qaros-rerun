@@ -355,6 +355,8 @@ fn connect_options(scratch: &Path, pairing_code: Option<&str>) -> ConnectOptions
         volume_display_name: "qaros-rerun test".to_owned(),
         volume_size: [2.0, 2.0, 1.5],
         placement: placement(),
+        volume_placement_file: None,
+        reset_placement: false,
         console_logging: false,
         raise_gpu_priority: false,
         adapter: None,
@@ -2442,6 +2444,54 @@ fn a_volume_held_with_another_transform_maps_eyes_with_the_live_one() {
     );
     drop(sink);
     fixture.assert_clean_teardown(connection);
+}
+
+/// A volume moved in one run is asked for at its last pose and app pose in the next, once
+/// QAROS creates the closed volume afresh (the stub's reset stands in for that); its app
+/// scale stays the requested one, and `--reset-placement` asks for the requested place.
+#[test]
+#[allow(clippy::float_cmp, reason = "the app scale is copied from the request")]
+fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
+    let fixture = Fixture::new();
+    let placement_file = fixture.scratch.join("qaros-rerun.volume-placements.json");
+    let remembering = |reset_placement: bool| ConnectOptions {
+        volume_placement_file: Some(placement_file.clone()),
+        reset_placement,
+        ..connect_options(&fixture.scratch, Some("ABCD-EFGH"))
+    };
+    let requested = placement().volume_transform();
+    let first = connect(&remembering(false), wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    assert_eq!(first.volume_transform(), requested);
+    let moved = dragged_volume(0.001);
+    change_volume(&first, moved);
+    fixture.assert_clean_teardown(first);
+
+    let reset_stub: unsafe extern "C" fn() = fixture.symbol("qar_stub_reset");
+    // SAFETY: no arguments.
+    unsafe { reset_stub() };
+    let second = connect(&remembering(false), wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    let restored = VolumeTransform {
+        app_scale: requested.app_scale,
+        ..moved
+    };
+    let config = second.volume_config();
+    assert_eq!(config.pose, qaros_pose(moved.volume_pose));
+    assert_eq!(config.app_pose, qaros_pose(moved.app_pose));
+    assert_eq!(config.app_scale, 2.0, "the app scale is the requested one");
+    assert_eq!(second.volume_transform(), restored);
+    fixture.assert_clean_teardown(second);
+
+    // SAFETY: no arguments.
+    unsafe { reset_stub() };
+    let after_reset = connect(&remembering(true), wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    assert_eq!(after_reset.volume_transform(), requested);
+    fixture.assert_clean_teardown(after_reset);
 }
 
 /// A change while the viewer runs applies from the next frame begun; a frame begun before it

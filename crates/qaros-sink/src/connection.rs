@@ -16,6 +16,7 @@ use qaros::{
 use xr_math::{AppPlacement, VolumeTransform};
 
 use crate::peer_devices::{PeerDevice, read_peer_device};
+use crate::remembered_placement::PlacementMemory;
 use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 use crate::volume_gestures::{RunningGestures, VolumeGestureSubscription, VolumeGestures};
@@ -55,6 +56,10 @@ pub fn storage_directory_from_environment() -> Option<PathBuf> {
 pub type WakeViewer = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent command-line switch"
+)]
 pub struct ConnectOptions {
     /// `None` finds the runtime with the binding's default lookup: a runtime already loaded,
     /// one beside the executable, `QAROS_RUNTIME_DIR`, the installed QAROS, then `PATH`.
@@ -92,6 +97,12 @@ pub struct ConnectOptions {
     /// The frames are mapped with the volume's transform as QAROS holds it, which may differ
     /// (`QarosConnection::volume_transform`).
     pub placement: AppPlacement,
+    /// Remembers, per volume name, the pose and app pose the volume was last followed at, and
+    /// asks for the volume there at the next start while `placement` is the one it was moved
+    /// from (ADR-0085); `None` always asks for `placement`.
+    pub volume_placement_file: Option<PathBuf>,
+    /// Ask for `placement` and forget the remembered place (`--reset-placement`).
+    pub reset_placement: bool,
     pub console_logging: bool,
     /// Sets the process's GPU scheduling priority to high on Windows (a diagnostic).
     pub raise_gpu_priority: bool,
@@ -154,10 +165,14 @@ impl std::fmt::Debug for QarosConnection {
 
 /// The volume is closed while the session is still alive: a session that just goes away leaves
 /// its volume in the room. The connection drops last, after the sink and the panels that hold
-/// it, so the panels are hidden (not closed) before the volume closes.
+/// it, so the panels are hidden (not closed) before the volume closes. Its last place is stored
+/// first, since QAROS creates a closed volume afresh at the next start (ADR-0085).
 impl Drop for QarosConnection {
     fn drop(&mut self) {
         enter_teardown_step(TeardownStep::CloseVolume);
+        self.live_volume
+            .get_mut()
+            .remember_before_close(&self.session, self.volume);
         match self.session.app_volumes().close(self.volume) {
             Ok(()) => log::info!(
                 "qaros: closed app volume {:?}",
@@ -182,7 +197,8 @@ impl QarosConnection {
         self.volume
     }
 
-    /// What the volume was requested with; its transform may differ by now (see
+    /// What the volume was asked for at start: the requested placement, or the place it was
+    /// last moved to (ADR-0085); its transform may differ by now (see
     /// [`Self::volume_transform`]).
     pub fn volume_config(&self) -> &AppVolumeConfig {
         &self.volume_config
@@ -289,6 +305,86 @@ pub fn connect(
     if options.raise_gpu_priority {
         crate::host_timing::raise_gpu_priority();
     }
+    let library = load_library(options)?;
+    let runtime = library
+        .create_runtime(&RuntimeConfig {
+            runtime_binaries_directory: options.runtime_binaries_directory.clone().or_else(|| {
+                library
+                    .library_path()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+            }),
+            storage_directory: options.storage_directory.clone(),
+            ephemeral_storage: false,
+        })
+        .map_err(|error| error.to_string())?;
+    let presentation = PeerPresentation {
+        display_name: Some(options.peer_display_name.clone()),
+        app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        custom_info: None,
+        device_identity: None,
+    };
+    let session = join_session(&library, &runtime, options, &presentation)?;
+    let adapter = session_adapter(&session, options.adapter);
+
+    let (placement_memory, startup_transform) = open_placement_memory(options);
+    let volume_config = volume_config(options, startup_transform);
+    let volume = session
+        .app_volumes()
+        .get_or_create(&volume_config)
+        .map_err(|error| error.to_string())?;
+    warn_if_volume_closed(&session, volume, &volume_config.common_name);
+    // Subscribed before the first read, so no change falls between the two.
+    let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
+        session.app_volumes().subscribe(forward)
+    })?;
+    let followed_volume = FollowedVolume::new(
+        &volume_config.common_name,
+        startup_transform,
+        read_latest(&session, volume).map_err(|error| error.to_string()),
+    );
+
+    // Peer updates first: a peer that requests a stream right away is then already listed.
+    let (peer_subscription, peer_updates) = forward_and_wake(&wake_viewer, |forward| {
+        session.subscribe_peer_updates(forward)
+    })?;
+    let (request_subscription, requests) = forward_and_wake(&wake_viewer, |forward| {
+        session.subscribe_render_requests(forward)
+    })?;
+
+    let library_dropped_last = LibraryDroppedLast {
+        _library: session.library(),
+    };
+    let mut connection = QarosConnection {
+        volume_gestures: None,
+        gesture_inbox: VolumeGestures::default(),
+        running_gestures: RefCell::new(RunningGestures::default()),
+        request_subscription,
+        peer_subscription,
+        volume_subscription,
+        requests,
+        peer_updates,
+        wake_viewer,
+        volume,
+        volume_config,
+        live_volume: RefCell::new(LiveVolume::new(
+            followed_volume,
+            volume_updates,
+            placement_memory,
+        )),
+        adapter,
+        unanswered_peers_file: options.unanswered_peers_file.clone(),
+        peers_by_user: RefCell::new(BTreeMap::new()),
+        session,
+        _library_dropped_last: library_dropped_last,
+    };
+    follow_volume_gestures(&mut connection);
+    Ok(connection)
+}
+
+/// The QAROS library from `library_path` or the default lookup, with its runtime version
+/// logged and checked against the oldest this viewer supports.
+fn load_library(options: &ConnectOptions) -> Result<Library, String> {
     let library_config = LibraryConfig {
         console_logging: options.console_logging,
         ..LibraryConfig::default()
@@ -323,75 +419,23 @@ pub fn connect(
         }
         Err(error) => log::warn!("qaros: cannot read the runtime's version: {error}"),
     }
-    let runtime = library
-        .create_runtime(&RuntimeConfig {
-            runtime_binaries_directory: options.runtime_binaries_directory.clone().or_else(|| {
-                library
-                    .library_path()
-                    .and_then(Path::parent)
-                    .map(Path::to_path_buf)
-            }),
-            storage_directory: options.storage_directory.clone(),
-            ephemeral_storage: false,
-        })
-        .map_err(|error| error.to_string())?;
-    let presentation = PeerPresentation {
-        display_name: Some(options.peer_display_name.clone()),
-        app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
-        custom_info: None,
-        device_identity: None,
-    };
-    let session = join_session(&library, &runtime, options, &presentation)?;
-    let adapter = session_adapter(&session, options.adapter);
+    Ok(library)
+}
 
-    let volume_config = volume_config(options);
-    let volume = session
-        .app_volumes()
-        .get_or_create(&volume_config)
-        .map_err(|error| error.to_string())?;
-    warn_if_volume_closed(&session, volume, &volume_config.common_name);
-    // Subscribed before the first read, so no change falls between the two.
-    let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
-        session.app_volumes().subscribe(forward)
-    })?;
-    let followed_volume = FollowedVolume::new(
-        &volume_config.common_name,
-        options.placement.volume_transform(),
-        read_latest(&session, volume).map_err(|error| error.to_string()),
+/// The memory of where the volume was last placed, and the transform to ask for: the
+/// remembered place when there is one for this request, else the requested placement.
+fn open_placement_memory(options: &ConnectOptions) -> (Option<PlacementMemory>, VolumeTransform) {
+    let requested = options.placement.volume_transform();
+    let Some(file) = &options.volume_placement_file else {
+        return (None, requested);
+    };
+    let (memory, startup_transform) = PlacementMemory::open(
+        file.clone(),
+        &options.volume_name,
+        requested,
+        options.reset_placement,
     );
-
-    // Peer updates first: a peer that requests a stream right away is then already listed.
-    let (peer_subscription, peer_updates) = forward_and_wake(&wake_viewer, |forward| {
-        session.subscribe_peer_updates(forward)
-    })?;
-    let (request_subscription, requests) = forward_and_wake(&wake_viewer, |forward| {
-        session.subscribe_render_requests(forward)
-    })?;
-
-    let library_dropped_last = LibraryDroppedLast {
-        _library: session.library(),
-    };
-    let mut connection = QarosConnection {
-        volume_gestures: None,
-        gesture_inbox: VolumeGestures::default(),
-        running_gestures: RefCell::new(RunningGestures::default()),
-        request_subscription,
-        peer_subscription,
-        volume_subscription,
-        requests,
-        peer_updates,
-        wake_viewer,
-        volume,
-        volume_config,
-        live_volume: RefCell::new(LiveVolume::new(followed_volume, volume_updates)),
-        adapter,
-        unanswered_peers_file: options.unanswered_peers_file.clone(),
-        peers_by_user: RefCell::new(BTreeMap::new()),
-        session,
-        _library_dropped_last: library_dropped_last,
-    };
-    follow_volume_gestures(&mut connection);
-    Ok(connection)
+    (Some(memory), startup_transform)
 }
 
 /// Subscribes to the volume's gestures, so the transform is read every frame while one runs
@@ -620,18 +664,18 @@ fn read_onboarding_id(library: &Library, path: &Path) -> Result<Option<Onboardin
     Ok(Some(OnboardingId(bytes)))
 }
 
-fn volume_config(options: &ConnectOptions) -> AppVolumeConfig {
+fn volume_config(options: &ConnectOptions, startup_transform: VolumeTransform) -> AppVolumeConfig {
     let [width, length, height] = options.volume_size;
     AppVolumeConfig {
         display_name: Some(options.volume_display_name.clone()),
-        pose: to_qaros_pose(options.placement.volume_pose),
+        pose: to_qaros_pose(startup_transform.volume_pose),
         size: AppVolumeSize {
             width,
             length,
             height,
         },
-        app_pose: to_qaros_pose(options.placement.app_pose),
-        app_scale: options.placement.app_scale,
+        app_pose: to_qaros_pose(startup_transform.app_pose),
+        app_scale: startup_transform.app_scale,
         ..AppVolumeConfig::new(options.volume_name.clone())
     }
 }

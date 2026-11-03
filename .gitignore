@@ -2,6 +2,7 @@
 /out/
 *.onboarding-id.txt
 *.unanswered-peers.txt
+*.volume-placements.json
 stub-report.txt
 validation.txt
 .worktrees/

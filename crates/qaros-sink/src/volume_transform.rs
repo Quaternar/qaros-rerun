@@ -10,6 +10,7 @@ use qaros::{AppVolumeId, AppVolumeInfo, Session};
 use xr_math::{Pose, VolumeTransform};
 
 use crate::connection::from_qaros_pose;
+use crate::remembered_placement::PlacementMemory;
 
 /// How often the latest values are read again when no update arrived: the header calls the
 /// pose and app scale setters "low-latency fast-path" updates and does not say whether they
@@ -95,22 +96,42 @@ impl FollowedVolume {
 /// The followed transform with what feeds it: the latest values, read again on an update for
 /// this volume or once the poll period passed. An update only triggers the read; its own values
 /// are never applied, because the Hub can deliver updates out of order and the last one can
-/// carry an older transform than the latest values.
+/// carry an older transform than the latest values. Each followed transform is remembered for
+/// the next run when a memory is given (ADR-0085).
 #[derive(Debug)]
 pub(crate) struct LiveVolume {
     followed: FollowedVolume,
     updates: Receiver<AppVolumeInfo>,
     next_read: Instant,
     read_failing: bool,
+    placement_memory: Option<PlacementMemory>,
 }
 
 impl LiveVolume {
-    pub(crate) fn new(followed: FollowedVolume, updates: Receiver<AppVolumeInfo>) -> Self {
+    pub(crate) fn new(
+        followed: FollowedVolume,
+        updates: Receiver<AppVolumeInfo>,
+        mut placement_memory: Option<PlacementMemory>,
+    ) -> Self {
+        let now = Instant::now();
+        if let Some(memory) = &mut placement_memory {
+            memory.remember_soon(followed.current(), now);
+        }
         Self {
             followed,
             updates,
-            next_read: Instant::now() + LATEST_VALUES_POLL_PERIOD,
+            next_read: now + LATEST_VALUES_POLL_PERIOD,
             read_failing: false,
+            placement_memory,
+        }
+    }
+
+    /// Reads the latest transform once more and stores it for the next run; at Stop, before
+    /// the volume closes.
+    pub(crate) fn remember_before_close(&mut self, session: &Session, volume: AppVolumeId) {
+        let last = self.refresh(session, volume, true);
+        if let Some(memory) = &mut self.placement_memory {
+            memory.remember_now(last);
         }
     }
 
@@ -135,6 +156,9 @@ impl LiveVolume {
             Ok(latest) => {
                 self.read_failing = false;
                 self.followed.follow(latest);
+                if let Some(memory) = &mut self.placement_memory {
+                    memory.remember_soon(self.followed.current(), now);
+                }
             }
             Err(error) => {
                 if !self.read_failing {
@@ -163,7 +187,7 @@ pub(crate) fn read_latest(
     })
 }
 
-fn describe(transform: VolumeTransform) -> String {
+pub(crate) fn describe(transform: VolumeTransform) -> String {
     format!(
         "pose {}, app pose {}, app scale {}",
         describe_pose(transform.volume_pose),

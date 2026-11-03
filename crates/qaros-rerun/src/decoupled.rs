@@ -1343,6 +1343,8 @@ mod tests {
                     volume_display_name: "decoupled render test".to_owned(),
                     volume_size: [2.0, 2.0, 1.5],
                     placement: AppPlacement::default(),
+                    volume_placement_file: None,
+                    reset_placement: false,
                     console_logging: false,
                     raise_gpu_priority: false,
                     adapter: None,

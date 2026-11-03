@@ -67,6 +67,8 @@ The app volume is 2 m on each side by default; data outside it is cut.
 
 `--origin` moves the volume in the room, `--yaw` turns the data. [Place your data](integration-guide.md#place-your-data-in-the-app-volume) has a worked example.
 
+A volume grabbed and moved in the glasses starts where it was left at the next run, as long as `--origin` and `--yaw` stay the same; `--reset-placement` puts it back at `--origin`.
+
 ## If something is missing
 
 | Symptom | Check |

@@ -64,6 +64,8 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
     --volume-size W,L,H        size of the app volume in meters (default 2,2,2)
     --volume-name NAME         the app volume's name (default rerun); viewers running at once
                                need different names, or QAROS gives them one volume and stream
+    --reset-placement          start the app volume at the place --origin and --yaw ask for and
+                               forget where it was last moved to (see Placement below)
     --display-name NAME        the app volume's label for people (default Rerun); the viewer
                                shows in the peer list as 'NAME viewer'
     --color-format bgra|rgba   color format requested from the sender (default bgra)
@@ -97,7 +99,10 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                viewer frame old
 
 Placement of Rerun's world in the room (OpenXR: Y up, -Z forward, meters; with --sink qaros
-also the app volume's center, app pose and app scale):
+also the app volume's center, app pose and app scale). With --sink qaros the app volume starts
+where it was last moved to under the same --volume-name, as long as --origin and --yaw are the
+ones it was moved from; the app scale always starts at --scale. The place is kept in
+qaros-rerun.volume-placements.json next to the onboarding id file; --reset-placement forgets it:
     --origin X,Y,Z             room position of the world center (default 0,0.5,-1.6)
     --center X,Y,Z             Rerun-world point placed at --origin, the walk circles it (default 0,0,0)
     --scale S                  room meters per Rerun unit (default 1)
@@ -231,6 +236,10 @@ impl QarosGraphics {
 }
 
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent command-line switch"
+)]
 pub struct QarosOptions {
     pub pairing_code: Option<String>,
     /// `--onboarding-id-file`; absent means [`DEFAULT_ONBOARDING_ID_FILE`].
@@ -246,6 +255,9 @@ pub struct QarosOptions {
     pub color_format: ColorFormatKind,
     pub panels_at_stop: PanelsAtStopKind,
     pub panel_posture: PanelPostureKind,
+    /// `--reset-placement`: start the app volume at the requested place and forget the
+    /// remembered one.
+    pub reset_placement: bool,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -262,6 +274,9 @@ pub const DEFAULT_ONBOARDING_ID_FILE: &str = "qaros-rerun.onboarding-id.txt";
 
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 pub const UNANSWERED_PEERS_FILE_NAME: &str = "qaros-rerun.unanswered-peers.txt";
+
+#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+pub const VOLUME_PLACEMENT_FILE_NAME: &str = "qaros-rerun.volume-placements.json";
 
 /// On Windows QAROS writes no launch invite to a launched app's stdin: the app joins as a
 /// local app and the Hub recognises the process it started.
@@ -286,6 +301,13 @@ impl QarosOptions {
     pub fn unanswered_peers_file(&self) -> PathBuf {
         self.onboarding_id_file()
             .with_file_name(UNANSWERED_PEERS_FILE_NAME)
+    }
+
+    /// Next to the onboarding id file: where each app volume was last placed.
+    #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+    pub fn volume_placement_file(&self) -> PathBuf {
+        self.onboarding_id_file()
+            .with_file_name(VOLUME_PLACEMENT_FILE_NAME)
     }
 
     pub fn graphics(&self) -> QarosGraphics {
@@ -389,6 +411,7 @@ impl Default for QarosOptions {
             color_format: ColorFormatKind::Bgra,
             panels_at_stop: PanelsAtStopKind::Hide,
             panel_posture: PanelPostureKind::Standing,
+            reset_placement: false,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -579,6 +602,11 @@ impl Options {
                 "--panels needs --sink qaros: the panels are QAROS GUI panels".to_owned(),
             ));
         }
+        if self.qaros.reset_placement && !is_qaros {
+            return Err(ParseOutcome::Error(
+                "--reset-placement needs --sink qaros: it places the QAROS app volume".to_owned(),
+            ));
+        }
         if self.qaros.local_app && !is_qaros {
             return Err(ParseOutcome::Error(
                 "--local-app needs --sink qaros".to_owned(),
@@ -670,6 +698,7 @@ impl Options {
                 | "--qaros-graphics" => options.qaros.apply_flag(&flag, value()?)?,
                 "--launched-by-qaros" => options.qaros.launched_by_qaros = true,
                 "--local-app" => options.qaros.local_app = true,
+                "--reset-placement" => options.qaros.reset_placement = true,
                 "--users" => options.simulated_users = parse_positive(&flag, &value()?)?,
                 "--join-interval" => {
                     options.join_interval_in_viewer_frames = parse_number(&flag, &value()?)?;
@@ -1087,6 +1116,37 @@ mod tests {
                 .unanswered_peers_file(),
             PathBuf::from("qaros-rerun.unanswered-peers.txt")
         );
+    }
+
+    #[test]
+    fn the_volume_placements_are_kept_next_to_the_onboarding_id() {
+        let with_id_file = parse(&["--sink", "qaros", "--onboarding-id-file", "ids/rerun.txt"]);
+        assert_eq!(
+            with_id_file.unwrap().qaros.volume_placement_file(),
+            PathBuf::from("ids/qaros-rerun.volume-placements.json")
+        );
+        assert_eq!(
+            parse(&["--sink", "qaros"])
+                .unwrap()
+                .qaros
+                .volume_placement_file(),
+            PathBuf::from("qaros-rerun.volume-placements.json")
+        );
+    }
+
+    #[test]
+    fn reset_placement_is_a_qaros_switch() {
+        assert!(
+            parse(&["--sink", "qaros", "--reset-placement"])
+                .unwrap()
+                .qaros
+                .reset_placement
+        );
+        assert!(!parse(&["--sink", "qaros"]).unwrap().qaros.reset_placement);
+        assert!(matches!(
+            parse(&["--reset-placement"]),
+            Err(ParseOutcome::Error(message)) if message.starts_with("--reset-placement needs --sink qaros")
+        ));
     }
 
     #[test]

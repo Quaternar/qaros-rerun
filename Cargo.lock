@@ -6689,6 +6689,8 @@ dependencies = [
  "qar-streaming-rust-ext",
  "qaros",
  "qaros-stub",
+ "serde",
+ "serde_json",
  "vulkan-device",
  "wgpu",
  "windows-sys 0.61.2",

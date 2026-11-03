@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0066: Poses are mapped with the app volume transform QAROS holds, followed while the viewer runs
 
+> Amended by ADR-0085: the transform asked for at start, and used when the live one cannot be read, is the volume's remembered place when there is one.
+
 ## Context
 
 With app content pose space (ADR-0038) the sink maps every eye pose into the room with the volume pose, app pose and app scale, hands near and far back divided by the app scale, and the renderer places Rerun's world and its near plane with the same three values ([CODE] `PoseMapping`, `EyeCamera::new`). All of them came from the placement the viewer requested in `get_or_create` (`--origin`, `--yaw`, `--scale`). QAROS does not keep to that: `get_or_create` hands back an existing volume as it is, and a person can move, turn and scale the volume in the Hub. On 2026-10-20 the volume was dragged in the Hub's App Volumes tab; QAROS rendered with the UI's transform (pose at the origin, app scale 0.001) while the viewer still converted with its own, so eye poses and depth were converted with the wrong scale and the content vanished ([REQ]). The header offers the latest locally known pose, app pose and app scale per volume (`qar_app_volume_get_latest_*`, "fast-path") and an update subscription for volumes, whose callback runs on a library thread ([H]).

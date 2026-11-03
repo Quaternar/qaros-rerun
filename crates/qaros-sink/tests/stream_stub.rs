@@ -162,6 +162,8 @@ impl Fixture {
                 volume_pose: Pose::from_translation(Vec3::new(0.0, 0.5, -1.6)),
                 ..AppPlacement::default()
             },
+            volume_placement_file: None,
+            reset_placement: false,
             console_logging: false,
             raise_gpu_priority: false,
             adapter: None,
