@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use glam::Vec3;
 use qaros_sink::PanelImages;
 use qaros_sink::qaros::{GraphicsAdapter, PixelFormat};
 use qaros_sink::vulkan::{
@@ -52,6 +53,8 @@ pub struct QarosSetup {
     /// The viewer's own Vulkan device: `named_vulkan` passed through, or the one created on
     /// the session's adapter for `--qaros-graphics vulkan`.
     pub vulkan: Option<VulkanDevice>,
+    /// The size the app volume holds after the start, which the data is fitted to (ADR-0098).
+    pub held_volume_size: Vec3,
 }
 
 /// `named_vulkan` is the `--vulkan-device` device, created before the session.
@@ -104,7 +107,8 @@ pub async fn build(
         peer_display_name: format!("{} viewer", qaros_options.display_name),
         volume_name: qaros_options.volume_name.clone(),
         volume_display_name: qaros_options.display_name.clone(),
-        volume_size: qaros_options.volume_size.to_array(),
+        volume_size: qaros_options.volume_size().to_array(),
+        resize_taken_over_volume: qaros_options.volume_size_flag.is_some(),
         placement: options.placement(),
         volume_placement_file: Some(qaros_options.volume_placement_file()),
         reset_placement: qaros_options.reset_placement,
@@ -127,6 +131,8 @@ pub async fn build(
         "qaros: connected; app volume {:?} ready, looking for target peers",
         qaros_options.volume_name
     );
+    let held_size = connection.volume_config().size;
+    let held_volume_size = Vec3::new(held_size.width, held_size.length, held_size.height);
 
     let vulkan = match named_vulkan {
         Some(vulkan) => Some(vulkan),
@@ -150,6 +156,7 @@ pub async fn build(
         frame_hooks,
         stop_request,
         vulkan,
+        held_volume_size,
     })
 }
 

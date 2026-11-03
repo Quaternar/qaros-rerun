@@ -9,6 +9,8 @@ repo: qaros-rerun
 # ADR-0094: The default app volume is 1.5 m on each side, the demos fit it, and a taken-over volume gets the requested size
 
 > Amends ADR-0089 and ADR-0092 (what a taken-over volume keeps).
+>
+> Amended by ADR-0098: a taken-over volume keeps its size unless `--volume-size` is given, and the data is fitted to the size the volume holds; the demos pass `--volume-size 1.5,1.5,1.5`.
 
 ## Context
 

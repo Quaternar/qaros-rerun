@@ -380,7 +380,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--qaros-library PATH` | `QAROS_DLL`, else the default lookup | The `qar-streaming-c` library |
 | `--qaros-graphics cpu\|vulkan` | `vulkan` on Windows, `cpu` elsewhere | How frames reach QAROS ([Choose the path](#choose-the-path-vulkan-or-cpu)) |
 | `--pose-space app\|room` | `app` | Space of the stream's eye poses: `app` maps them into the room with the volume's pose, app pose and app scale (the user's zoom) and reports near and far in app units; `room` takes them as they come |
-| `--volume-size W,L,H` | `1.5,1.5,1.5` | App volume size in meters: width (room X), length (room Z), height (room Y); the auto-fit sizes the data to it |
+| `--volume-size W,L,H` | `1.5,1.5,1.5` for a new volume | App volume size in meters: width (room X), length (room Z), height (room Y). Without it a volume taken over from an earlier run keeps its size; with it that volume is set to it. The auto-fit sizes the data to the size the volume holds |
 | `--volume-name NAME` | `rerun` | The app volume's name; viewers running at once need different names |
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |

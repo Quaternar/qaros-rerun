@@ -68,6 +68,8 @@ struct SinkSetup {
     stop_request: Option<StopRequest>,
     /// The viewer's own Vulkan device, egui's device from here on.
     vulkan: Option<vulkan_device::VulkanDevice>,
+    /// The size the QAROS app volume holds, which the data is fitted to (ADR-0098).
+    held_volume_size: Option<glam::Vec3>,
 }
 
 type WakeViewer = Arc<dyn Fn() + Send + Sync>;
@@ -115,6 +117,7 @@ async fn build_sink(
                 frame_hooks: setup.frame_hooks,
                 stop_request: Some(setup.stop_request),
                 vulkan: setup.vulkan,
+                held_volume_size: Some(setup.held_volume_size),
             })
         }
         #[cfg(not(feature = "qaros"))]
@@ -215,8 +218,14 @@ fn headset_settings(options: &Options, memory_knobs: &MemoryKnobs) -> HeadsetSet
     }
 }
 
-fn headset_for(options: &Options, memory_knobs: &MemoryKnobs, sink: HeadsetSink) -> Headset {
-    let settings = headset_settings(options, memory_knobs);
+fn headset_for(
+    options: &Options,
+    memory_knobs: &MemoryKnobs,
+    sink: HeadsetSink,
+    held_volume_size: Option<glam::Vec3>,
+) -> Headset {
+    let mut settings = headset_settings(options, memory_knobs);
+    settings.fit = settings.fit.with_held_volume_size(held_volume_size);
     Headset {
         renderer: Arc::new(Mutex::new(HeadsetRenderer::new(settings, &sink))),
         sink,
@@ -248,6 +257,7 @@ async fn build_viewer_sinks(
             frame_hooks,
             stop_request,
             vulkan,
+            held_volume_size,
         } = build_sink(
             options,
             graphics,
@@ -256,7 +266,7 @@ async fn build_viewer_sinks(
         )
         .await?;
         return Ok(ViewerSinks {
-            headset: sink.map(|sink| headset_for(options, memory_knobs, sink)),
+            headset: sink.map(|sink| headset_for(options, memory_knobs, sink, held_volume_size)),
             decoupled: None,
             render_thread_pause: None,
             frame_hooks,
@@ -278,6 +288,7 @@ async fn build_viewer_sinks(
                 frame_hooks,
                 stop_request,
                 vulkan,
+                held_volume_size,
             } = runtime.block_on(build_sink(
                 &thread_options,
                 &thread_graphics,
@@ -286,7 +297,11 @@ async fn build_viewer_sinks(
             ))?;
             let sink = sink.ok_or("--decoupled-render needs a sink")?;
             Ok((
-                RenderThreadSink { sink, frame_hooks },
+                RenderThreadSink {
+                    sink,
+                    frame_hooks,
+                    held_volume_size,
+                },
                 (stop_request, vulkan),
             ))
         },

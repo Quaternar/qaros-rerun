@@ -53,8 +53,9 @@ VIEWER_LOG_DIRECTIVES = (
 
 @dataclass(frozen=True)
 class Placement:
-    """Where the demo's data sits in the room: the viewer's --center, --origin, --scale, --yaw,
-    and --volume-size when the data needs a larger app volume than the viewer's default.
+    """Where the demo's data sits in the room: the viewer's --center, --origin, --scale, --yaw
+    and --volume-size. The size is always passed, so a volume an earlier run or a person left at
+    another size is set back to the one the scale was tuned for (ADR-0098).
 
     The room origin is taken to be a QR marker lying on a table, with the floor 1.0 m below it:
     the data's center 0.5 m above the marker is about standing eye level, and 1.7 m in front of
@@ -65,12 +66,9 @@ class Placement:
     origin: tuple[float, float, float] = (0.0, 0.5, -1.7)
     scale: float = 1.0
     yaw_degrees: float = 0.0
-    volume_size: tuple[float, float, float] | None = None
+    volume_size: tuple[float, float, float] = (1.5, 1.5, 1.5)
 
     def viewer_arguments(self) -> list[str]:
-        volume_arguments = []
-        if self.volume_size is not None:
-            volume_arguments = ["--volume-size", ",".join(f"{value:g}" for value in self.volume_size)]
         return [
             "--center",
             ",".join(f"{value:g}" for value in self.center),
@@ -80,7 +78,8 @@ class Placement:
             f"{self.scale:g}",
             "--yaw",
             f"{self.yaw_degrees:g}",
-            *volume_arguments,
+            "--volume-size",
+            ",".join(f"{value:g}" for value in self.volume_size),
         ]
 
 

@@ -342,6 +342,8 @@ impl SceneCapture {
 pub struct RenderThreadSink {
     pub sink: HeadsetSink,
     pub frame_hooks: Vec<Box<dyn FrameHook>>,
+    /// The size the QAROS app volume holds, which the data is fitted to (ADR-0098).
+    pub held_volume_size: Option<glam::Vec3>,
 }
 
 /// The viewer's device as Rerun's own context uses it, for the render thread's context.
@@ -635,7 +637,7 @@ fn run_render_thread(
 /// Sets up the renderer and the render context, kept in the caller's slots so the caller tears
 /// down what was built whatever panics, then runs eye frames until a stop is requested.
 fn render_until_stopped(
-    settings: HeadsetSettings,
+    mut settings: HeadsetSettings,
     sink_side: &mut RenderThreadSink,
     device_receiver: &mpsc::Receiver<SharedDevice>,
     handoff: &SceneHandoff,
@@ -643,6 +645,9 @@ fn render_until_stopped(
     renderer_slot: &mut Option<HeadsetRenderer>,
     render_context_slot: &mut Option<RenderContext>,
 ) {
+    settings.fit = settings
+        .fit
+        .with_held_volume_size(sink_side.held_volume_size);
     let renderer = renderer_slot.insert(
         HeadsetRenderer::new(settings, &sink_side.sink)
             .with_readback_time_limit(READBACK_TIME_LIMIT),
@@ -1545,6 +1550,7 @@ mod tests {
                         RenderThreadSink {
                             sink: HeadsetSink::Cpu(Box::new(sink)),
                             frame_hooks: Vec::new(),
+                            held_volume_size: None,
                         },
                         (),
                     ))
@@ -1612,6 +1618,21 @@ mod tests {
                 }
             }
 
+            fn one_user_sink_options() -> Result<QarosSinkOptions, String> {
+                Ok(QarosSinkOptions {
+                    depth_range: frame_sink::DepthRange::new(
+                        0.05,
+                        20.0,
+                        xr_math::DepthEncoding::ForwardNormalized,
+                    )
+                    .ok_or("no depth range")?,
+                    pose_space: PoseSpace::Room,
+                    color_format: qaros_sink::qaros::PixelFormat::B8G8R8A8,
+                    max_users: 1,
+                    stop_after_frames: None,
+                })
+            }
+
             fn connect_options(scratch: &std::path::Path) -> ConnectOptions {
                 ConnectOptions {
                     library_path: Some(StubControl::library_path().expect("the stub library")),
@@ -1626,6 +1647,7 @@ mod tests {
                     volume_name: "rerun".to_owned(),
                     volume_display_name: "decoupled render test".to_owned(),
                     volume_size: [2.0, 2.0, 1.5],
+                    resize_taken_over_volume: false,
                     placement: AppPlacement::default(),
                     volume_placement_file: None,
                     reset_placement: false,
@@ -1662,21 +1684,7 @@ mod tests {
                     move || {
                         let connection =
                             Rc::new(connect(&connect_options(&thread_scratch), Arc::new(|| {}))?);
-                        let sink = QarosSink::new(
-                            Rc::clone(&connection),
-                            QarosSinkOptions {
-                                depth_range: frame_sink::DepthRange::new(
-                                    0.05,
-                                    20.0,
-                                    xr_math::DepthEncoding::ForwardNormalized,
-                                )
-                                .ok_or("no depth range")?,
-                                pose_space: PoseSpace::Room,
-                                color_format: qaros_sink::qaros::PixelFormat::B8G8R8A8,
-                                max_users: 1,
-                                stop_after_frames: None,
-                            },
-                        );
+                        let sink = QarosSink::new(Rc::clone(&connection), one_user_sink_options()?);
                         let hook = ConnectionHook {
                             connection: Some(connection),
                             dropped_on: hook_dropped_on,
@@ -1686,6 +1694,7 @@ mod tests {
                             RenderThreadSink {
                                 sink: HeadsetSink::Cpu(Box::new(sink)),
                                 frame_hooks: vec![Box::new(hook)],
+                                held_volume_size: None,
                             },
                             (),
                         ))
@@ -1816,6 +1825,7 @@ mod tests {
                             RenderThreadSink {
                                 sink: HeadsetSink::Cpu(Box::new(sink)),
                                 frame_hooks: vec![Box::new(hook)],
+                                held_volume_size: None,
                             },
                             (),
                         ))

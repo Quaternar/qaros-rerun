@@ -158,6 +158,7 @@ impl Fixture {
             volume_name: "rerun".to_owned(),
             volume_display_name: "qaros-rerun stream test".to_owned(),
             volume_size: [2.0, 2.0, 1.5],
+            resize_taken_over_volume: false,
             placement: AppPlacement {
                 volume_pose: Pose::from_translation(Vec3::new(0.0, 0.5, -1.6)),
                 ..AppPlacement::default()

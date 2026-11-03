@@ -37,7 +37,8 @@ pub struct FitSettings {
     pub flag_fit: Option<DataFit>,
     /// `--auto-fit`, on by default.
     pub auto_fit: bool,
-    /// The app volume's size in meters (`--volume-size`).
+    /// The app volume's size in meters: `--volume-size` or its default, then the size the volume
+    /// holds once the sink reports it (ADR-0098).
     pub volume_size: Vec3,
 }
 
@@ -52,6 +53,14 @@ impl Default for FitSettings {
 }
 
 impl FitSettings {
+    /// Fits to the size the app volume holds, when the sink reports one (ADR-0098).
+    pub fn with_held_volume_size(self, held_volume_size: Option<Vec3>) -> Self {
+        Self {
+            volume_size: held_volume_size.unwrap_or(self.volume_size),
+            ..self
+        }
+    }
+
     fn flag_or_origin_fit(self) -> DataFit {
         self.flag_fit.unwrap_or_default()
     }
@@ -468,6 +477,25 @@ mod tests {
         assert!(
             (fitted.scale - 0.7 * DEFAULT_VOLUME_SIDE_METERS / 0.8).abs() < 1e-5,
             "{fitted:?}"
+        );
+    }
+
+    #[test]
+    fn the_fit_follows_the_size_the_volume_holds() {
+        let held = settings(None).with_held_volume_size(Some(Vec3::new(2.0, 2.0, 1.8)));
+        assert_eq!(held.volume_size, Vec3::new(2.0, 2.0, 1.8));
+        let mut fits = RecordingFits::new(held);
+        let fitted = show_for(
+            &mut fits,
+            "robot_arm",
+            robot_arm_bounds(),
+            Instant::now(),
+            SETTLE_TIME,
+        );
+        assert!((fitted.scale - 0.7 * 1.8 / 0.8).abs() < 1e-5, "{fitted:?}");
+        assert_eq!(
+            settings(None).with_held_volume_size(None).volume_size,
+            Vec3::splat(DEFAULT_VOLUME_SIDE_METERS)
         );
     }
 }

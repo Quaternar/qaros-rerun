@@ -372,6 +372,7 @@ fn connect_options(scratch: &Path, pairing_code: Option<&str>) -> ConnectOptions
         volume_name: "rerun".to_owned(),
         volume_display_name: "qaros-rerun test".to_owned(),
         volume_size: [2.0, 2.0, 1.5],
+        resize_taken_over_volume: false,
         placement: placement(),
         volume_placement_file: None,
         reset_placement: false,
@@ -2590,8 +2591,9 @@ fn a_taken_over_app_scale_that_is_no_user_zoom_is_set_to_the_requested_zoom() {
     fixture.assert_clean_teardown(fourth);
 }
 
-/// A volume taken over gets the size this run asks for (ADR-0094), while its place and the
-/// user's zoom stay as QAROS holds them; the same size again makes no call.
+/// With `--volume-size` a volume taken over gets the size this run asks for (ADR-0094,
+/// ADR-0098), while its place and the user's zoom stay as QAROS holds them; the same size again
+/// makes no call.
 #[test]
 fn a_taken_over_volume_gets_the_requested_size_and_keeps_its_place_and_zoom() {
     let fixture = Fixture::new();
@@ -2601,6 +2603,7 @@ fn a_taken_over_volume_gets_the_requested_size_and_keeps_its_place_and_zoom() {
 
     let smaller = ConnectOptions {
         volume_size: [1.5, 1.5, 1.2],
+        resize_taken_over_volume: true,
         ..connect_options(&fixture.scratch, None)
     };
     let second = connect(&smaller, wake_counter().1).map(Rc::new).unwrap();
@@ -2634,6 +2637,46 @@ fn a_taken_over_volume_gets_the_requested_size_and_keeps_its_place_and_zoom() {
         "no resize at the requested size: {start_calls:?}"
     );
     fixture.assert_clean_teardown(third);
+}
+
+/// Without `--volume-size` a volume taken over keeps the size QAROS holds, and the connection
+/// reports that size for the data fit and the panels (ADR-0098).
+#[test]
+fn a_taken_over_volume_keeps_its_size_without_the_flag() {
+    let fixture = Fixture::new();
+    let first = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    fixture.assert_clean_teardown(first);
+
+    let smaller_default = ConnectOptions {
+        volume_size: [1.5, 1.5, 1.2],
+        ..connect_options(&fixture.scratch, None)
+    };
+    let calls_before_second_start = fixture.calls().len();
+    let second = connect(&smaller_default, wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    let start_calls = fixture.calls().split_off(calls_before_second_start);
+    let held = qaros::AppVolumeSize {
+        width: 2.0,
+        length: 2.0,
+        height: 1.5,
+    };
+    assert_eq!(
+        second
+            .session()
+            .app_volumes()
+            .latest_size(second.volume())
+            .unwrap(),
+        held
+    );
+    assert_eq!(second.volume_config().size, held);
+    assert!(
+        !start_calls
+            .iter()
+            .any(|call| call == "app_volumes_change_size"),
+        "no resize without the flag: {start_calls:?}"
+    );
+    fixture.assert_clean_teardown(second);
 }
 
 /// The stub has no used-by peers (`app_volume_get_used_by_peers_count` answers

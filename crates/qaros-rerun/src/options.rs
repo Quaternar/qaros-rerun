@@ -68,8 +68,10 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                app scale (the user's zoom) and hands near and far back in app
                                units (room meters / app scale); room uses the poses as they
                                come, near and far in room meters
-    --volume-size W,L,H        size of the app volume in meters (default 1.5,1.5,1.5);
-                               auto-fit sizes the data to it
+    --volume-size W,L,H        size of the app volume in meters; a volume taken over from an
+                               earlier run is set to it. Without it a new volume is 1.5,1.5,1.5
+                               and a taken-over one keeps its size. Auto-fit sizes the data to
+                               the size the volume holds
     --volume-name NAME         the app volume's name (default rerun); viewers running at once
                                need different names, or QAROS gives them one volume and stream
     --reset-placement          start the app volume at the place --origin and --yaw ask for, at
@@ -287,7 +289,9 @@ pub struct QarosOptions {
     pub onboarding_id_file_flag: Option<PathBuf>,
     pub library_path: Option<PathBuf>,
     pub pose_space: PoseSpaceKind,
-    pub volume_size: Vec3,
+    /// `--volume-size`; absent means a [`DEFAULT_VOLUME_SIDE_METERS`] cube for a new volume and
+    /// the held size for a taken-over one (ADR-0098).
+    pub volume_size_flag: Option<Vec3>,
     /// The app volume's name: QAROS hands an app that asks for an existing name that volume
     /// and its render stream, so two viewers at once need two names.
     pub volume_name: String,
@@ -340,6 +344,13 @@ impl QarosOptions {
         self.local_app || (self.launched_by_qaros && LAUNCHED_APP_JOINS_AS_LOCAL_APP)
     }
 
+    /// The size a volume this start creates is asked for, and the data is fitted to until the
+    /// sink reports the size the volume holds.
+    pub fn volume_size(&self) -> Vec3 {
+        self.volume_size_flag
+            .unwrap_or(Vec3::splat(DEFAULT_VOLUME_SIDE_METERS))
+    }
+
     #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
     pub fn onboarding_id_file(&self) -> PathBuf {
         self.onboarding_id_file_flag
@@ -383,7 +394,7 @@ impl QarosOptions {
                 if size.min_element() <= 0.0 {
                     return Err(ParseOutcome::Error(format!("{flag} must be positive")));
                 }
-                self.volume_size = size;
+                self.volume_size_flag = Some(size);
             }
             "--volume-name" => {
                 if value.trim().is_empty() {
@@ -456,7 +467,7 @@ impl Default for QarosOptions {
             onboarding_id_file_flag: None,
             library_path: None,
             pose_space: PoseSpaceKind::App,
-            volume_size: Vec3::splat(DEFAULT_VOLUME_SIDE_METERS),
+            volume_size_flag: None,
             volume_name: "rerun".to_owned(),
             display_name: "Rerun".to_owned(),
             color_format: ColorFormatKind::Bgra,
@@ -610,7 +621,7 @@ impl Options {
         FitSettings {
             flag_fit: self.flag_fit(),
             auto_fit: self.auto_fit,
-            volume_size: self.qaros.volume_size,
+            volume_size: self.qaros.volume_size(),
         }
     }
 
@@ -1326,7 +1337,13 @@ mod tests {
             PoseSpaceKind::App,
             "app content space by default"
         );
-        assert_eq!(options.qaros.volume_size, Vec3::new(3.0, 2.0, 1.5));
+        assert_eq!(options.qaros.volume_size(), Vec3::new(3.0, 2.0, 1.5));
+        let without_flag = parse(&["--sink", "qaros"]).unwrap().qaros;
+        assert_eq!(without_flag.volume_size_flag, None);
+        assert_eq!(
+            without_flag.volume_size(),
+            Vec3::splat(DEFAULT_VOLUME_SIDE_METERS)
+        );
         assert_eq!(options.qaros.color_format, ColorFormatKind::Rgba);
         assert!(options.panels);
         assert_eq!(parse(&["--sink", "image"]).unwrap().sink, SinkKind::Images);
