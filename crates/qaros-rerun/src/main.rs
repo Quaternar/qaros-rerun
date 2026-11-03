@@ -47,11 +47,13 @@ use crate::decoupled::{
 use crate::device_setup::GraphicsChoice;
 use crate::headless::{HeadlessOptions, run_headless};
 use crate::headset::{HeadsetRenderer, HeadsetSettings, HeadsetSink};
-use crate::hidden_window::HiddenWindow;
+use crate::hidden_window::{HiddenWindow, MinimisedLayout};
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::memory_knobs::MemoryKnobs;
 use crate::options::{ImageTargets, MotionKind, Options, ParseOutcome, SinkKind, USAGE};
 use crate::panel_capture::{PanelCapture, PanelOutlet, SharedViewDirectory, ViewDirectory};
+#[cfg(feature = "qaros")]
+use crate::timeline_requests::{TimelinePosition, TimelineRequests};
 use crate::timeline_scrub::TimelineScrub;
 use crate::viewer_app::{
     FrameHook, Headset, HeadsetViewerApp, SharedHeadset, StopRequest, end_process_after_teardown,
@@ -432,6 +434,15 @@ fn exit_code_after_teardown<Error>(loads_qaros: bool, outcome: &Result<(), Error
     loads_qaros.then_some(i32::from(outcome.is_err()))
 }
 
+/// The timeline panel drawn into the panel outlet, driving the time control through the
+/// timeline link.
+#[cfg(feature = "qaros")]
+fn new_timeline_panel(
+    (outlet, (requests, position)): (PanelOutlet, (TimelineRequests, TimelinePosition)),
+) -> timeline_panel::TimelinePanel {
+    timeline_panel::TimelinePanel::new(outlet.images, outlet.gestures, requests, position)
+}
+
 /// Builds the sink, then runs the viewer until its window closes or, headless, until it is
 /// done; a QAROS Stop ends the process from inside.
 async fn run_viewer(
@@ -517,16 +528,9 @@ async fn run_viewer(
             scene_delay,
             panel_capture,
             #[cfg(feature = "qaros")]
-            timeline_panel: panel_outlet.zip(timeline_link.clone()).map(
-                |(outlet, (requests, position))| {
-                    timeline_panel::TimelinePanel::new(
-                        outlet.images,
-                        outlet.gestures,
-                        requests,
-                        position,
-                    )
-                },
-            ),
+            timeline_panel: panel_outlet
+                .zip(timeline_link.clone())
+                .map(new_timeline_panel),
             timeline_scrub: timeline_link
                 .map(|(requests, position)| TimelineScrub::new(requests, position, command_sender)),
             frame_hooks,
@@ -535,6 +539,7 @@ async fn run_viewer(
             summary_printed: false,
             memory_budget_log: log_wgpu_device(creation_context),
             hidden_window: None,
+            minimised_layout: MinimisedLayout::default(),
         }
     };
 

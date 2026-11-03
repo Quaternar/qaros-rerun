@@ -459,14 +459,18 @@ impl DecoupledHeadset {
 
     /// After the UI pass, when Rerun's `before_submit` has queued this viewer frame's uploads:
     /// publishes the scene captured in the pass, or withdraws the last one if the streamed
-    /// view was not drawn.
-    pub fn end_viewer_frame(&mut self) {
+    /// view was not drawn. A minimised window that drew no view keeps the last scene: the
+    /// layout was lost, not the view (ADR-0099).
+    pub fn end_viewer_frame(&mut self, window_is_minimised: bool) {
         let captured = self
             .capture
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .captured
             .take();
+        if captured.is_none() && window_is_minimised {
+            return;
+        }
         if captured.is_some() {
             self.scenes_published.record();
         }
@@ -868,6 +872,42 @@ mod tests {
         assert_eq!(generation, 2);
         handoff.publish(None);
         assert!(handoff.latest().0.is_none());
+    }
+
+    fn capture_scene(headset: &DecoupledHeadset, sequence: u64) {
+        let scene = Arc::into_inner(empty_scene(sequence)).expect("one owner");
+        headset
+            .capture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .captured = Some(scene);
+    }
+
+    fn latest_sequence(headset: &DecoupledHeadset) -> Option<u64> {
+        headset.handoff.latest().0.map(|scene| scene.sequence)
+    }
+
+    #[test]
+    fn a_minimised_window_that_drew_no_view_keeps_the_last_scene_and_a_shown_one_withdraws_it() {
+        let mut headset = DecoupledHeadset::streaming_without_a_thread();
+        capture_scene(&headset, 5);
+        headset.end_viewer_frame(false);
+        assert_eq!(latest_sequence(&headset), Some(5));
+
+        headset.end_viewer_frame(true);
+        assert_eq!(latest_sequence(&headset), Some(5), "kept while minimised");
+        assert_eq!(headset.scenes_published.count, 1);
+
+        capture_scene(&headset, 6);
+        headset.end_viewer_frame(true);
+        assert_eq!(
+            latest_sequence(&headset),
+            Some(6),
+            "a drawn view still publishes"
+        );
+
+        headset.end_viewer_frame(false);
+        assert_eq!(latest_sequence(&headset), None, "withdrawn when shown");
     }
 
     #[test]

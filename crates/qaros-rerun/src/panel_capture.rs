@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use qaros_sink::{PanelGestures, PanelImages};
 use re_viewer_context::{PublishedViewInfo, ViewId, ViewRectPublisher};
 
+use crate::hidden_window::is_minimised;
 use crate::timeline_requests::{TimelinePosition, TimelineRequests};
 
 /// The largest side of a streamed view, in pixels; a larger crop is halved until it fits.
@@ -276,25 +277,32 @@ impl PanelCapture {
                     .map(|view_info| (view_id, view_info))
             })
             .collect();
+        let window_is_minimised = egui_ctx.input(|input| is_minimised(input.viewport()));
         self.publish_on_screen_views(
             on_screen_views,
             screenshot,
             pixels_per_point,
+            window_is_minimised,
             Instant::now(),
         );
     }
 
     /// Publishes the views on screen in this capture, and withdraws those that were published
     /// before and are not on screen now, so their panels follow the layout when another
-    /// recording becomes active or the blueprint drops a view. A capture that never happens,
-    /// such as while the window is minimised, withdraws nothing.
+    /// recording becomes active or the blueprint drops a view. A capture that never happens
+    /// withdraws nothing, and neither does a minimised window's capture without a view on
+    /// screen: its layout was lost, not its views (ADR-0099).
     fn publish_on_screen_views(
         &mut self,
         on_screen_views: Vec<(ViewId, PublishedViewInfo)>,
         screenshot: &egui::ColorImage,
         pixels_per_point: f32,
+        window_is_minimised: bool,
         now: Instant,
     ) {
+        if window_is_minimised && on_screen_views.is_empty() {
+            return;
+        }
         self.panel_names.assign(&on_screen_views);
         let on_screen_names: Vec<String> = on_screen_views
             .iter()
@@ -994,11 +1002,12 @@ mod tests {
         screenshot: &egui::ColorImage,
         start: Instant,
     ) {
-        capture.publish_on_screen_views(layout.to_vec(), screenshot, 1.0, start);
+        capture.publish_on_screen_views(layout.to_vec(), screenshot, 1.0, false, start);
         capture.publish_on_screen_views(
             layout.to_vec(),
             screenshot,
             1.0,
+            false,
             start + STREAM_FRAME_SETTLE,
         );
     }
@@ -1053,6 +1062,7 @@ mod tests {
                 camera_of_size(width, height),
                 &screenshot,
                 1.0,
+                false,
                 captured_at,
             );
             let published = images.latest("camera").unwrap();
@@ -1124,10 +1134,36 @@ mod tests {
             Vec::new(),
             &screenshot,
             1.0,
+            false,
             start + Duration::from_secs(5),
         );
 
         assert!(images.view_names().is_empty());
+    }
+
+    #[cfg(feature = "qaros")]
+    #[test]
+    fn a_minimised_capture_with_no_view_on_screen_keeps_every_view() {
+        let images = PanelImages::default();
+        let mut capture = capture_into(&images);
+        let screenshot = egui::ColorImage::filled([400, 400], egui::Color32::BLACK);
+        let start = Instant::now();
+        publish_settled(
+            &mut capture,
+            &[view_at("Camera", 0.0, 0.0)],
+            &screenshot,
+            start,
+        );
+
+        capture.publish_on_screen_views(
+            Vec::new(),
+            &screenshot,
+            1.0,
+            true,
+            start + Duration::from_secs(5),
+        );
+
+        assert_eq!(images.view_names(), ["camera"]);
     }
 
     #[test]

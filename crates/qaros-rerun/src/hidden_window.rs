@@ -8,6 +8,9 @@
 //! reconfigured (a minimised Windows window has no area), and while the headset streams the
 //! event loop runs the passes at headset rate instead of eframe's 100 ms for a hidden window
 //! (`INVISIBLE_WINDOW_REPAINT_INTERVAL` in `run.rs`).
+//!
+//! A minimised window also lays out at its last shown size (`MinimisedLayout`, ADR-0099), so
+//! Rerun keeps drawing the views the scene and the panels come from.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,9 +60,142 @@ impl HiddenWindow {
     }
 }
 
+/// Whether the window of this pass is minimised, as eframe reads it from the OS each pass
+/// (`egui_winit::update_viewport_info`; not refreshed at runtime on macOS).
+pub fn is_minimised(viewport: &egui::ViewportInfo) -> bool {
+    viewport.minimized == Some(true)
+}
+
+/// The screen a minimised window lays out on (ADR-0099). Rerun draws no view in a viewport
+/// of no area (`re_viewport` `viewport_ui.rs`, `is_zero_sized_viewport`), and a view it does
+/// not draw publishes no scene and no panel rect. A minimised Windows window has no client
+/// area, so while minimised every pass is given the screen of the last pass it was shown,
+/// and the views keep their size and place.
+#[derive(Debug, Default)]
+pub struct MinimisedLayout {
+    last_shown_screen: Option<egui::Rect>,
+    minimised_screen_logged: bool,
+}
+
+impl MinimisedLayout {
+    /// eframe's `App::raw_input_hook`, called before every egui pass with the window's state
+    /// of that pass.
+    pub fn lay_out_minimised_at_last_shown_size(&mut self, raw_input: &mut egui::RawInput) {
+        let is_minimised_now = raw_input
+            .viewports
+            .get(&raw_input.viewport_id)
+            .is_some_and(is_minimised);
+        if !is_minimised_now {
+            self.minimised_screen_logged = false;
+            if let Some(screen) = raw_input.screen_rect.filter(has_area) {
+                self.last_shown_screen = Some(screen);
+            }
+            return;
+        }
+        let Some(last_shown_screen) = self.last_shown_screen else {
+            return;
+        };
+        if !self.minimised_screen_logged {
+            self.minimised_screen_logged = true;
+            re_log::info!(
+                "headset: the window is minimised (its screen {}); the viewer lays out at its \
+                 last shown size {:.0}x{:.0} points",
+                raw_input.screen_rect.map_or_else(
+                    || "not reported".to_owned(),
+                    |screen| format!("{:.0}x{:.0} points", screen.width(), screen.height())
+                ),
+                last_shown_screen.width(),
+                last_shown_screen.height()
+            );
+        }
+        raw_input.screen_rect = Some(last_shown_screen);
+    }
+}
+
+fn has_area(screen: &egui::Rect) -> bool {
+    screen.width() > 0.0 && screen.height() > 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pass_input(screen: Option<egui::Rect>, minimised: bool) -> egui::RawInput {
+        let mut raw_input = egui::RawInput {
+            screen_rect: screen,
+            ..Default::default()
+        };
+        raw_input.viewports.insert(
+            raw_input.viewport_id,
+            egui::ViewportInfo {
+                minimized: Some(minimised),
+                ..Default::default()
+            },
+        );
+        raw_input
+    }
+
+    fn screen(width: f32, height: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height))
+    }
+
+    #[test]
+    fn a_minimised_window_lays_out_at_the_last_shown_screen_until_restored() {
+        let mut layout = MinimisedLayout::default();
+
+        let mut shown = pass_input(Some(screen(1600.0, 900.0)), false);
+        layout.lay_out_minimised_at_last_shown_size(&mut shown);
+        assert_eq!(shown.screen_rect, Some(screen(1600.0, 900.0)));
+
+        for minimised_screen in [None, Some(screen(136.0, 0.0)), Some(screen(160.0, 28.0))] {
+            let mut minimised = pass_input(minimised_screen, true);
+            layout.lay_out_minimised_at_last_shown_size(&mut minimised);
+            assert_eq!(minimised.screen_rect, Some(screen(1600.0, 900.0)));
+        }
+
+        let mut restored = pass_input(Some(screen(1280.0, 720.0)), false);
+        layout.lay_out_minimised_at_last_shown_size(&mut restored);
+        assert_eq!(restored.screen_rect, Some(screen(1280.0, 720.0)));
+
+        let mut minimised_again = pass_input(None, true);
+        layout.lay_out_minimised_at_last_shown_size(&mut minimised_again);
+        assert_eq!(minimised_again.screen_rect, Some(screen(1280.0, 720.0)));
+    }
+
+    #[test]
+    fn a_covered_window_keeps_its_own_screen() {
+        let mut layout = MinimisedLayout::default();
+        let mut shown = pass_input(Some(screen(1600.0, 900.0)), false);
+        layout.lay_out_minimised_at_last_shown_size(&mut shown);
+
+        let mut covered = pass_input(Some(screen(1500.0, 800.0)), false);
+        if let Some(viewport) = covered.viewports.get_mut(&covered.viewport_id) {
+            viewport.occluded = Some(true);
+        }
+        layout.lay_out_minimised_at_last_shown_size(&mut covered);
+        assert_eq!(covered.screen_rect, Some(screen(1500.0, 800.0)));
+    }
+
+    #[test]
+    fn a_window_minimised_before_it_was_ever_shown_is_left_as_reported() {
+        let mut layout = MinimisedLayout::default();
+        let mut minimised = pass_input(None, true);
+        layout.lay_out_minimised_at_last_shown_size(&mut minimised);
+        assert_eq!(minimised.screen_rect, None);
+    }
+
+    #[test]
+    fn a_shown_pass_without_area_keeps_the_last_shown_screen() {
+        let mut layout = MinimisedLayout::default();
+        let mut shown = pass_input(Some(screen(1600.0, 900.0)), false);
+        layout.lay_out_minimised_at_last_shown_size(&mut shown);
+        let mut empty = pass_input(Some(screen(0.0, 0.0)), false);
+        layout.lay_out_minimised_at_last_shown_size(&mut empty);
+
+        let mut minimised = pass_input(None, true);
+        layout.lay_out_minimised_at_last_shown_size(&mut minimised);
+        assert_eq!(minimised.screen_rect, Some(screen(1600.0, 900.0)));
+    }
 
     fn reconfigure_always() -> SurfaceStatusHandler {
         Arc::new(|_| SurfaceErrorAction::Reconfigure)

@@ -6,7 +6,7 @@ use rerun::external::{eframe, re_viewer};
 
 use crate::decoupled::DecoupledHeadset;
 use crate::headset::{HeadsetRenderer, HeadsetSink, ViewerHead, with_sink_lent_to_pass};
-use crate::hidden_window::HiddenWindow;
+use crate::hidden_window::{HiddenWindow, MinimisedLayout, is_minimised};
 use crate::memory_budget_log::MemoryBudgetLog;
 use crate::panel_capture::PanelCapture;
 #[cfg(feature = "qaros")]
@@ -117,6 +117,9 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     /// Set where the viewer owns the window's surface status handler: a hidden window keeps
     /// running `ui` for the headset (ADR-0097).
     pub hidden_window: Option<HiddenWindow>,
+    /// A minimised window lays out at its last shown size, so the views keep drawing for the
+    /// headset (ADR-0099).
+    pub minimised_layout: MinimisedLayout,
 }
 
 impl<Viewer> HeadsetViewerApp<Viewer> {
@@ -241,6 +244,12 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
         self.inner.save(storage);
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.minimised_layout
+            .lay_out_minimised_at_last_shown_size(raw_input);
+        self.inner.raw_input_hook(ctx, raw_input);
+    }
+
     /// eframe calls `logic` before every `ui`, and alone while the window is minimised or
     /// occluded (`eframe` 0.37.0 `wgpu_integration.rs`, `if !show_ui`), so the stop is checked
     /// here: a check in `ui` alone never runs for a minimised window. The Rerun app runs its
@@ -301,7 +310,8 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
             std::thread::sleep(scene_delay);
         }
         if let Some(decoupled) = &mut self.decoupled {
-            decoupled.end_viewer_frame();
+            let window_is_minimised = ui.input(|input| is_minimised(input.viewport()));
+            decoupled.end_viewer_frame(window_is_minimised);
         }
         if perf::is_enabled() {
             let poll_wait_micros =
@@ -451,6 +461,7 @@ mod tests {
             summary_printed: false,
             memory_budget_log: None,
             hidden_window: None,
+            minimised_layout: MinimisedLayout::default(),
         };
         TestApp {
             app,
@@ -567,6 +578,47 @@ mod tests {
             "the surface still skips its frames"
         );
         assert!(!hidden_window.wants_headset_frames());
+    }
+
+    /// The root `Ui`'s size in an egui pass whose input went through the app's hook, as
+    /// eframe's `prepare_raw_input` runs it.
+    fn root_size_after_hook(
+        app: &mut HeadsetViewerApp<RecordingViewer>,
+        ctx: &egui::Context,
+        screen_size: egui::Vec2,
+        is_minimised: bool,
+    ) -> egui::Vec2 {
+        let mut raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+            ..Default::default()
+        };
+        raw_input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                minimized: Some(is_minimised),
+                ..Default::default()
+            },
+        );
+        eframe::App::raw_input_hook(app, ctx, &mut raw_input);
+        let mut root_size = egui::Vec2::ZERO;
+        ctx.run_ui(raw_input, |ui| root_size = ui.available_size())
+            .drop_without_applying_deltas();
+        root_size
+    }
+
+    #[test]
+    fn a_minimised_window_runs_its_ui_at_the_last_shown_size() {
+        let mut test = test_app();
+        let ctx = egui::Context::default();
+
+        let shown = root_size_after_hook(&mut test.app, &ctx, egui::vec2(1600.0, 900.0), false);
+        assert_eq!(shown, egui::vec2(1600.0, 900.0));
+
+        let minimised = root_size_after_hook(&mut test.app, &ctx, egui::vec2(160.0, 28.0), true);
+        assert_eq!(minimised, egui::vec2(1600.0, 900.0));
+
+        let restored = root_size_after_hook(&mut test.app, &ctx, egui::vec2(1280.0, 720.0), false);
+        assert_eq!(restored, egui::vec2(1280.0, 720.0));
     }
 
     #[test]
