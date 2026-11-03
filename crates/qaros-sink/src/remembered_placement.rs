@@ -1,12 +1,13 @@
 //! Where each app volume was last placed, remembered across runs (ADR-0085).
 //!
-//! A stopped viewer closes its app volume, and QAROS creates a closed volume afresh from the
-//! request at the next start, so without this a volume a person moved in the glasses would be
-//! back at the requested place every run. The viewer keeps, per common name, the volume pose
-//! and app pose it last followed, and asks for the volume there at the next start while the
-//! startup placement is still the one the volume was moved from. A startup placement that
-//! differs (other `--origin` or `--yaw` flags) wins, and `--reset-placement` forgets the
-//! remembered place.
+//! A stopped viewer hides its app volume, and the next run takes it over with its place
+//! (ADR-0089). A volume closed in the Hub, which the viewer itself never does, is created afresh
+//! by QAROS from the request at the next start, so without this a
+//! volume a person moved in the glasses would be back at the requested place. The viewer keeps,
+//! per common name, the volume pose and app pose it last followed, and asks for the volume there
+//! at the next start while the startup placement is still the one the volume was moved from. A
+//! startup placement that differs (other `--origin` or `--yaw` flags) wins, and
+//! `--reset-placement` forgets the remembered place.
 //!
 //! The app scale is never remembered: it carries the data scale (`--scale`), and a two-hand
 //! spread can leave it at 0.001, which would shrink the next run's data out of sight.
@@ -231,7 +232,8 @@ impl PlacementMemory {
         self.remember_now(current);
     }
 
-    /// Writes `current` unless the file already holds it; at Stop, before the volume closes.
+    /// Writes `current` unless the file already holds it; at Stop, before the volume is hidden
+    /// or closed.
     pub(crate) fn remember_now(&mut self, current: VolumeTransform) {
         let Some(entry) = self.entry_for(current) else {
             return;

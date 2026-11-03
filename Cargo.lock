@@ -6692,6 +6692,7 @@ dependencies = [
  "qaros-stub",
  "serde",
  "serde_json",
+ "sha1",
  "vulkan-device",
  "wgpu",
  "windows-sys 0.61.2",

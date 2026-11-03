@@ -1719,13 +1719,13 @@ mod tests {
                         .unwrap_or_else(|| panic!("no {name} in the call log"))
                 };
                 let sender_destroyed = last_of("render_stream_handle_destroy");
-                let volume_closed = last_of("app_volumes_close_volume");
+                let volume_hidden = last_of("app_volumes_update_used_by_peers");
                 let session_destroyed = last_of("session_handle_destroy");
                 assert!(
-                    sender_destroyed < volume_closed && volume_closed < session_destroyed,
-                    "sender at {sender_destroyed}, volume at {volume_closed}, session at \
-                     {session_destroyed}"
+                    sender_destroyed < volume_hidden && volume_hidden < session_destroyed,
+                    "sender at {sender_destroyed}, volume at {volume_hidden}, session at {session_destroyed}"
                 );
+                assert!(!calls.contains(&"app_volumes_close_volume".to_owned()));
                 assert_eq!(stub.live_handle_count().expect("the handle count"), 0);
                 let _ = std::fs::remove_dir_all(&scratch);
             }

@@ -9,6 +9,8 @@ repo: qaros-rerun
 # ADR-0085: The app volume starts where it was last placed, from a local file per volume name, while the startup placement is the one it was moved from
 
 > Amends ADR-0066: the transform the viewer asks for at start, and falls back to when the live one cannot be read, is the remembered place when there is one, not always the flags' placement. Following the live transform during the run is unchanged. The Stop order (ADR-0079) gains a read of the volume's transform before the volume closes.
+>
+> Amended by ADR-0089: the viewer hides its volume at Stop instead of closing it, so the next run takes it over with the place QAROS holds; the remembered place decides where a volume starts only when QAROS creates it afresh, and `--reset-placement` also sets a taken-over volume to the flags' placement.
 
 ## Context
 

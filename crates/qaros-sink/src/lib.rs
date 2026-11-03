@@ -28,10 +28,15 @@ mod host_timing;
 // gesture getters.
 #[allow(unsafe_code)]
 mod panel_gestures;
+mod panel_ids;
 mod panel_images;
 // The listing that reads each panel's content type first is raw: the content getters.
 #[allow(unsafe_code)]
 mod panel_listing;
+// Whether a held panel was closed by someone else: the per-panel update subscription and the
+// state getter.
+#[allow(unsafe_code)]
+mod panel_state_watch;
 mod panels;
 // The peer category and device name are reachable only through the raw table.
 #[allow(unsafe_code)]
@@ -62,6 +67,13 @@ mod video_sender;
 #[allow(unsafe_code)]
 mod volume_gestures;
 mod volume_transform;
+// The used-by peers are reachable only through the raw table: the listing, the update
+// subscription and the used-by getters.
+#[allow(unsafe_code)]
+mod volume_users;
+// The removal of used-by peers that hides the app volume is reachable only through the raw table.
+#[allow(unsafe_code)]
+mod volume_visibility;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 

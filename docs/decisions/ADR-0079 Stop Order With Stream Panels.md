@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0079: At Stop, stream panels are hidden, then their gestures cancelled and their senders destroyed, all before the session
 
+> Amended by ADR-0089 and ADR-0093: the volume step hides the app volume (every used-by peer removed, the volume left open) within 180 ms, and never closes it.
+
 ## Context
 
 The whole Stop, from the request to the end of the process, must fit in 600 ms (ADR-0035). A video sender must not outlive its session, which crashed applications on builds up to 3137. A gesture subscription's cancel waits for a running callback ([HDR] L2703-2733). The mixer at `c6e052d3` polls every stream panel's receiver whatever the panel's state; once a stream fails for good, the panel is queued for closing and its browser is destroyed ([BC] L249-264, L1074-1140). Every browser that is not closed owns an Ultralight renderer on that build ([BC] L907-985, [BR] L1851-1873).

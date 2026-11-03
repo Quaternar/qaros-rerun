@@ -103,10 +103,12 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                viewer frame old
 
 Placement of Rerun's world in the room (OpenXR: Y up, -Z forward, meters; with --sink qaros
-also the app volume's center, app pose and app scale). With --sink qaros the app volume starts
-where it was last moved to under the same --volume-name, as long as --origin and --yaw are the
-ones it was moved from; the app scale always starts at --scale. The place is kept in
-qaros-rerun.volume-placements.json next to the onboarding id file; --reset-placement forgets it:
+also the app volume's center, app pose and app scale). With --sink qaros a volume an earlier run
+hid at Stop is taken over where it stands, with its app scale. A volume QAROS creates afresh
+starts where it was last moved to under the same --volume-name, as long as --origin and --yaw
+are the ones it was moved from, with the app scale at --scale. The place is kept in
+qaros-rerun.volume-placements.json next to the onboarding id file; --reset-placement forgets it
+and sets either volume to the place the flags ask for:
     --origin X,Y,Z             room position of the world center (default 0,0.5,-1.6)
     --center X,Y,Z             Rerun-world point placed at --origin, the walk circles it (default 0,0,0)
     --scale S                  room meters per Rerun unit (default 1)
@@ -131,9 +133,12 @@ Depth reported to the sink (the QAROS sink converts near and far to the poses' u
                                standing puts them between chest and waist, tilted toward the
                                eyes, the timeline straight ahead and nearest, the views beside
                                it; sitting puts the views 0.8 m away right of the gaze, just
-                               below the eyes, and the timeline 0.5 m ahead. Panels that exist
-                               keep their place; close them in the Hub Display to place them
-                               anew
+                               below the eyes, and the timeline 0.5 m ahead. A panel an earlier
+                               run left keeps its place while its centre is between 0.2 and
+                               1.5 m from the eyes and its size is this run's; otherwise it is
+                               moved there too. A panel closed in the Hub Display opens anew
+    --reset-panels             close every panel this viewer claims, before its claim, so each
+                               is created afresh where new panels open, at this run's size
     --panel-interval-ms MS     capture interval (default 250)
 
 Viewer:
@@ -277,9 +282,12 @@ pub struct QarosOptions {
     pub color_format: ColorFormatKind,
     pub panels_at_stop: PanelsAtStopKind,
     pub panel_posture: PanelPostureKind,
-    /// `--reset-placement`: start the app volume at the requested place and forget the
-    /// remembered one.
+    /// `--reset-placement`: start the app volume at the requested place, a taken-over one too,
+    /// and forget the remembered one.
     pub reset_placement: bool,
+    /// `--reset-panels`: close each panel an earlier run left before claiming it, so it is
+    /// created afresh at this run's placement and size.
+    pub reset_panels: bool,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -434,6 +442,7 @@ impl Default for QarosOptions {
             panels_at_stop: PanelsAtStopKind::Hide,
             panel_posture: PanelPostureKind::Standing,
             reset_placement: false,
+            reset_panels: false,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -627,6 +636,11 @@ impl Options {
                 "--panels needs --sink qaros: the panels are QAROS GUI panels".to_owned(),
             ));
         }
+        if self.qaros.reset_panels && !self.panels {
+            return Err(ParseOutcome::Error(
+                "--reset-panels needs --panels: it closes the viewer's GUI panels".to_owned(),
+            ));
+        }
         if self.qaros.reset_placement && !is_qaros {
             return Err(ParseOutcome::Error(
                 "--reset-placement needs --sink qaros: it places the QAROS app volume".to_owned(),
@@ -724,6 +738,7 @@ impl Options {
                 "--launched-by-qaros" => options.qaros.launched_by_qaros = true,
                 "--local-app" => options.qaros.local_app = true,
                 "--reset-placement" => options.qaros.reset_placement = true,
+                "--reset-panels" => options.qaros.reset_panels = true,
                 "--users" => options.simulated_users = parse_positive(&flag, &value()?)?,
                 "--join-interval" => {
                     options.join_interval_in_viewer_frames = parse_number(&flag, &value()?)?;
@@ -1277,6 +1292,21 @@ mod tests {
         assert!(matches!(
             parse(&["--panels-at-stop", "close"]),
             Err(ParseOutcome::Error(_))
+        ));
+    }
+
+    #[test]
+    fn panels_are_reset_only_when_asked_and_only_with_panels() {
+        assert!(!parse(&[]).unwrap().qaros.reset_panels);
+        assert!(
+            parse(&["--sink", "qaros", "--panels", "--reset-panels"])
+                .unwrap()
+                .qaros
+                .reset_panels
+        );
+        assert!(matches!(
+            parse(&["--sink", "qaros", "--reset-panels"]),
+            Err(ParseOutcome::Error(message)) if message.starts_with("--reset-panels needs --panels")
         ));
     }
 

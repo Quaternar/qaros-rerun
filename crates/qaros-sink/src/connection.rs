@@ -8,10 +8,9 @@ use std::time::Duration;
 use frame_sink::UserId;
 use qaros::PeerId;
 use qaros::{
-    AppVolumeConfig, AppVolumeId, AppVolumeLifetime, AppVolumeSize, BlockingOptions,
-    GraphicsAdapter, Library, LibraryConfig, OnboardMethod, OnboardingId, PeerInfo,
-    PeerPresentation, PendingRenderSender, RenderRequest, RenderSenderConfig, Runtime,
-    RuntimeConfig, Session, StatusCode, Subscription,
+    AppVolumeConfig, AppVolumeId, AppVolumeSize, BlockingOptions, GraphicsAdapter, Library,
+    LibraryConfig, OnboardMethod, OnboardingId, PeerInfo, PeerPresentation, PendingRenderSender,
+    RenderRequest, RenderSenderConfig, Runtime, RuntimeConfig, Session, StatusCode, Subscription,
 };
 use xr_math::{AppPlacement, VolumeTransform};
 
@@ -20,7 +19,11 @@ use crate::remembered_placement::PlacementMemory;
 use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 use crate::volume_gestures::{RunningGestures, VolumeGestureSubscription, VolumeGestures};
-use crate::volume_transform::{FollowedVolume, LiveVolume, read_latest};
+use crate::volume_transform::{
+    FollowedVolume, LiveVolume, StartupCorrection, describe, read_latest,
+};
+use crate::volume_users::{ListedVolume, ReportedUsers, UsedByWatch, list_volume};
+use crate::volume_visibility::{SessionVolume, hide_at_stop, hide_left_over_at_start};
 
 /// When a render sender's creation gives up. A creation finishes once the target answers,
 /// which can take a while for a target that is still starting up. The creation runs in the
@@ -101,7 +104,8 @@ pub struct ConnectOptions {
     /// asks for the volume there at the next start while `placement` is the one it was moved
     /// from (ADR-0085); `None` always asks for `placement`.
     pub volume_placement_file: Option<PathBuf>,
-    /// Ask for `placement` and forget the remembered place (`--reset-placement`).
+    /// Ask for `placement`, set a volume taken over to it, and forget the remembered place
+    /// (`--reset-placement`).
     pub reset_placement: bool,
     pub console_logging: bool,
     /// Sets the process's GPU scheduling priority to high on Windows (a diagnostic).
@@ -115,7 +119,8 @@ pub struct ConnectOptions {
 }
 
 /// The session and what hangs off it. Fields drop in declaration order: the subscriptions are
-/// cancelled before the session is destroyed, and the library goes last.
+/// cancelled before the session is destroyed, apart from the used-by watch, which ends with it,
+/// and the library goes last.
 pub struct QarosConnection {
     /// `None` when the subscription failed; the transform then follows the update poll only.
     volume_gestures: Option<VolumeGestureSubscription>,
@@ -124,6 +129,8 @@ pub struct QarosConnection {
     request_subscription: Subscription,
     peer_subscription: Subscription,
     volume_subscription: Subscription,
+    /// The volume's used-by peers as QAROS last reported them, which Stop removes.
+    reported_users: ReportedUsers,
     requests: Receiver<RenderRequest>,
     peer_updates: Receiver<PeerInfo>,
     wake_viewer: WakeViewer,
@@ -136,6 +143,10 @@ pub struct QarosConnection {
     /// so an entry stays right after its user leaves.
     peers_by_user: RefCell<BTreeMap<UserId, PeerId>>,
     session: Session,
+    /// Dropped after the session, as the binding's own subscriptions are, so its cancel token
+    /// outlives the session. `None` when the subscription failed; Stop then removes the peers
+    /// the listing at connect reported, else the peers the senders streamed to.
+    _used_by_watch: Option<UsedByWatch>,
     _library_dropped_last: LibraryDroppedLast,
 }
 
@@ -163,26 +174,29 @@ impl std::fmt::Debug for QarosConnection {
     }
 }
 
-/// The volume is closed while the session is still alive: a session that just goes away leaves
-/// its volume in the room. The connection drops last, after the sink and the panels that hold
-/// it, so the panels are hidden (not closed) before the volume closes. Its last place is stored
-/// first, since QAROS creates a closed volume afresh at the next start (ADR-0085).
+/// The volume is hidden while the session is still alive: every peer that uses it is removed,
+/// so no headset draws its box or its last content, and QAROS keeps it with its place for the
+/// next run to take over (ADR-0089). The viewer never closes it; a hide that cannot be finished
+/// within its budget leaves it as it is, and the next start finishes it (ADR-0093). The
+/// connection drops last, after the sink and the panels that hold it, so the senders are gone
+/// and the panels hidden before the volume is. Its last place is stored after the hide
+/// (ADR-0085).
 impl Drop for QarosConnection {
     fn drop(&mut self) {
-        enter_teardown_step(TeardownStep::CloseVolume);
+        enter_teardown_step(TeardownStep::HideVolume);
+        let served_peers: Vec<PeerId> = self.peers_by_user.get_mut().values().copied().collect();
+        hide_at_stop(
+            &SessionVolume {
+                session: &self.session,
+                volume: self.volume,
+                reported: &self.reported_users,
+            },
+            &served_peers,
+            &self.volume_config.common_name,
+        );
         self.live_volume
             .get_mut()
             .remember_before_close(&self.session, self.volume);
-        match self.session.app_volumes().close(self.volume) {
-            Ok(()) => log::info!(
-                "qaros: closed app volume {:?}",
-                self.volume_config.common_name
-            ),
-            Err(error) => log::warn!(
-                "qaros: cannot close app volume {:?}: {error}",
-                self.volume_config.common_name
-            ),
-        }
         // The fields drop after this body: the subscriptions, the session, then the library.
         enter_teardown_step(TeardownStep::SessionDestroy);
     }
@@ -333,11 +347,22 @@ pub fn connect(
         .app_volumes()
         .get_or_create(&volume_config)
         .map_err(|error| error.to_string())?;
-    warn_if_volume_closed(&session, volume, &volume_config.common_name);
+    let reported_users = ReportedUsers::default();
+    let listed_volume = list_and_warn_if_closed(&session, volume, &volume_config.common_name);
+    let left_over_peers = seed_reported_users(listed_volume, &reported_users);
+    if options.reset_placement {
+        reset_taken_over_volume(
+            &session,
+            volume,
+            &volume_config.common_name,
+            startup_transform,
+        );
+    }
     // Subscribed before the first read, so no change falls between the two.
     let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
         session.app_volumes().subscribe(forward)
     })?;
+    let used_by_watch = watch_used_by(&session, volume, &reported_users);
     let followed_volume = FollowedVolume::new(
         &volume_config.common_name,
         startup_transform,
@@ -362,6 +387,7 @@ pub fn connect(
         request_subscription,
         peer_subscription,
         volume_subscription,
+        reported_users,
         requests,
         peer_updates,
         wake_viewer,
@@ -376,9 +402,20 @@ pub fn connect(
         unanswered_peers_file: options.unanswered_peers_file.clone(),
         peers_by_user: RefCell::new(BTreeMap::new()),
         session,
+        _used_by_watch: used_by_watch,
         _library_dropped_last: library_dropped_last,
     };
     follow_volume_gestures(&mut connection);
+    if left_over_peers {
+        hide_left_over_at_start(
+            &SessionVolume {
+                session: &connection.session,
+                volume: connection.volume,
+                reported: &connection.reported_users,
+            },
+            &connection.volume_config.common_name,
+        );
+    }
     Ok(connection)
 }
 
@@ -454,22 +491,114 @@ fn follow_volume_gestures(connection: &mut QarosConnection) {
     }
 }
 
-/// A stopped viewer closes its volume, and the header does not say whether `get_or_create`
-/// with the same common name reopens it or hands back the closed one. The latter would leave
-/// this run with nothing on screen, so it is reported where the run's log starts.
-fn warn_if_volume_closed(session: &Session, volume: AppVolumeId, common_name: &str) {
-    match session.app_volumes().list() {
-        Ok(volumes) => {
-            let closed = volumes
-                .iter()
-                .any(|listed| listed.id == volume && listed.lifetime == AppVolumeLifetime::Closed);
-            if closed {
+/// The one listing of the connect, about 4 s: whether QAROS handed back a closed volume, and
+/// which peers use it. A volume closed in the Hub is rebuilt from the init by `get_or_create` in
+/// QAROS's source; the header does not promise it. A closed volume handed back would leave this
+/// run with nothing on screen, so it is reported where the run's log starts.
+fn list_and_warn_if_closed(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+) -> Option<ListedVolume> {
+    match list_volume(session, volume) {
+        Ok(Some(listed)) => {
+            if listed.closed {
                 log::warn!(
-                    "qaros: QAROS handed back app volume {common_name:?} closed by an earlier run; content may not show (use another --volume-name)"
+                    "qaros: QAROS handed back app volume {common_name:?} closed; content may not show (use another --volume-name)"
                 );
             }
+            Some(listed)
         }
-        Err(error) => log::warn!("qaros: cannot list app volumes: {error}"),
+        Ok(None) => None,
+        Err(error) => {
+            log::warn!("qaros: cannot list app volumes: {error}");
+            None
+        }
+    }
+}
+
+/// Records the listed used-by peers as QAROS's first report; whether any are listed, which
+/// before the run's first sender means an earlier run left them.
+fn seed_reported_users(listed: Option<ListedVolume>, reported_users: &ReportedUsers) -> bool {
+    match listed.map(|listed| listed.used_by) {
+        Some(Ok(peers)) => {
+            let left_over = !peers.is_empty();
+            reported_users.report(peers);
+            left_over
+        }
+        Some(Err(error)) => {
+            log::warn!("qaros: cannot read which peers use the app volume: {error}");
+            false
+        }
+        None => false,
+    }
+}
+
+/// Keeps `reported_users` current from the volume's updates; without it Stop removes the peers
+/// last reported, else the served ones.
+fn watch_used_by(
+    session: &Session,
+    volume: AppVolumeId,
+    reported_users: &ReportedUsers,
+) -> Option<UsedByWatch> {
+    UsedByWatch::subscribe(session, volume, reported_users.clone())
+        .inspect_err(|error| {
+            log::warn!(
+                "qaros: cannot follow which peers use the app volume ({error}); Stop removes the peers known at connect or streamed to"
+            );
+        })
+        .ok()
+}
+
+/// `get_or_create` ignores the init for a volume that is open, typically one an earlier run hid
+/// at Stop, and hands it over with the transform QAROS holds, which the run keeps, as a
+/// reattached panel keeps its place (ADR-0089). `--reset-placement` is the exception: it asks
+/// for the flags' placement, so the parts of a taken-over volume that differ from it are set.
+/// A volume this start created already holds it, so no call is made for it.
+fn reset_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_transform: VolumeTransform,
+) {
+    let live = match read_latest(session, volume) {
+        Ok(live) => live,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s transform at start ({error}); it is not reset to the requested placement"
+            );
+            return;
+        }
+    };
+    let correction = StartupCorrection::between(live, startup_transform);
+    if correction.is_empty() {
+        return;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} as QAROS holds it ({}); --reset-placement sets it to the requested placement ({})",
+        describe(live),
+        describe(startup_transform)
+    );
+    let volumes = session.app_volumes();
+    let pose_set = correction
+        .volume_pose
+        .map_or(Ok(()), |pose| volumes.set_pose(volume, to_qaros_pose(pose)));
+    let app_pose_set = correction.app_pose.map_or(Ok(()), |app_pose| {
+        volumes.set_app_pose(volume, to_qaros_pose(app_pose))
+    });
+    let app_scale_set = correction
+        .app_scale
+        .map_or(Ok(()), |app_scale| volumes.set_app_scale(volume, app_scale));
+    for (part, set) in [
+        ("pose", pose_set),
+        ("app pose", app_pose_set),
+        ("app scale", app_scale_set),
+    ] {
+        if let Err(error) = set {
+            log::warn!(
+                "qaros: cannot set app volume {common_name:?}'s {part} at start: {error}; frames map with the transform QAROS holds"
+            );
+        }
     }
 }
 

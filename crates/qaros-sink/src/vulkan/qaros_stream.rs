@@ -115,7 +115,7 @@ struct FrameRecord {
 }
 
 /// Fields drop in declaration order: the senders go before the connection, so when this
-/// stream holds the last reference the app volume is closed after its senders.
+/// stream holds the last reference the app volume is hidden after its senders.
 pub struct QarosVulkanStream {
     device: wgpu::Device,
     raw_queue: RawQueue,

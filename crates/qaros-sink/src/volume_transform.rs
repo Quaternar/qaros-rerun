@@ -127,7 +127,7 @@ impl LiveVolume {
     }
 
     /// Reads the latest transform once more and stores it for the next run; at Stop, before
-    /// the volume closes.
+    /// the volume is hidden or closed.
     pub(crate) fn remember_before_close(&mut self, session: &Session, volume: AppVolumeId) {
         let last = self.refresh(session, volume, true);
         if let Some(memory) = &mut self.placement_memory {
@@ -185,6 +185,34 @@ pub(crate) fn read_latest(
         app_pose: from_qaros_pose(volumes.latest_app_pose(volume)?),
         app_scale: volumes.latest_app_scale(volume)?,
     })
+}
+
+/// The parts of a taken-over volume's transform to set so it stands at the startup transform:
+/// each one that differs. A volume created by this start already holds the startup transform,
+/// so nothing differs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct StartupCorrection {
+    pub(crate) volume_pose: Option<Pose>,
+    pub(crate) app_pose: Option<Pose>,
+    pub(crate) app_scale: Option<f32>,
+}
+
+impl StartupCorrection {
+    #[allow(
+        clippy::float_cmp,
+        reason = "any change of the scale QAROS holds is to be undone"
+    )]
+    pub(crate) fn between(live: VolumeTransform, startup: VolumeTransform) -> Self {
+        Self {
+            volume_pose: (live.volume_pose != startup.volume_pose).then_some(startup.volume_pose),
+            app_pose: (live.app_pose != startup.app_pose).then_some(startup.app_pose),
+            app_scale: (live.app_scale != startup.app_scale).then_some(startup.app_scale),
+        }
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::default()
+    }
 }
 
 pub(crate) fn describe(transform: VolumeTransform) -> String {
@@ -257,5 +285,33 @@ mod tests {
             ..requested()
         });
         assert_eq!(followed.current(), dragged());
+    }
+
+    #[test]
+    fn a_taken_over_volume_is_corrected_only_where_it_differs_from_the_startup_transform() {
+        let unchanged = StartupCorrection::between(requested(), requested());
+        assert!(unchanged.is_empty());
+
+        let spread_only = VolumeTransform {
+            app_scale: 0.001,
+            ..requested()
+        };
+        assert_eq!(
+            StartupCorrection::between(spread_only, requested()),
+            StartupCorrection {
+                volume_pose: None,
+                app_pose: None,
+                app_scale: Some(1.0),
+            }
+        );
+
+        assert_eq!(
+            StartupCorrection::between(dragged(), requested()),
+            StartupCorrection {
+                volume_pose: Some(requested().volume_pose),
+                app_pose: Some(Pose::IDENTITY),
+                app_scale: Some(1.0),
+            }
+        );
     }
 }

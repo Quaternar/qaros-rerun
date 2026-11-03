@@ -219,7 +219,7 @@ The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.
 
 `--origin X,Y,Z` moves the volume, and the data with it, in the room (meters, OpenXR axes: Y up, -Z forward; default `0,0.5,-1.6`). `--yaw DEGREES` turns the data about the room's up axis.
 
-A volume a user grabbed and moved starts where it was left at the next run under the same `--volume-name`, as long as `--origin` and `--yaw` are the ones it was moved from. The viewer keeps its last pose and app pose in `qaros-rerun.volume-placements.json` next to the onboarding id file; the app scale always starts at `--scale`. Other `--origin` or `--yaw` values start at the new place, and `--reset-placement` starts at `--origin` and forgets the kept place (ADR-0085).
+A volume a user grabbed and moved starts where it was left at the next run under the same `--volume-name`. The viewer hides the volume at Stop instead of closing it, so QAROS keeps it, with its pose, app pose and app scale, and the next run takes it over and shows it again (ADR-0089). When QAROS creates the volume afresh (the first run, or one closed in the Hub; the viewer never closes it), it starts at the last pose and app pose the viewer keeps in `qaros-rerun.volume-placements.json` next to the onboarding id file, as long as `--origin` and `--yaw` are the ones it was moved from, with the app scale at `--scale`; other `--origin` or `--yaw` values start at the new place (ADR-0085). `--reset-placement` starts at the flags' place either way and forgets the kept one.
 
 ### What the headset shows
 
@@ -294,7 +294,7 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 
 `--panels` (with `--sink qaros`) turns the panels on. Views are captured every 250 ms (`--panel-interval-ms`), and each view gets a GUI panel once it has been published for 3 s. The panel's content is a video stream the viewer owns (a CPU `QarVideoSender` attached with `QarGuiPanelStreamIdExt`): the viewer copies the view's pixels into the stream, and the mixer draws them as a texture. The timeline panel is drawn by the viewer too, and a finger on it comes back as typed panel gestures (tap, drag with its start and end) that the viewer turns into time commands.
 
-- **Placement.** A panel is 0.45 m wide and as tall as the view's aspect needs, created within reach of the first headset user near the app volume (any viewer near it once no headset streamed for 60 s), tilted to face the eyes. For a standing user (the default) every top edge is at least 0.30 m below the eyes: the timeline straight ahead and nearest, the views 0.45 m away beside it, alternately right and left. `--panel-posture sitting` places the views 0.8 m from the head, to the right of the gaze, top edges just below the eyes, so they clear a desk. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left; close them in the Hub Display for fresh placement.
+- **Placement.** A panel is 0.45 m wide and as tall as the view's aspect needs, created within reach of the first headset user near the app volume (any viewer near it once no headset streamed for 60 s), tilted to face the eyes. For a standing user (the default) every top edge is at least 0.30 m below the eyes: the timeline straight ahead and nearest, the views 0.45 m away beside it, alternately right and left. `--panel-posture sitting` places the views 0.8 m from the head, to the right of the gaze, top edges just below the eyes, so they clear a desk. The Hub keeps a panel's place across runs, so a restart finds the panels where they were left, as long as each is within 1.5 m of the eyes, no nearer than 0.2 m, and at the run's size; a panel left elsewhere (another headset's tracking origin, another part of the room) is moved back within reach. Close a panel in the Hub Display, or start once with `--reset-panels`, for fresh placement.
 - **Across runs.** Panels have names that stay the same on every run (`<view>.stream.<volume>.rerun`, `timeline.panel-stream.<volume>.rerun`). At Stop the viewer hides its panels instead of closing them (`--panels-at-stop keep` leaves them showing), and the next run reattaches to them with its new streams.
 - **QAROS build.** Panels need QAROS 0.9.0-dev.3177 or later, the first build whose mixer keeps working when a panel's stream restarts. The viewer logs a warning on an older runtime.
 - **Cost.** Each capture reads the whole viewer UI back from the GPU. A longer `--panel-interval-ms` gives the headset more frames.
@@ -331,7 +331,8 @@ By default the eyes are drawn on a render thread of their own from the last fini
 | The viewer waits at start with `--local-app` | The Hub asks a person to allow this executable | Allow it in the Hub; every viewer executable the Hub has not allowed before is asked about |
 | The library does not load, or loads with missing symbols listed | `QAROS_DLL` points at an older runtime, or the binding's default lookup (already loaded, beside the executable, `QAROS_RUNTIME_DIR`, the installed QAROS from `HKLM\SOFTWARE\Quaternar\QAROS`, then `PATH`) finds none or an older one | Point `QAROS_DLL` or `--qaros-library` at the `qar-streaming-c.dll` of a current runtime ([Where the QAROS library comes from](#where-the-qaros-library-comes-from)) |
 | Connected, but no `target ... found` line | No running target app in the session | Open the visualizer or start the player app on a headset; check the `qaros: peer ...` lines in the log |
-| `QAROS handed back app volume "rerun" closed by an earlier run; content may not show` | QAROS returned a volume a previous run closed | Start with another `--volume-name` |
+| `QAROS handed back app volume "rerun" closed; content may not show` | QAROS returned a volume closed in the Hub | Start with another `--volume-name` |
+| The app volume's box stays in the glasses after Stop, with `app volume "rerun" may still show in ...` in the log | The Hub did not confirm the hide within the stop budget | Start the viewer again under the same `--volume-name`: it hides the volume from the peers still listed before its senders start |
 | Nothing in the headset, the log streams | Data outside the app volume, no 3D view, or left-handed coordinates | See [Place your data in the app volume](#place-your-data-in-the-app-volume) and [What the headset shows](#what-the-headset-shows) |
 | An SDK on another machine cannot connect | Firewall, or the wrong address | Allow TCP 9876 for `qaros-rerun.exe` ([What you need](#what-you-need)); connect to the Hub machine's LAN address |
 | `--decoupled-render with the QAROS Vulkan sink in a window needs a second queue ...` or `the decoupled render loop (the default) with the QAROS Vulkan sink in a window needs a second queue ...` | The session's GPU has one queue in its graphics queue family | Add `--inline-render`, or `--headless WxH`, or use `--qaros-graphics cpu` |
@@ -376,6 +377,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |
 | `--panels-at-stop hide\|keep` | `hide` | What the panels become at Stop; they are never closed |
+| `--reset-panels` | off | With `--panels`: close each panel this viewer claims before its claim, so it is created afresh where new panels open, at the run's size |
 
 **Placement and depth**
 
@@ -385,7 +387,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--center X,Y,Z` | `0,0,0` | Point of the data (Rerun units) placed at `--origin` |
 | `--scale S` | 1 | Room meters per Rerun unit; must be positive |
 | `--yaw DEGREES` | 0 | Turn the data about the room's up axis |
-| `--reset-placement` | off | Start the app volume at `--origin` and `--yaw` and forget where it was last moved to |
+| `--reset-placement` | off | Start the app volume at `--origin`, `--yaw` and `--scale`, also one an earlier run hid and this run takes over, and forget where it was last moved to |
 | `--up CODE` | the view's own | Override the view coordinates, for example `RFU` |
 | `--near METERS` | 0.05 | Near plane in room meters |
 | `--far METERS` | 20 | Finite far plane in room meters |

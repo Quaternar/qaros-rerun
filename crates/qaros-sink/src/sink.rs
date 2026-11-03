@@ -182,7 +182,7 @@ struct UserStream {
 /// open frame.
 ///
 /// Fields drop in declaration order: the streams go before the connection, so when this sink
-/// holds the last reference the app volume is closed after its senders.
+/// holds the last reference the app volume is hidden after its senders.
 pub struct QarosSink {
     options: QarosSinkOptions,
     users: PeerUsers,

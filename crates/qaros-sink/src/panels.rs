@@ -10,11 +10,12 @@ use xr_math::Pose;
 
 use crate::connection::{QarosConnection, from_qaros_pose, to_qaros_pose};
 use crate::panel_gestures::PanelGestures;
+use crate::panel_ids::panel_id_of_common_name;
 use crate::panel_images::{PanelImages, TIMELINE_IMAGE_KEY};
-use crate::panel_listing::{ListedPanel, list_panels};
+use crate::panel_listing::{ListedPanel, PanelContent, list_panels};
 use crate::peer_devices::PeerDevice;
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
-use crate::stream_panels::{QarosStreamBackend, StreamPanels};
+use crate::stream_panels::{PanelPlace, QarosStreamBackend, StreamPanels};
 
 /// A 2D view published for its panel: its name and current size in pixels. The name is the
 /// same on every run (no `.`, unique within a run): it names the view's QAROS panel, so a
@@ -93,6 +94,26 @@ const LISTING_REUSE: Duration = Duration::from_secs(30);
 const TIMELINE_FORWARD_METERS: f32 = 0.5;
 /// How far below the user's eyes the timeline panel's centre sits.
 const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
+/// A held panel whose centre is farther than this from the eyes of the head that places panels
+/// is moved to where this run places new panels (ADR-0090). It is one step (about 0.7 m)
+/// beyond the outstretched reach of an arm measured from the eyes (ANSUR II, 0.61 m for the
+/// average man, ADR-0083), and more than twice the 0.65 m at which ADR-0083 places a panel: a
+/// panel a user moved within the space they work in stays; one held in another part of the
+/// room, or placed in another tracking origin (another headset, or a headset started at another
+/// spot), is moved.
+const HELD_PLACE_FARTHEST_METERS: f32 = 1.5;
+/// A held panel whose centre is nearer than this to the eyes is moved too: it sits at the head,
+/// in front of the eyes or behind them, and cannot be read or grabbed.
+const HELD_PLACE_NEAREST_METERS: f32 = 0.2;
+/// A held panel whose width or height differs from this run's by more than this is moved and
+/// resized: its place was chosen for another frame (ADR-0087), and a standing view hangs from
+/// its top edge by its height (ADR-0083).
+const HELD_SIZE_TOLERANCE_METERS: f32 = 0.005;
+/// `--reset-panels`: how long after closing a panel the next listing is made, to see the close.
+const RESET_CONFIRM_DELAY: Duration = Duration::from_secs(1);
+/// `--reset-panels`: listings after the close in which a panel may still be listed open before
+/// it is claimed as it is.
+const RESET_CONFIRM_LISTINGS: u32 = 3;
 
 /// What the viewer's panels become when [`QarosPanels`] drops at Stop. Neither closes them:
 /// they stay in the session for the next run to claim by common name.
@@ -134,17 +155,21 @@ impl PanelPosture {
 /// for the run. Panels go by common names `<view>.stream.<volume>.rerun` and
 /// `timeline.panel-stream.<volume>.rerun`.
 ///
-/// The Hub owns a panel's place once it exists: it keeps the pose the panel was created with,
-/// or wherever a user moved it, across runs, and ignores later pose calls, so users find their
-/// panels where they left them. This type therefore never sets the pose of a panel that
-/// exists. A new panel is created at its final place, within reach of the first headset user
-/// whose head is near the app volume, or of any viewer near it once none came for
-/// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]); until such a head is known, views without
-/// a panel wait. A panel an earlier run left is reattached by its common name
-/// as it is. A panel closed in the Hub Display is claimed again by its common name, never
-/// replaced under a new one (ADR-0075).
-/// When this value drops the panels stay in the session, hidden or kept as [`PanelsAtStop`]
-/// says.
+/// The Hub keeps a panel's place across runs and Hub sessions: the pose it was created with, or
+/// wherever a user moved it. Every claim waits for a head to place panels by: the first headset
+/// user whose head is near the app volume, or any viewer near it once none came for
+/// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]). A new panel is created at its place within
+/// reach of that head. A panel an earlier run left is reattached by its common name and stays
+/// where the Hub holds it while that place is of use to the user: within
+/// [`HELD_PLACE_FARTHEST_METERS`] of the eyes, no nearer than [`HELD_PLACE_NEAREST_METERS`], at
+/// this run's size. Otherwise it is moved to where a new panel would open (ADR-0090). A panel
+/// listed `Closed` is claimed again by its common name, never replaced under a new one
+/// (ADR-0075): QAROS creates it afresh, and the claim shows it at its held place by the same
+/// rule (ADR-0091). Nothing else in a run closes a panel: only with
+/// [`QarosPanels::with_reset_panels`] does the run close every panel it claims first, which then
+/// opens where new panels open. A panel closed while held is claimed again once a target's head
+/// streams after the close. When this value drops the panels stay in the session, hidden or kept
+/// as [`PanelsAtStop`] says, except those closed while held, which the next run reopens.
 pub struct QarosPanels {
     connection: Rc<QarosConnection>,
     streams: StreamPanels<QarosStreamBackend>,
@@ -177,8 +202,104 @@ pub struct QarosPanels {
     next_listing: Option<Instant>,
     /// The last listing, kept up to date with the panels this run hid, and when it was made.
     listing: Option<(Vec<ListedPanel>, Instant)>,
-    /// Listings made this run, for the log.
+    /// Listings made this run, for the log and to tell a listing made after a reset's close.
     listings_made: u32,
+    /// `Some` with `--reset-panels`.
+    reset: Option<PanelReset>,
+}
+
+/// What a claim does about `--reset-panels` for one panel.
+#[derive(Debug, PartialEq, Eq)]
+enum ResetStep {
+    Claim,
+    WaitForTheClose,
+}
+
+/// `--reset-panels`: each panel an earlier run left is closed before its claim, and its claim
+/// waits for a listing made after the close. Once one shows the panel closed, or absent, the
+/// claim creates it afresh. A panel still listed open after [`RESET_CONFIRM_LISTINGS`] such
+/// listings, or one whose close fails, is claimed as it is, with the place check every claim
+/// makes.
+#[derive(Debug, Default)]
+struct PanelReset {
+    /// Panel names the reset is over for: closed and seen closed, found absent, or given up on.
+    done: BTreeSet<String>,
+    /// Panel names closed by the reset, with the count of listings made before the close.
+    closes: BTreeMap<String, u32>,
+    /// When the listing that is to show the closes is due.
+    listing_due: Option<Instant>,
+}
+
+impl PanelReset {
+    /// `held` is the id of the open stream panel listed for `name`, if any; `listings_made`
+    /// counts the listings made so far; `close` closes a panel.
+    fn step(
+        &mut self,
+        name: &str,
+        held: Option<GuiPanelId>,
+        listings_made: u32,
+        now: Instant,
+        close: impl FnOnce(GuiPanelId) -> Result<(), String>,
+    ) -> ResetStep {
+        if self.done.contains(name) {
+            return ResetStep::Claim;
+        }
+        let Some(&listings_at_close) = self.closes.get(name) else {
+            let Some(held) = held else {
+                self.done.insert(name.to_owned());
+                return ResetStep::Claim;
+            };
+            return match close(held) {
+                Ok(()) => {
+                    log::info!(
+                        "qaros: --reset-panels: closed panel {held} of {name}; it is created \
+                         afresh once a listing shows it closed"
+                    );
+                    self.closes.insert(name.to_owned(), listings_made);
+                    self.listing_due = Some(now + RESET_CONFIRM_DELAY);
+                    ResetStep::WaitForTheClose
+                }
+                Err(error) => {
+                    log::warn!(
+                        "qaros: --reset-panels: cannot close panel {held} of {name}: {error}; it \
+                         is claimed as it is"
+                    );
+                    self.done.insert(name.to_owned());
+                    ResetStep::Claim
+                }
+            };
+        };
+        let listings_since_close = listings_made.saturating_sub(listings_at_close);
+        if listings_since_close == 0 {
+            return ResetStep::WaitForTheClose;
+        }
+        if held.is_none() {
+            log::info!("qaros: --reset-panels: the panel of {name} is listed closed; creating it");
+            self.done.insert(name.to_owned());
+            return ResetStep::Claim;
+        }
+        if listings_since_close >= RESET_CONFIRM_LISTINGS {
+            log::warn!(
+                "qaros: --reset-panels: the panel of {name} is still listed open \
+                 {listings_since_close} listings after its close; it is claimed as it is"
+            );
+            self.done.insert(name.to_owned());
+            return ResetStep::Claim;
+        }
+        self.listing_due = Some(now + RESET_CONFIRM_DELAY);
+        ResetStep::WaitForTheClose
+    }
+
+    /// Whether the claims wait for the listing that is to show the closes (`Some(true)`), make
+    /// it now (`Some(false)`), or have none to wait for (`None`).
+    fn listing_wait(&mut self, now: Instant) -> Option<bool> {
+        let due = self.listing_due?;
+        if now < due {
+            return Some(true);
+        }
+        self.listing_due = None;
+        Some(false)
+    }
 }
 
 /// A panel this run opens: one per settled view, and the timeline panel.
@@ -223,6 +344,7 @@ impl QarosPanels {
             next_listing: None,
             listing: None,
             listings_made: 0,
+            reset: None,
         }
     }
 
@@ -256,6 +378,17 @@ impl QarosPanels {
         self
     }
 
+    /// `--reset-panels`: before claiming a panel an earlier run left, the run closes it
+    /// (`qar_gui_panels_close_panel`, `QAR_GUI_PANEL_STATE_CLOSED`) and waits for a listing that
+    /// shows it closed, so that the claim creates it afresh where this run places new panels, at
+    /// this run's size. The close comes at the panel's first claim, before the panel shows
+    /// anything this run: the run knows a view's common name only once the view settles.
+    #[must_use]
+    pub fn with_reset_panels(mut self, reset_panels: bool) -> Self {
+        self.reset = reset_panels.then(PanelReset::default);
+        self
+    }
+
     pub fn panels(&self) -> &BTreeMap<String, GuiPanelId> {
         &self.panels
     }
@@ -275,8 +408,8 @@ impl QarosPanels {
     /// that the held panels are still listed and not `Closed`; no listing is made for that
     /// check alone, because a listing blocks the QAROS thread, and with it the eye frames, for
     /// seconds on 3177. A panel
-    /// closed while held stays closed until the next run (ADR-0075): it is still counted as
-    /// held, so it is not claimed again.
+    /// closed while held is released and claimed again once a target's head streams after the
+    /// close, with a new listing (ADR-0091).
     ///
     /// Held view panels follow the layout (ADR-0082): one whose view is no longer among
     /// `published_view_names`, because another recording became active or the blueprint
@@ -284,6 +417,7 @@ impl QarosPanels {
     pub fn sync(&mut self, views: &[PanelView], published_view_names: &[String]) {
         let now = Instant::now();
         self.streams.maintain(&self.images, now, stream_panel_size);
+        self.release_panels_to_reopen();
         let settled_view_names: Vec<String> = views.iter().map(|view| view.name.clone()).collect();
         self.streams
             .follow_published_views(published_view_names, &settled_view_names);
@@ -305,19 +439,37 @@ impl QarosPanels {
         let mut opened_any = false;
         for panel in wanted {
             let name = panel.name().to_owned();
-            let exists = self.existing_panel(&listed, &name).is_some();
-            if !exists && self.reach_anchor.is_none() {
+            let Some(anchor) = self.reach_anchor else {
                 if self.waiting_logged.insert(name.clone()) {
                     log::info!(
-                        "qaros: the panel for {name} opens once a viewer near the app volume streams"
+                        "qaros: the panel for {name} opens once a viewer near the app volume \
+                         streams: a new panel opens within reach of that viewer, and a held one \
+                         is checked against it"
                     );
                 }
                 continue;
+            };
+            let held = self.existing_panel(&listed, &name).cloned();
+            let held_open = held
+                .as_ref()
+                .filter(|held| held.state != GuiPanelState::Closed);
+            if self.reset_step(&name, held_open, now) == ResetStep::WaitForTheClose {
+                continue;
             }
             let slot = self.reach_slots_used;
-            match self.open_stream_panel(&panel, slot, &listed) {
+            let config = self.panel_config(&panel, slot);
+            let place = if held_open.is_none() && self.closed_by_reset(&name) {
+                PanelPlace::MovedBecause(
+                    "--reset-panels closed it to create it afresh where new panels open".to_owned(),
+                )
+            } else {
+                place_for_claim(held.as_ref(), anchor.position, config.size)
+            };
+            let takes_a_slot = matches!(panel, WantedPanel::View(_))
+                && (held.is_none() || matches!(place, PanelPlace::MovedBecause(_)));
+            match self.open_stream_panel(&panel, &config, &listed, &place) {
                 Ok(id) => {
-                    if !exists && matches!(panel, WantedPanel::View(_)) {
+                    if takes_a_slot {
                         self.reach_slots_used += 1;
                     }
                     self.panels.insert(name, id);
@@ -344,6 +496,15 @@ impl QarosPanels {
     /// [`LISTING_REUSE`], else a new one, which also checks the held panels (#344). `None`
     /// while the panels cannot be listed.
     fn listing_for_claims(&mut self, now: Instant) -> Option<Vec<ListedPanel>> {
+        match self
+            .reset
+            .as_mut()
+            .and_then(|reset| reset.listing_wait(now))
+        {
+            Some(true) => return None,
+            Some(false) => self.listing = None,
+            None => {}
+        }
         if let Some((listed, made)) = &self.listing
             && now.saturating_duration_since(*made) < LISTING_REUSE
         {
@@ -357,7 +518,7 @@ impl QarosPanels {
             Ok(listed) => {
                 self.listing_failures = 0;
                 self.next_listing = None;
-                self.streams.note_listing(&listed);
+                self.streams.note_listing(&listed, now);
                 self.listing = Some((listed.clone(), now));
                 Some(listed)
             }
@@ -371,6 +532,42 @@ impl QarosPanels {
                 None
             }
         }
+    }
+
+    /// Forgets the claims of the panels closed while held that are due to be reopened, so this
+    /// sync claims them again with a new listing, which tells whether each is still closed and
+    /// where it is held (ADR-0091).
+    fn release_panels_to_reopen(&mut self) {
+        let reopen = self.streams.panels_to_reopen();
+        if reopen.is_empty() {
+            return;
+        }
+        self.panels.retain(|_, panel| !reopen.contains(panel));
+        self.listing = None;
+    }
+
+    /// Whether `--reset-panels` closed the panel of `name` this run.
+    fn closed_by_reset(&self, name: &str) -> bool {
+        self.reset
+            .as_ref()
+            .is_some_and(|reset| reset.closes.contains_key(name))
+    }
+
+    /// `--reset-panels` for the panel of `name`, which `held` is as listed (open), if listed.
+    /// Without the flag every panel is claimed at once.
+    fn reset_step(&mut self, name: &str, held: Option<&ListedPanel>, now: Instant) -> ResetStep {
+        let Some(reset) = &mut self.reset else {
+            return ResetStep::Claim;
+        };
+        let held_stream_panel = held.filter(|held| !matches!(held.content, PanelContent::Uri(_)));
+        let streams = &self.streams;
+        reset.step(
+            name,
+            held_stream_panel.map(|held| held.id),
+            self.listings_made,
+            now,
+            |panel| streams.close_for_reset(panel),
+        )
     }
 
     /// The timeline panel takes its sender's size from its first image, so it waits until
@@ -389,10 +586,10 @@ impl QarosPanels {
     fn open_stream_panel(
         &mut self,
         wanted: &WantedPanel<'_>,
-        slot: usize,
+        config: &GuiPanelConfig,
         listed: &[ListedPanel],
+        place: &PanelPlace,
     ) -> Result<GuiPanelId, String> {
-        let config = self.panel_config(wanted, slot);
         let (image_key, pixels, gestures) = match wanted {
             WantedPanel::View(view) => (
                 view.name.as_str(),
@@ -412,7 +609,7 @@ impl QarosPanels {
             }
         };
         self.streams
-            .claim(image_key, &config, listed, pixels, gestures)
+            .claim(image_key, config, listed, pixels, gestures, place)
     }
 
     /// Takes `head`, the head of the streaming `user` in room space at `now`, as the place new
@@ -423,6 +620,7 @@ impl QarosPanels {
     /// panels then open within reach of it, at the next [`QarosPanels::sync`]. Existing panels
     /// are not touched: the Hub keeps their place.
     pub fn consider_head(&mut self, user: UserId, head: Pose, now: Instant) {
+        self.streams.note_target_head(now);
         if self.reach_anchor.is_some() {
             return;
         }
@@ -520,16 +718,20 @@ impl QarosPanels {
         }
     }
 
-    /// The open panel of `name` in this app volume, if the session has one.
+    /// The panel of `name` in this app volume, if the session lists one, `Closed` included: found
+    /// by the id QAROS derives from the common name, since a panel the Hub carried into a new
+    /// session is listed with an empty display name, or by its display name. A closed panel's
+    /// held place decides where its claim reopens it (ADR-0091).
     fn existing_panel<'listed>(
         &self,
         listed: &'listed [ListedPanel],
         name: &str,
     ) -> Option<&'listed ListedPanel> {
         let common_name = self.common_name(name);
+        let id = panel_id_of_common_name(&common_name);
         listed
             .iter()
-            .find(|panel| panel.display_name == common_name && panel.state != GuiPanelState::Closed)
+            .find(|panel| panel.id == id || panel.display_name == common_name)
     }
 
     fn common_name_suffix(&self) -> String {
@@ -768,6 +970,82 @@ fn describe_viewer(user: UserId, peer: Option<PeerId>, lookup: &DeviceLookup) ->
 fn is_near_the_volume(head_position: Vec3, volume_centre: Vec3) -> bool {
     let offset = head_position - volume_centre;
     Vec3::new(offset.x, 0.0, offset.z).length() <= REACH_ANCHOR_MAX_DISTANCE_METERS
+}
+
+/// Where a claim leaves the panel `held` is, as listed, for the head whose eyes are at `eyes`
+/// and at `wanted_size`: a new panel (`None`) opens at its config's pose, a held one stays
+/// unless [`unusable_held_place`] has a reason to move it.
+fn place_for_claim(
+    held: Option<&ListedPanel>,
+    eyes: Vec3,
+    wanted_size: GuiPanelSize,
+) -> PanelPlace {
+    let Some(held) = held else {
+        return PanelPlace::AsHeld;
+    };
+    if let Some(reason) =
+        unusable_held_place(from_qaros_pose(held.pose), held.size, eyes, wanted_size)
+    {
+        return PanelPlace::MovedBecause(reason);
+    }
+    log::info!(
+        "qaros: panel {} stays where it is held: {}",
+        held.id,
+        describe_held_place(from_qaros_pose(held.pose), held.size, eyes)
+    );
+    PanelPlace::AsHeld
+}
+
+/// Why a panel held at `held_pose` (its top edge's midpoint) and `held_size` is no use to the
+/// user whose eyes are at `eyes`, or `None` when it is: its centre farther from the eyes than
+/// [`HELD_PLACE_FARTHEST_METERS`] or nearer than [`HELD_PLACE_NEAREST_METERS`], or its width or
+/// height more than [`HELD_SIZE_TOLERANCE_METERS`] off `wanted_size`.
+fn unusable_held_place(
+    held_pose: Pose,
+    held_size: GuiPanelSize,
+    eyes: Vec3,
+    wanted_size: GuiPanelSize,
+) -> Option<String> {
+    let distance = panel_centre(held_pose, held_size.height).distance(eyes);
+    let held_place = describe_held_place(held_pose, held_size, eyes);
+    if distance > HELD_PLACE_FARTHEST_METERS {
+        return Some(format!(
+            "{held_place}, farther than {HELD_PLACE_FARTHEST_METERS} m from the eyes of the head \
+             that places panels"
+        ));
+    }
+    if distance < HELD_PLACE_NEAREST_METERS {
+        return Some(format!(
+            "{held_place}, nearer than {HELD_PLACE_NEAREST_METERS} m to the eyes of the head that \
+             places panels"
+        ));
+    }
+    let size_differs = (held_size.width - wanted_size.width).abs() > HELD_SIZE_TOLERANCE_METERS
+        || (held_size.height - wanted_size.height).abs() > HELD_SIZE_TOLERANCE_METERS;
+    size_differs.then(|| {
+        format!(
+            "{held_place}, sized for another frame than this run's {:.3}x{:.3} m",
+            wanted_size.width, wanted_size.height
+        )
+    })
+}
+
+/// The centre of a panel `height` tall whose top edge's midpoint is at `pose`: the surface hangs
+/// below its pose along panel -Y (header `QarGuiPanelSize`).
+fn panel_centre(pose: Pose, height: f32) -> Vec3 {
+    pose.position + pose.orientation * Vec3::new(0.0, -height * 0.5, 0.0)
+}
+
+/// For logs: "held at [x, y, z] with its top edge, 0.450x0.287 m, its centre 0.65 m from the
+/// eyes".
+fn describe_held_place(held_pose: Pose, held_size: GuiPanelSize, eyes: Vec3) -> String {
+    format!(
+        "held at {} with its top edge, {:.3}x{:.3} m, its centre {:.2} m from the eyes",
+        held_pose.position,
+        held_size.width,
+        held_size.height,
+        panel_centre(held_pose, held_size.height).distance(eyes)
+    )
 }
 
 /// `head` turned about room +Y only: its forward projected on the floor plane, so a tilted
@@ -1561,5 +1839,200 @@ mod tests {
                 .transform_vector(Vec3::NEG_Z)
                 .abs_diff_eq(Vec3::NEG_Z, EPSILON)
         );
+    }
+
+    /// The METALENSE head that placed panels on 2026-11-02 at 16:11:53 UTC, and the size the
+    /// camera view asked for on its 960x472 frame.
+    fn metalense_head() -> Pose {
+        Pose::new(Quat::IDENTITY, Vec3::new(-0.151, -0.514, 0.493))
+    }
+
+    fn camera_frame_size() -> GuiPanelSize {
+        stream_panel_size(960, 472)
+    }
+
+    #[test]
+    fn a_panel_placed_for_this_head_or_moved_within_a_step_stays_where_it_is_held() {
+        let head = metalense_head();
+        let size = camera_frame_size();
+        let placed_for_this_head = standing_view_panel_pose(head, 0, size.height);
+        assert_eq!(
+            unusable_held_place(placed_for_this_head, size, head.position, size),
+            None
+        );
+        let moved_by_the_user = Pose::new(
+            placed_for_this_head.orientation,
+            placed_for_this_head.position + Vec3::new(0.6, 0.3, -0.5),
+        );
+        let distance = panel_centre(moved_by_the_user, size.height).distance(head.position);
+        assert!(
+            (1.0..HELD_PLACE_FARTHEST_METERS).contains(&distance),
+            "{distance}"
+        );
+        assert_eq!(
+            unusable_held_place(moved_by_the_user, size, head.position, size),
+            None
+        );
+    }
+
+    #[test]
+    fn a_panel_held_beyond_a_step_and_a_reach_or_at_the_head_is_moved() {
+        let head = metalense_head();
+        let size = camera_frame_size();
+        // Placed at 11:02 UTC by a METALENSE head at (-1.77, 0.42, 0.33) in another tracking
+        // origin: 1.7 m from today's head.
+        let placed_in_another_origin = panel_pose_within_reach(
+            gravity_level(Pose::new(Quat::IDENTITY, Vec3::new(-1.774, 0.417, 0.334))),
+            0,
+        );
+        let far = unusable_held_place(placed_in_another_origin, size, head.position, size)
+            .expect("moved");
+        assert!(far.contains("farther than 1.5 m"), "{far}");
+
+        let at_the_head = Pose::new(Quat::IDENTITY, head.position + Vec3::new(0.0, 0.1, -0.05));
+        let near = unusable_held_place(at_the_head, size, head.position, size).expect("moved");
+        assert!(near.contains("nearer than 0.2 m"), "{near}");
+    }
+
+    #[test]
+    fn a_panel_held_at_another_frame_s_size_is_moved_and_resized() {
+        let head = metalense_head();
+        let wanted = camera_frame_size();
+        let held_size = stream_panel_size(1016, 665);
+        let placed = standing_view_panel_pose(head, 0, held_size.height);
+        let reason = unusable_held_place(placed, held_size, head.position, wanted).expect("moved");
+        assert!(reason.contains("0.450x0.287 m"), "{reason}");
+        let within_tolerance = GuiPanelSize {
+            height: wanted.height + 0.004,
+            ..wanted
+        };
+        assert_eq!(
+            unusable_held_place(placed, within_tolerance, head.position, wanted),
+            None
+        );
+    }
+
+    #[test]
+    fn a_claim_moves_only_a_held_panel_whose_place_is_of_no_use() {
+        let head = metalense_head();
+        let size = camera_frame_size();
+        assert_eq!(
+            place_for_claim(None, head.position, size),
+            PanelPlace::AsHeld,
+            "a new panel opens at its config's pose"
+        );
+        let mut earlier_panel = listed(1, "", GuiPanelState::Hidden, true);
+        earlier_panel.size = size;
+        earlier_panel.pose = to_qaros_pose(standing_view_panel_pose(head, 0, size.height));
+        assert_eq!(
+            place_for_claim(Some(&earlier_panel), head.position, size),
+            PanelPlace::AsHeld
+        );
+        earlier_panel.pose = to_qaros_pose(Pose::from_translation(Vec3::new(3.0, 0.0, -4.0)));
+        assert!(matches!(
+            place_for_claim(Some(&earlier_panel), head.position, size),
+            PanelPlace::MovedBecause(_)
+        ));
+    }
+
+    #[test]
+    fn the_camera_frame_keeps_its_aspect_on_the_panel_s_content_area() {
+        let size = camera_frame_size();
+        assert!((size.width - 0.45).abs() < 1e-6);
+        assert!((size.height - 0.287).abs() < 0.0005, "{}", size.height);
+        let content_width = size.width - STREAM_PANEL_HORIZONTAL_CHROME_METERS;
+        let content_height = size.height - STREAM_PANEL_VERTICAL_CHROME_METERS;
+        let frame_aspect = 960.0 / 472.0;
+        assert!(
+            (content_width / content_height - frame_aspect).abs() < 1e-3,
+            "{} against {frame_aspect}",
+            content_width / content_height
+        );
+    }
+
+    const CAMERA_PANEL: GuiPanelId = GuiPanelId([0x64; 16]);
+
+    #[test]
+    fn a_reset_closes_a_held_panel_then_claims_once_a_later_listing_shows_it_closed() {
+        let mut reset = PanelReset::default();
+        let start = Instant::now();
+        let mut closed = Vec::new();
+        let step = reset.step("camera", Some(CAMERA_PANEL), 1, start, |panel| {
+            closed.push(panel);
+            Ok(())
+        });
+        assert_eq!(step, ResetStep::WaitForTheClose);
+        assert_eq!(closed, [CAMERA_PANEL]);
+        assert_eq!(reset.listing_wait(start), Some(true));
+
+        let unexpected_close = |_| -> Result<(), String> { panic!("closed twice") };
+        assert_eq!(
+            reset.step("camera", Some(CAMERA_PANEL), 1, start, unexpected_close),
+            ResetStep::WaitForTheClose,
+            "the listing made before the close does not count"
+        );
+        assert_eq!(reset.listing_wait(start + RESET_CONFIRM_DELAY), Some(false));
+        assert_eq!(reset.listing_wait(start + RESET_CONFIRM_DELAY), None);
+        assert_eq!(
+            reset.step(
+                "camera",
+                None,
+                2,
+                start + RESET_CONFIRM_DELAY,
+                unexpected_close
+            ),
+            ResetStep::Claim,
+            "listed closed after the close: created afresh"
+        );
+        assert_eq!(
+            reset.step("camera", Some(CAMERA_PANEL), 3, start, unexpected_close),
+            ResetStep::Claim,
+            "once per run"
+        );
+    }
+
+    #[test]
+    fn a_reset_claims_an_absent_panel_at_once_and_gives_up_on_one_that_stays_open() {
+        let mut reset = PanelReset::default();
+        let now = Instant::now();
+        let unexpected_close = |_| -> Result<(), String> { panic!("nothing to close") };
+        assert_eq!(
+            reset.step("plot", None, 1, now, unexpected_close),
+            ResetStep::Claim
+        );
+
+        reset.step("camera", Some(CAMERA_PANEL), 1, now, |_| Ok(()));
+        for listings_made in 2..=3 {
+            assert_eq!(
+                reset.step(
+                    "camera",
+                    Some(CAMERA_PANEL),
+                    listings_made,
+                    now,
+                    unexpected_close
+                ),
+                ResetStep::WaitForTheClose
+            );
+        }
+        assert_eq!(
+            reset.step(
+                "camera",
+                Some(CAMERA_PANEL),
+                1 + RESET_CONFIRM_LISTINGS,
+                now,
+                unexpected_close
+            ),
+            ResetStep::Claim
+        );
+    }
+
+    #[test]
+    fn a_reset_whose_close_fails_claims_the_panel_as_it_is() {
+        let mut reset = PanelReset::default();
+        let step = reset.step("camera", Some(CAMERA_PANEL), 1, Instant::now(), |_| {
+            Err("QAR_STATUS_GUI_PANEL_INVALID_ID".to_owned())
+        });
+        assert_eq!(step, ResetStep::Claim);
+        assert_eq!(reset.listing_wait(Instant::now()), None);
     }
 }

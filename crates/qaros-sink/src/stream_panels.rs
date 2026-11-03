@@ -6,15 +6,17 @@
 //! and the Stop order are tested with a fake on hosts without a mixer (`qaros-stub` implements
 //! none of the video sender, `set_stream` or gesture calls).
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use qaros::{GuiPanelConfig, GuiPanelId, GuiPanelSize, GuiPanelState, StreamId};
+use qaros::{GuiPanelConfig, GuiPanelId, GuiPanelSize, GuiPanelState, Pose, StreamId};
 
 use crate::connection::QarosConnection;
 use crate::panel_gestures::{PanelGestureSubscription, PanelGestures};
 use crate::panel_images::{PanelImage, PanelImages, TIMELINE_IMAGE_KEY};
 use crate::panel_listing::{ListedPanel, PanelContent};
+use crate::panel_state_watch::PanelStateWatch;
 use crate::stream_panel_calls;
 use crate::video_sender::VideoSender;
 
@@ -35,6 +37,11 @@ const REPLACEMENT_SPACING: Duration = Duration::from_secs(2);
 /// How often per run a failed sender is replaced before the panel is left as it is.
 const FAILURE_REPLACEMENT_LIMIT: u32 = 3;
 
+/// How often per run a panel closed while held is reopened. A mixer that fails on a panel at
+/// every connect closes it again each time; past this the panel is left closed until the next
+/// run, which reopens it at its claim.
+const REOPEN_LIMIT: u32 = 3;
+
 /// Listings in a row a held panel must be missing from before it counts as gone: a listing
 /// that drops a live panel once does not stop its stream.
 const ABSENT_LISTINGS_BEFORE_GONE: u32 = 2;
@@ -48,10 +55,16 @@ pub(crate) trait StreamSender {
     fn show_bgra8(&mut self, bgra8: &[u8], width: u32, height: u32) -> Result<bool, String>;
 }
 
+/// Whether a panel was closed by someone else after this run claimed it.
+pub(crate) trait ClosedElsewhere {
+    fn closed_after_open(&self) -> bool;
+}
+
 /// Every QAROS call of the stream panels.
 pub(crate) trait StreamBackend {
     type Sender: StreamSender;
     type Subscription;
+    type StateWatch: ClosedElsewhere;
 
     fn create_sender(&self, width: u32, height: u32) -> Result<Self::Sender, String>;
     fn get_or_create_stream(
@@ -61,12 +74,17 @@ pub(crate) trait StreamBackend {
     ) -> Result<GuiPanelId, String>;
     fn set_stream(&self, panel: GuiPanelId, stream: StreamId) -> Result<(), String>;
     fn set_size(&self, panel: GuiPanelId, size: GuiPanelSize) -> Result<(), String>;
+    fn set_pose(&self, panel: GuiPanelId, pose: Pose) -> Result<(), String>;
     fn set_state(&self, panel: GuiPanelId, state: GuiPanelState) -> Result<(), String>;
+    /// `qar_gui_panels_close_panel`: `QAR_GUI_PANEL_STATE_CLOSED`, after which
+    /// `get_or_create` builds the panel afresh from its init.
+    fn close_panel(&self, panel: GuiPanelId) -> Result<(), String>;
     fn subscribe_gestures(
         &self,
         panel: GuiPanelId,
         inbox: PanelGestures,
     ) -> Result<Self::Subscription, String>;
+    fn watch_state(&self, panel: GuiPanelId) -> Result<Self::StateWatch, String>;
 }
 
 /// The backend of a real session.
@@ -104,9 +122,16 @@ impl StreamSender for VideoSender {
     }
 }
 
+impl ClosedElsewhere for PanelStateWatch {
+    fn closed_after_open(&self) -> bool {
+        PanelStateWatch::closed_after_open(self)
+    }
+}
+
 impl StreamBackend for QarosStreamBackend {
     type Sender = VideoSender;
     type Subscription = PanelGestureSubscription;
+    type StateWatch = PanelStateWatch;
 
     fn create_sender(&self, width: u32, height: u32) -> Result<VideoSender, String> {
         VideoSender::create_cpu(&self.connection, width, height)
@@ -132,11 +157,27 @@ impl StreamBackend for QarosStreamBackend {
             .map_err(|error| error.to_string())
     }
 
+    fn set_pose(&self, panel: GuiPanelId, pose: Pose) -> Result<(), String> {
+        self.connection
+            .session()
+            .gui_panels()
+            .set_pose(panel, pose)
+            .map_err(|error| error.to_string())
+    }
+
     fn set_state(&self, panel: GuiPanelId, state: GuiPanelState) -> Result<(), String> {
         self.connection
             .session()
             .gui_panels()
             .set_state(panel, state)
+            .map_err(|error| error.to_string())
+    }
+
+    fn close_panel(&self, panel: GuiPanelId) -> Result<(), String> {
+        self.connection
+            .session()
+            .gui_panels()
+            .close(panel)
             .map_err(|error| error.to_string())
     }
 
@@ -151,6 +192,10 @@ impl StreamBackend for QarosStreamBackend {
             inbox,
             self.connection.wake_viewer(),
         )
+    }
+
+    fn watch_state(&self, panel: GuiPanelId) -> Result<PanelStateWatch, String> {
+        PanelStateWatch::subscribe(&self.connection, panel)
     }
 }
 
@@ -184,7 +229,7 @@ enum ReplacementCause {
 }
 
 /// One claimed panel and its sender.
-pub(crate) struct PanelStream<Sender, Subscription> {
+pub(crate) struct PanelStream<Sender, Subscription, StateWatch> {
     image_key: String,
     panel: GuiPanelId,
     sender: Sender,
@@ -205,23 +250,58 @@ pub(crate) struct PanelStream<Sender, Subscription> {
     /// Hidden by [`StreamPanels::follow_published_views`] because its view left the layout;
     /// shown again when the view is back.
     hidden_with_its_view: bool,
-    first_frame_show: FirstFrameShow,
+    /// What the claim's first frame sends once more; `None` once sent.
+    first_frame_reassert: Option<FirstFrameReassert>,
+    /// Tells a close in the Hub Display; `None` when the subscription failed.
+    state_watch: Option<StateWatch>,
 }
 
-/// Whether the panel's first frame shows the panel once more. The claim shows the panel right
-/// after pointing it at its stream, and QAROS refuses such a show once as stale (see
-/// [`StreamPanels::claim`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FirstFrameShow {
-    Due,
-    NotDue,
+/// What the claim set on its panel and sends once more with the claim's first frame, when the
+/// mixer has taken the claim's stream. The show the claim sends right after pointing the panel
+/// at its stream is refused once as stale by QAROS (see [`StreamPanels::claim`]). The size and
+/// the pose are fast updates, which the Hub applies without a stale check, but each is sent once
+/// and not resent, and one that reaches the Hub before a new panel's create is dropped there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FirstFrameReassert {
+    size: GuiPanelSize,
+    /// `Some` when the claim moved the panel.
+    pose: Option<Pose>,
+    show: bool,
+}
+
+/// Where a claim leaves its panel.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PanelPlace {
+    /// A panel that exists stays where the Hub holds it; a new one opens at the config's pose.
+    AsHeld,
+    /// The panel is moved to the config's pose, for the reason given: its held place is no
+    /// use to this run's user (ADR-0090).
+    MovedBecause(String),
+}
+
+type HeldStream<Backend> = PanelStream<
+    <Backend as StreamBackend>::Sender,
+    <Backend as StreamBackend>::Subscription,
+    <Backend as StreamBackend>::StateWatch,
+>;
+
+/// A panel closed by someone else while this run held it, released and waiting to be reopened.
+struct ClosedWhileHeld {
+    image_key: String,
+    panel: GuiPanelId,
+    noticed_at: Instant,
 }
 
 pub(crate) struct StreamPanels<Backend: StreamBackend> {
     backend: Backend,
-    streams: Vec<PanelStream<Backend::Sender, Backend::Subscription>>,
+    streams: Vec<HeldStream<Backend>>,
     /// Where the next round-robin show search starts.
     next_stream: usize,
+    closed_while_held: Vec<ClosedWhileHeld>,
+    /// Reopens so far this run, by image key.
+    reopens: BTreeMap<String, u32>,
+    /// When a target's head last streamed.
+    last_target_head: Option<Instant>,
 }
 
 impl<Backend: StreamBackend> StreamPanels<Backend> {
@@ -230,6 +310,9 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             backend,
             streams: Vec::new(),
             next_stream: 0,
+            closed_while_held: Vec::new(),
+            reopens: BTreeMap::new(),
+            last_target_head: None,
         }
     }
 
@@ -250,14 +333,18 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
     ///    under ours) refuses the claim before any call.
     /// 2. The sender is created, then the panel with the sender's stream.
     /// 3. A listed panel, which `get_or_create` returns unchanged, still names an earlier
-    ///    run's sender, so it gets `set_stream`; so does one a user closed (ADR-0075).
-    /// 4. The size follows this run's image; a panel the earlier run hid is shown again once
-    ///    its stream is in place.
-    /// 5. With `gestures`, the panel's gestures are subscribed into it.
-    /// 6. A panel the claim showed is shown once more with its first frame: the QAROS
-    ///    authority commits the stream with a snapshot that stamps every field, so the show
-    ///    sent right after it is refused as stale ("field 'State' no longer matches") and
-    ///    lives only on the library's resend (see `docs/known-issues.md`).
+    ///    run's sender, so it gets `set_stream`. One listed `Closed` is built afresh from the
+    ///    config instead (ADR-0075) and gets `set_stream` too.
+    /// 4. The size follows this run's image; with [`PanelPlace::MovedBecause`] the panel is
+    ///    moved to the config's pose, and a panel listed `Closed` that may stay where it was
+    ///    held is put back there. A panel the earlier run hid is shown again once its stream is
+    ///    in place, and one listed `Closed` is shown like a new one (ADR-0091).
+    /// 5. With `gestures`, the panel's gestures are subscribed into it, and the panel's state
+    ///    is watched for a close by someone else.
+    /// 6. The claim's first frame sends the size, the pose it moved the panel to and the show
+    ///    once more: the QAROS authority commits the stream with a snapshot that stamps every
+    ///    field, so the show sent right after it is refused as stale ("field 'State' no longer
+    ///    matches") and lives only on the library's resend (see `docs/known-issues.md`).
     pub(crate) fn claim(
         &mut self,
         image_key: &str,
@@ -265,6 +352,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         listed: &[ListedPanel],
         (width, height): (u32, u32),
         gestures: Option<PanelGestures>,
+        place: &PanelPlace,
     ) -> Result<GuiPanelId, String> {
         let listed_name = config
             .display_name
@@ -293,43 +381,28 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         // sender; the listing is not trusted to show every panel, so the stream is always set.
         self.backend.set_stream(panel, stream)?;
         self.backend.set_size(panel, config.size)?;
-        let mut first_frame_show = FirstFrameShow::NotDue;
-        if let Some(earlier) = earlier {
-            log::info!(
-                "qaros: stream panel {panel} reattached (listed as {:?}, {:?}, showing {:?}); \
-                 now showing stream {stream}",
-                earlier.display_name,
-                earlier.state,
-                earlier.content
-            );
-            // Shown again only once its stream is in place (ADR-0054); a panel a user
-            // minimised stays minimised.
-            if earlier.state == GuiPanelState::Hidden {
-                self.backend.set_state(panel, GuiPanelState::Visible)?;
-                first_frame_show = FirstFrameShow::Due;
-                log::info!("qaros: stream panel {panel} shown again after the earlier run hid it");
-            }
-        } else {
-            // New, or existing but missing from the listing (an earlier run's hidden panel
-            // would otherwise stay hidden): shown either way, after its stream is set.
-            self.backend.set_state(panel, GuiPanelState::Visible)?;
-            first_frame_show = FirstFrameShow::Due;
-            let listed_names: Vec<&str> = listed
-                .iter()
-                .map(|listed_panel| listed_panel.display_name.as_str())
-                .collect();
-            log::info!(
-                "qaros: stream panel {panel} not in this run's listing (new, or not listed: \
-                 {} listed {listed_names:?}); stream {stream} set and shown",
-                listed.len()
-            );
-        }
+        let closed_earlier = earlier.filter(|earlier| earlier.state == GuiPanelState::Closed);
+        let moved_to = match (place, closed_earlier) {
+            (PanelPlace::AsHeld, Some(closed)) => Some(self.restore_held_place(panel, closed.pose)),
+            _ => self.move_if_asked(panel, config, place),
+        };
+        let show_with_first_frame = self.show_after_claim(panel, stream, earlier, place, listed)?;
         log::info!(
             "qaros: {image_key} streams to panel {panel} {listed_name} at {width}x{height} px on \
              {:.3}x{:.3} m, stream id {stream}",
             config.size.width,
             config.size.height
         );
+        let state_watch = match self.backend.watch_state(panel) {
+            Ok(watch) => Some(watch),
+            Err(error) => {
+                log::warn!(
+                    "qaros: a close of panel {panel} ({image_key}) in the Hub Display is not \
+                     seen before the next listing: {error}"
+                );
+                None
+            }
+        };
         let mut claimed = PanelStream {
             image_key: image_key.to_owned(),
             panel,
@@ -347,11 +420,120 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             size_candidate: None,
             absent_listings: 0,
             hidden_with_its_view: false,
-            first_frame_show,
+            first_frame_reassert: Some(FirstFrameReassert {
+                size: config.size,
+                pose: moved_to,
+                show: show_with_first_frame,
+            }),
+            state_watch,
         };
         subscribe_if_wanted(&self.backend, &mut claimed);
         self.streams.push(claimed);
         Ok(panel)
+    }
+
+    /// Shows the claimed `panel` once its `stream` is set, unless it was listed and is to stay
+    /// as it is, and logs what the claim found. Returns whether the first frame shows it again.
+    fn show_after_claim(
+        &self,
+        panel: GuiPanelId,
+        stream: StreamId,
+        earlier: Option<&ListedPanel>,
+        place: &PanelPlace,
+        listed: &[ListedPanel],
+    ) -> Result<bool, String> {
+        let Some(earlier) = earlier else {
+            // New, or existing but missing from the listing (an earlier run's hidden panel
+            // would otherwise stay hidden): shown either way, after its stream is set.
+            self.backend.set_state(panel, GuiPanelState::Visible)?;
+            let listed_names: Vec<&str> = listed
+                .iter()
+                .map(|listed_panel| listed_panel.display_name.as_str())
+                .collect();
+            log::info!(
+                "qaros: stream panel {panel} not in this run's listing (new, or not listed: \
+                 {} listed {listed_names:?}); stream {stream} set and shown",
+                listed.len()
+            );
+            return Ok(true);
+        };
+        if earlier.state == GuiPanelState::Closed {
+            // `get_or_create` built the closed panel afresh from the config, so it is a new
+            // panel to show, at the place the claim chose (ADR-0091).
+            self.backend.set_state(panel, GuiPanelState::Visible)?;
+            log::info!(
+                "qaros: stream panel {panel} was listed Closed (as {:?}, held at {} with its top \
+                 edge); created afresh with stream {stream} and shown, {}",
+                earlier.display_name,
+                describe_position(earlier.pose),
+                match place {
+                    PanelPlace::AsHeld => "back at its held place".to_owned(),
+                    PanelPlace::MovedBecause(reason) => format!("where new panels open: {reason}"),
+                }
+            );
+            return Ok(true);
+        }
+        log::info!(
+            "qaros: stream panel {panel} reattached (listed as {:?}, {:?}, showing {:?}, held at {} \
+             with its top edge, {:.3}x{:.3} m); now showing stream {stream}",
+            earlier.display_name,
+            earlier.state,
+            earlier.content,
+            describe_position(earlier.pose),
+            earlier.size.width,
+            earlier.size.height
+        );
+        // Shown again only once its stream is in place (ADR-0054); a panel a user minimised
+        // stays minimised.
+        if earlier.state != GuiPanelState::Hidden {
+            return Ok(false);
+        }
+        self.backend.set_state(panel, GuiPanelState::Visible)?;
+        log::info!("qaros: stream panel {panel} shown again after the earlier run hid it");
+        Ok(true)
+    }
+
+    /// Moves the panel to the config's pose when `place` asks for it, and returns that pose.
+    /// A failed move is logged; the first frame tries once more.
+    fn move_if_asked(
+        &self,
+        panel: GuiPanelId,
+        config: &GuiPanelConfig,
+        place: &PanelPlace,
+    ) -> Option<Pose> {
+        let PanelPlace::MovedBecause(reason) = place else {
+            return None;
+        };
+        match self.backend.set_pose(panel, config.pose) {
+            Ok(()) => log::info!(
+                "qaros: stream panel {panel} moved to {} with its top edge: {reason}",
+                describe_position(config.pose)
+            ),
+            Err(error) => log::warn!(
+                "qaros: moving stream panel {panel} ({reason}): {error}; tried again with its \
+                 first frame"
+            ),
+        }
+        Some(config.pose)
+    }
+
+    /// Puts a panel that `get_or_create` built afresh at the config's pose back where it was
+    /// held, and returns that pose. A failed move is logged; the first frame tries once more.
+    fn restore_held_place(&self, panel: GuiPanelId, held: Pose) -> Pose {
+        if let Err(error) = self.backend.set_pose(panel, held) {
+            log::warn!(
+                "qaros: putting stream panel {panel} back at its held place {}: {error}; tried \
+                 again with its first frame",
+                describe_position(held)
+            );
+        }
+        held
+    }
+
+    /// `qar_gui_panels_close_panel` on a panel an earlier run left, so that the next
+    /// `get_or_create` builds it afresh (`--reset-panels`).
+    pub(crate) fn close_for_reset(&self, panel: GuiPanelId) -> Result<(), String> {
+        self.backend.close_panel(panel)
     }
 
     /// Retires replaced senders past [`SENDER_RETIRE_LIMIT`], then shows at most one due
@@ -409,7 +591,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
                     stream.sender_proven = true;
                     retire_all_senders(stream, "its successor had its first ready begin");
                 }
-                show_again_with_its_first_frame(&self.backend, stream);
+                reassert_with_the_first_frame(&self.backend, stream);
             }
             Ok(false) => {}
             Err(error) => {
@@ -423,17 +605,18 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         }
     }
 
-    /// Once a sync: subscribes gestures that failed to subscribe, and replaces a sender that
-    /// failed (at most [`FAILURE_REPLACEMENT_LIMIT`] times a run) or whose image has had a
-    /// new size for two publishes in a row. Replacements of one panel are at least
-    /// [`REPLACEMENT_SPACING`] apart. `panel_size` gives the panel's size in metres for an
-    /// image size.
+    /// Once a sync: releases the panels closed by someone else, subscribes gestures that failed
+    /// to subscribe, and replaces a sender that failed (at most [`FAILURE_REPLACEMENT_LIMIT`]
+    /// times a run) or whose image has had a new size for two publishes in a row.
+    /// Replacements of one panel are at least [`REPLACEMENT_SPACING`] apart. `panel_size` gives
+    /// the panel's size in metres for an image size.
     pub(crate) fn maintain(
         &mut self,
         images: &PanelImages,
         now: Instant,
         panel_size: impl Fn(u32, u32) -> GuiPanelSize,
     ) {
+        self.release_panels_closed_elsewhere(now);
         for index in 0..self.streams.len() {
             subscribe_if_wanted(&self.backend, &mut self.streams[index]);
             let image = images.latest(&self.streams[index].image_key);
@@ -540,15 +723,16 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             );
             return;
         }
-        if let Err(error) = self
-            .backend
-            .set_size(stream.panel, panel_size(width, height))
-        {
+        let new_size = panel_size(width, height);
+        if let Err(error) = self.backend.set_size(stream.panel, new_size) {
             log::warn!(
                 "qaros: resizing panel {} of {}: {error}",
                 stream.panel,
                 stream.image_key
             );
+        }
+        if let Some(reassert) = &mut stream.first_frame_reassert {
+            reassert.size = new_size;
         }
         let old_sender = std::mem::replace(&mut stream.sender, replacement);
         log::info!(
@@ -592,12 +776,11 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         }
     }
 
-    /// Checks the held panels against a listing. A panel listed `Closed`, or missing from
-    /// [`ABSENT_LISTINGS_BEFORE_GONE`] listings in a row, is released: its subscription
-    /// cancelled and its senders destroyed, and it gets no further call this run. A close by a
-    /// mixer cannot be told from a close by a user, so it is not revived before the next run
-    /// (ADR-0075). Returns the image keys released.
-    pub(crate) fn note_listing(&mut self, listed: &[ListedPanel]) -> Vec<String> {
+    /// Checks the held panels against a listing at `now`. A panel listed `Closed`, or missing
+    /// from [`ABSENT_LISTINGS_BEFORE_GONE`] listings in a row, is released like one its state
+    /// watch saw closed (see [`StreamPanels::panels_to_reopen`]). Returns the image keys
+    /// released.
+    pub(crate) fn note_listing(&mut self, listed: &[ListedPanel], now: Instant) -> Vec<String> {
         let mut released = Vec::new();
         let mut index = 0;
         while index < self.streams.len() {
@@ -622,32 +805,101 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
                 index += 1;
                 continue;
             };
-            let mut stream = self.streams.remove(index);
-            log::warn!(
-                "qaros: stream panel {} of {} {how} while this run holds it. A QAROS 0.9.0-dev.3177 \
-                 mixer whose receiver fails closes the panel for every viewer and closed panels \
-                 leave the listing (Quaternar/Quaternar#344, after a VulkanDeviceLost on a \
-                 reattached stream, #343); a close in the Hub Display looks the same, so this run \
-                 streams nothing more to it and the next run claims it again by name (ADR-0075)",
-                stream.panel,
-                stream.image_key
-            );
-            drop(stream.subscription.take());
-            released.push(stream.image_key.clone());
-        }
-        if self.next_stream >= self.streams.len() {
-            self.next_stream = 0;
+            released.push(self.release_closed(index, how, now));
         }
         released
     }
 
+    /// Releases every held panel whose state watch saw it closed after it was open.
+    fn release_panels_closed_elsewhere(&mut self, now: Instant) {
+        let mut index = 0;
+        while index < self.streams.len() {
+            if is_closed_elsewhere(&self.streams[index]) {
+                self.release_closed(index, "was closed", now);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// Releases the held panel at `index`, closed by someone else: its subscriptions cancelled
+    /// and its senders destroyed, so Stop does not hide it. It waits to be reopened. Returns its
+    /// image key.
+    fn release_closed(&mut self, index: usize, how: &str, now: Instant) -> String {
+        let mut stream = self.streams.remove(index);
+        log::warn!(
+            "qaros: stream panel {} of {} {how} while this run held it. QAROS reports no proposer \
+             for a panel's state, so a close in the Hub Display cannot be told from a mixer's \
+             (Quaternar/Quaternar#344: one mixer's failure closes a panel for every viewer, \
+             headsets included); the panel is reopened once a target's head streams after this \
+             close (ADR-0091)",
+            stream.panel,
+            stream.image_key
+        );
+        drop(stream.subscription.take());
+        drop(stream.state_watch.take());
+        if self.next_stream >= self.streams.len() {
+            self.next_stream = 0;
+        }
+        self.closed_while_held.push(ClosedWhileHeld {
+            image_key: stream.image_key.clone(),
+            panel: stream.panel,
+            noticed_at: now,
+        });
+        stream.image_key
+    }
+
+    /// A target's head streamed at `now`.
+    pub(crate) fn note_target_head(&mut self, now: Instant) {
+        self.last_target_head = Some(now);
+    }
+
+    /// The panels closed while held that are due to be reopened: those closed before a target's
+    /// head last streamed, so a headset that came back, or one that streamed on through the
+    /// close, sees them again. Each is reopened at most [`REOPEN_LIMIT`] times a run; past that
+    /// it stays closed until the next run. The caller claims each returned panel again.
+    pub(crate) fn panels_to_reopen(&mut self) -> Vec<GuiPanelId> {
+        let Some(last_target_head) = self.last_target_head else {
+            return Vec::new();
+        };
+        let (due, waiting): (Vec<ClosedWhileHeld>, Vec<ClosedWhileHeld>) = self
+            .closed_while_held
+            .drain(..)
+            .partition(|closed| closed.noticed_at < last_target_head);
+        self.closed_while_held = waiting;
+        let mut reopened = Vec::new();
+        for closed in due {
+            let reopens = self.reopens.entry(closed.image_key.clone()).or_insert(0);
+            if *reopens >= REOPEN_LIMIT {
+                log::warn!(
+                    "qaros: stream panel {} of {} was closed again after {REOPEN_LIMIT} reopens \
+                     this run; it stays closed until the next run reopens it",
+                    closed.panel,
+                    closed.image_key
+                );
+                continue;
+            }
+            *reopens += 1;
+            log::info!(
+                "qaros: reopening stream panel {} of {} (reopen {} of at most {REOPEN_LIMIT} this \
+                 run): a target's head streamed after its close",
+                closed.panel,
+                closed.image_key,
+                *reopens
+            );
+            reopened.push(closed.panel);
+        }
+        reopened
+    }
+
     /// The first half of Stop: every held panel hidden for the next run. A panel already hidden
-    /// with its view gets no second call.
+    /// with its view gets no second call, and one closed by someone else since the last sync
+    /// gets none at all.
     pub(crate) fn hide_all(&self) {
         for stream in self
             .streams
             .iter()
-            .filter(|stream| !stream.hidden_with_its_view)
+            .filter(|stream| !stream.hidden_with_its_view && !is_closed_elsewhere(stream))
         {
             match self.backend.set_state(stream.panel, GuiPanelState::Hidden) {
                 Ok(()) => log::info!(
@@ -663,13 +915,14 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         }
     }
 
-    /// The second half of Stop, before the session goes: every gesture subscription cancelled
-    /// (the cancel waits for a running callback), then every sender destroyed, retiring ones
-    /// included.
+    /// The second half of Stop, before the session goes: every gesture and state subscription
+    /// cancelled (the cancel waits for a running callback), then every sender destroyed,
+    /// retiring ones included.
     pub(crate) fn close(&mut self) {
         let started = Instant::now();
         for stream in &mut self.streams {
             drop(stream.subscription.take());
+            drop(stream.state_watch.take());
         }
         let cancelled = started.elapsed();
         self.streams.clear();
@@ -684,10 +937,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
 /// Hides the panel of a view that left the layout. Its sender stays, and its shown image is
 /// forgotten: the view's image starts a new sequence when it comes back, and that image has to
 /// be streamed before the panel is shown again. A failed call is retried at the next sync.
-fn hide_with_its_view<Backend: StreamBackend>(
-    backend: &Backend,
-    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
-) {
+fn hide_with_its_view<Backend: StreamBackend>(backend: &Backend, stream: &mut HeldStream<Backend>) {
     match backend.set_state(stream.panel, GuiPanelState::Hidden) {
         Ok(()) => {
             stream.hidden_with_its_view = true;
@@ -708,10 +958,7 @@ fn hide_with_its_view<Backend: StreamBackend>(
 
 /// Shows the panel of a view that is back in the layout. A failed call is retried at the
 /// next sync.
-fn show_with_its_view<Backend: StreamBackend>(
-    backend: &Backend,
-    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
-) {
+fn show_with_its_view<Backend: StreamBackend>(backend: &Backend, stream: &mut HeldStream<Backend>) {
     match backend.set_state(stream.panel, GuiPanelState::Visible) {
         Ok(()) => {
             stream.hidden_with_its_view = false;
@@ -728,37 +975,78 @@ fn show_with_its_view<Backend: StreamBackend>(
     }
 }
 
-/// Shows the panel once more with its claim's first frame, unless its view has left the
-/// layout since, which leaves the showing to [`StreamPanels::follow_published_views`]. By the
-/// first frame the mixer has taken the claim's stream, so this show follows the stream's commit
-/// instead of racing it. A failure is logged and not retried: the claim's own show stands.
-fn show_again_with_its_first_frame<Backend: StreamBackend>(
+fn is_closed_elsewhere<Sender, Subscription, StateWatch: ClosedElsewhere>(
+    stream: &PanelStream<Sender, Subscription, StateWatch>,
+) -> bool {
+    stream
+        .state_watch
+        .as_ref()
+        .is_some_and(ClosedElsewhere::closed_after_open)
+}
+
+/// Sends what the claim set on the panel once more with the claim's first frame: the size,
+/// the pose when the claim moved the panel, and the show when the claim showed it, unless its
+/// view has left the layout since, which leaves the showing to
+/// [`StreamPanels::follow_published_views`]. By the first frame the mixer has taken the claim's
+/// stream, so these follow the stream's commit instead of racing it. A failure is logged and
+/// not retried: the claim's own calls stand.
+fn reassert_with_the_first_frame<Backend: StreamBackend>(
     backend: &Backend,
-    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
+    stream: &mut HeldStream<Backend>,
 ) {
-    let due = std::mem::replace(&mut stream.first_frame_show, FirstFrameShow::NotDue);
-    if due == FirstFrameShow::NotDue || stream.hidden_with_its_view {
+    let Some(reassert) = stream.first_frame_reassert.take() else {
         return;
-    }
-    match backend.set_state(stream.panel, GuiPanelState::Visible) {
-        Ok(()) => log::info!(
-            "qaros: stream panel {} of {} shown again with its first frame (the claim's show \
-             is refused once as stale by QAROS 0.9.0-dev.3184)",
-            stream.panel,
+    };
+    if let Err(error) = backend.set_size(stream.panel, reassert.size) {
+        log::warn!(
+            "qaros: sizing the panel of {} again with its first frame: {error}",
             stream.image_key
-        ),
-        Err(error) => log::warn!(
+        );
+    }
+    if let Some(pose) = reassert.pose
+        && let Err(error) = backend.set_pose(stream.panel, pose)
+    {
+        log::warn!(
+            "qaros: moving the panel of {} again with its first frame: {error}",
+            stream.image_key
+        );
+    }
+    let show = reassert.show && !stream.hidden_with_its_view;
+    if show && let Err(error) = backend.set_state(stream.panel, GuiPanelState::Visible) {
+        log::warn!(
             "qaros: showing the panel of {} again with its first frame: {error}",
             stream.image_key
-        ),
+        );
     }
+    log::info!(
+        "qaros: stream panel {} of {} sized {:.3}x{:.3} m{}{} again with its first frame (the \
+         claim's show is refused once as stale by QAROS 0.9.0-dev.3184)",
+        stream.panel,
+        stream.image_key,
+        reassert.size.width,
+        reassert.size.height,
+        if reassert.pose.is_some() {
+            ", moved"
+        } else {
+            ""
+        },
+        if show { ", shown" } else { "" }
+    );
+}
+
+/// For logs: a panel pose's position, `[x, y, z]` in metres.
+fn describe_position(pose: Pose) -> String {
+    format!(
+        "[{:.3}, {:.3}, {:.3}]",
+        pose.position.x, pose.position.y, pose.position.z
+    )
 }
 
 /// Subscribes the panel's gestures when it wants them and has no subscription; a failure is
 /// logged once and tried again at the next maintain.
 fn subscribe_if_wanted<Backend: StreamBackend>(
     backend: &Backend,
-    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
+    stream: &mut HeldStream<Backend>,
 ) {
     let Some(inbox) = &stream.gesture_inbox else {
         return;
@@ -788,8 +1076,8 @@ fn subscribe_if_wanted<Backend: StreamBackend>(
     }
 }
 
-fn retire_overdue_senders<Sender: StreamSender, Subscription>(
-    stream: &mut PanelStream<Sender, Subscription>,
+fn retire_overdue_senders<Sender: StreamSender, Subscription, StateWatch>(
+    stream: &mut PanelStream<Sender, Subscription, StateWatch>,
     now: Instant,
 ) {
     let has_overdue = stream
@@ -805,8 +1093,8 @@ fn retire_overdue_senders<Sender: StreamSender, Subscription>(
 }
 
 /// Every retiring sender is older than the current one, so once any is due, all are.
-fn retire_all_senders<Sender: StreamSender, Subscription>(
-    stream: &mut PanelStream<Sender, Subscription>,
+fn retire_all_senders<Sender: StreamSender, Subscription, StateWatch>(
+    stream: &mut PanelStream<Sender, Subscription, StateWatch>,
     why: &str,
 ) {
     for retiring in stream.retiring.drain(..) {
@@ -883,12 +1171,28 @@ mod tests {
         }
     }
 
+    /// The panels, by the first byte of their id, that someone else closed after the claim.
+    type ClosedPanels = Rc<RefCell<Vec<u8>>>;
+
+    struct FakeStateWatch {
+        panel: GuiPanelId,
+        closed_elsewhere: ClosedPanels,
+    }
+
+    impl ClosedElsewhere for FakeStateWatch {
+        fn closed_after_open(&self) -> bool {
+            self.closed_elsewhere.borrow().contains(&self.panel.0[0])
+        }
+    }
+
     #[derive(Default)]
     struct FakeBackend {
         log: CallLog,
         senders_created: RefCell<u8>,
         ready: Rc<RefCell<bool>>,
         failing: Rc<RefCell<bool>>,
+        closed_elsewhere: ClosedPanels,
+        state_watch_fails: bool,
     }
 
     impl FakeBackend {
@@ -901,11 +1205,24 @@ mod tests {
             *backend.ready.borrow_mut() = true;
             backend
         }
+
+        /// A close in the Hub Display or by a mixer, which the state watch reports alike.
+        fn close_elsewhere(&self, panel: GuiPanelId) {
+            self.closed_elsewhere.borrow_mut().push(panel.0[0]);
+        }
+
+        /// The claim's `get_or_create` built the panel afresh, so a new watch sees it open.
+        fn forget_the_close(&self, panel: GuiPanelId) {
+            self.closed_elsewhere
+                .borrow_mut()
+                .retain(|closed| *closed != panel.0[0]);
+        }
     }
 
     impl StreamBackend for FakeBackend {
         type Sender = FakeSender;
         type Subscription = FakeSubscription;
+        type StateWatch = FakeStateWatch;
 
         fn create_sender(&self, width: u32, height: u32) -> Result<FakeSender, String> {
             let mut created = self.senders_created.borrow_mut();
@@ -948,10 +1265,23 @@ mod tests {
             Ok(())
         }
 
+        fn set_pose(&self, panel: GuiPanelId, pose: Pose) -> Result<(), String> {
+            self.log.borrow_mut().push(format!(
+                "set_pose {} [{:.2}, {:.2}, {:.2}]",
+                panel.0[0], pose.position.x, pose.position.y, pose.position.z
+            ));
+            Ok(())
+        }
+
         fn set_state(&self, panel: GuiPanelId, state: GuiPanelState) -> Result<(), String> {
             self.log
                 .borrow_mut()
                 .push(format!("set_state {} {state:?}", panel.0[0]));
+            Ok(())
+        }
+
+        fn close_panel(&self, panel: GuiPanelId) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("close {}", panel.0[0]));
             Ok(())
         }
 
@@ -966,6 +1296,17 @@ mod tests {
             Ok(FakeSubscription {
                 panel,
                 log: Rc::clone(&self.log),
+            })
+        }
+
+        /// Not in the call log: every claim watches its panel.
+        fn watch_state(&self, panel: GuiPanelId) -> Result<FakeStateWatch, String> {
+            if self.state_watch_fails {
+                return Err("QAR_STATUS_NOT_IMPLEMENTED".to_owned());
+            }
+            Ok(FakeStateWatch {
+                panel,
+                closed_elsewhere: Rc::clone(&self.closed_elsewhere),
             })
         }
     }
@@ -1033,7 +1374,14 @@ mod tests {
     fn a_new_view_creates_its_sender_before_its_panel_and_subscribes_no_gestures() {
         let mut panels = StreamPanels::new(FakeBackend::default());
         let panel = panels
-            .claim("camera", &config(CAMERA), &[], (640, 426), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (640, 426),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         assert_eq!(panel, panel_id_of(CAMERA));
         assert_eq!(
@@ -1058,6 +1406,7 @@ mod tests {
                 &[],
                 (960, 256),
                 Some(PanelGestures::default()),
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let calls = panels.backend().calls();
@@ -1089,7 +1438,14 @@ mod tests {
         );
         earlier.display_name = String::new();
         panels
-            .claim("camera", &config(CAMERA), &[earlier], (640, 426), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[earlier],
+                (640, 426),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         assert_eq!(
             panels.backend().calls(),
@@ -1112,7 +1468,14 @@ mod tests {
             PanelContent::Stream(StreamId([9; 16])),
         );
         panels
-            .claim("camera", &config(CAMERA), &[minimised], (640, 426), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[minimised],
+                (640, 426),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let calls = panels.backend().calls();
         assert_eq!(calls[2], "set_stream 25 1");
@@ -1122,23 +1485,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_listed_closed_panel_is_claimed_by_name_and_gets_the_new_stream() {
-        let mut panels = StreamPanels::new(FakeBackend::default());
-        let closed = listed(
+    /// The camera panel as a listing shows it after a mixer closed it, held at `[x, y, z]`.
+    fn closed_at(x: f32, y: f32, z: f32) -> ListedPanel {
+        let mut closed = listed(
             CAMERA,
             GuiPanelState::Closed,
             PanelContent::Stream(StreamId([9; 16])),
         );
+        closed.display_name = String::new();
+        closed.pose.position = Vec3::new(x, y, z);
+        closed
+    }
+
+    #[test]
+    fn a_panel_listed_closed_is_created_afresh_back_at_its_held_place_and_shown_twice() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[closed], (640, 426), None)
+            .claim(
+                "camera",
+                &config_placed_at(CAMERA, 0.25, -0.3, -0.4),
+                &[closed_at(0.7, -0.3, 0.3)],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
-        let calls = panels.backend().calls();
-        assert_eq!(calls[1], "get_or_create camera.stream.rerun.rerun stream 1");
-        assert_eq!(calls[2], "set_stream 25 1");
-        assert!(
-            !calls.iter().any(|call| call.starts_with("set_state")),
-            "{calls:?}"
+        let claim_calls = [
+            "create sender 1 4x2",
+            "get_or_create camera.stream.rerun.rerun stream 1",
+            "set_stream 25 1",
+            "set_size 25 0.300",
+            "set_pose 25 [0.70, -0.30, 0.30]",
+            "set_state 25 Visible",
+        ];
+        assert_eq!(panels.backend().calls(), claim_calls);
+
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, Instant::now());
+        assert_eq!(
+            calls_from(&panels, claim_calls.len()),
+            [
+                "show 1",
+                "set_size 25 0.300",
+                "set_pose 25 [0.70, -0.30, 0.30]",
+                "set_state 25 Visible"
+            ],
+            "`get_or_create` opened it at the config's pose; the held place and the show follow \
+             the stream's commit"
+        );
+    }
+
+    #[test]
+    fn a_panel_listed_closed_whose_held_place_is_of_no_use_opens_where_new_panels_open() {
+        let mut panels = StreamPanels::new(FakeBackend::default());
+        panels
+            .claim(
+                "camera",
+                &config_placed_at(CAMERA, 0.25, -0.3, -0.4),
+                &[closed_at(9.0, 0.0, 0.0)],
+                (4, 2),
+                None,
+                &PanelPlace::MovedBecause("held 9.0 m from the eyes".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(
+            panels.backend().calls()[3..],
+            [
+                "set_size 25 0.300",
+                "set_pose 25 [0.25, -0.30, -0.40]",
+                "set_state 25 Visible"
+            ]
         );
     }
 
@@ -1162,6 +1579,7 @@ mod tests {
                 &[hidden_by_an_earlier_run(CAMERA)],
                 (4, 2),
                 None,
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let claimed = panels.backend().calls().len();
@@ -1186,6 +1604,7 @@ mod tests {
             [
                 "not ready 1",
                 "show 1",
+                "set_size 25 0.300",
                 "set_state 25 Visible",
                 "show 1",
                 "show 1"
@@ -1197,7 +1616,14 @@ mod tests {
     fn a_new_panel_is_shown_again_with_its_first_frame_and_the_timeline_too() {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
             .claim(
@@ -1206,6 +1632,7 @@ mod tests {
                 &[hidden_by_an_earlier_run(TIMELINE)],
                 (4, 2),
                 Some(PanelGestures::default()),
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let claimed = panels.backend().calls().len();
@@ -1219,8 +1646,10 @@ mod tests {
             calls_from(&panels, claimed),
             [
                 "show 1",
+                "set_size 25 0.300",
                 "set_state 25 Visible",
                 "show 2",
+                "set_size 33 0.300",
                 "set_state 33 Visible"
             ]
         );
@@ -1235,13 +1664,24 @@ mod tests {
             PanelContent::Stream(StreamId([9; 16])),
         );
         panels
-            .claim("camera", &config(CAMERA), &[minimised], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[minimised],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let claimed = panels.backend().calls().len();
         let images = PanelImages::default();
         images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
         panels.pump(&images, Instant::now());
-        assert_eq!(calls_from(&panels, claimed), ["show 1"]);
+        assert_eq!(
+            calls_from(&panels, claimed),
+            ["show 1", "set_size 25 0.300"],
+            "the size again, and no show"
+        );
     }
 
     #[test]
@@ -1254,6 +1694,7 @@ mod tests {
                 &[hidden_by_an_earlier_run(CAMERA)],
                 (4, 2),
                 None,
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         panels.follow_published_views(&[], &[]);
@@ -1261,14 +1702,21 @@ mod tests {
         let images = PanelImages::default();
         images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
         panels.pump(&images, Instant::now());
-        assert_eq!(calls_from(&panels, hidden), ["show 1"]);
+        assert_eq!(calls_from(&panels, hidden), ["show 1", "set_size 25 0.300"]);
     }
 
     #[test]
     fn a_replaced_sender_s_first_frame_shows_the_panel_no_second_time() {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let images = PanelImages::default();
         let start = Instant::now();
@@ -1308,7 +1756,14 @@ mod tests {
             GuiPanelState::Visible,
             PanelContent::Uri("http://192.168.50.40:9877/views/camera".to_owned()),
         );
-        let refused = panels.claim("camera", &config(CAMERA), &[website], (640, 426), None);
+        let refused = panels.claim(
+            "camera",
+            &config(CAMERA),
+            &[website],
+            (640, 426),
+            None,
+            &PanelPlace::AsHeld,
+        );
         assert!(refused.unwrap_err().contains("website panel"));
         assert!(panels.backend().calls().is_empty());
     }
@@ -1319,10 +1774,24 @@ mod tests {
         let log = Rc::clone(&first_run_backend.log);
         let mut first_run = StreamPanels::new(first_run_backend);
         let camera = first_run
-            .claim("camera", &config(CAMERA), &[], (64, 48), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (64, 48),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let plot = first_run
-            .claim("plot", &config(PLOT), &[], (64, 48), None)
+            .claim(
+                "plot",
+                &config(PLOT),
+                &[],
+                (64, 48),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         first_run.hide_all();
         first_run.close();
@@ -1349,10 +1818,18 @@ mod tests {
                 &listed_after_stop,
                 (64, 48),
                 None,
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let plot_again = second_run
-            .claim("plot", &config(PLOT), &listed_after_stop, (64, 48), None)
+            .claim(
+                "plot",
+                &config(PLOT),
+                &listed_after_stop,
+                (64, 48),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         assert_eq!((camera_again, plot_again), (camera, plot));
         assert_eq!(
@@ -1376,7 +1853,14 @@ mod tests {
     fn stop_hides_then_cancels_the_gestures_then_destroys_every_sender_retiring_ones_included() {
         let mut panels = StreamPanels::new(FakeBackend::default());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
             .claim(
@@ -1385,6 +1869,7 @@ mod tests {
                 &[],
                 (4, 2),
                 Some(PanelGestures::default()),
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let images = PanelImages::default();
@@ -1422,10 +1907,24 @@ mod tests {
     fn shows_follow_new_images_one_per_call_round_robin_and_refresh_once_a_second() {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
-            .claim("plot", &config(PLOT), &[], (4, 2), None)
+            .claim(
+                "plot",
+                &config(PLOT),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let images = PanelImages::default();
         images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
@@ -1464,7 +1963,14 @@ mod tests {
         let ready = Rc::clone(&backend.ready);
         let mut panels = StreamPanels::new(backend);
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let images = PanelImages::default();
         images.publish_rgba8("camera", 2, 2, rgba(2, 2, 1)).unwrap();
@@ -1486,8 +1992,13 @@ mod tests {
         panels.pump(&images, now);
         let calls = panels.backend().calls();
         assert_eq!(
-            &calls[calls.len() - 3..],
-            ["not ready 1", "show 1", "set_state 25 Visible"]
+            &calls[calls.len() - 4..],
+            [
+                "not ready 1",
+                "show 1",
+                "set_size 25 0.300",
+                "set_state 25 Visible"
+            ]
         );
     }
 
@@ -1498,7 +2009,14 @@ mod tests {
         let ready = Rc::clone(&backend.ready);
         let mut panels = StreamPanels::new(backend);
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let claimed = panels.backend().calls().len();
         let images = PanelImages::default();
@@ -1542,9 +2060,11 @@ mod tests {
                 "not ready 2",
                 "show 2",
                 "destroy sender 1",
+                "set_size 25 0.500",
                 "set_state 25 Visible"
             ],
-            "the panel's first frame, on the replacing sender, shows it again"
+            "the panel's first frame, on the replacing sender, sizes it at the replacement's \
+             size and shows it again"
         );
     }
 
@@ -1552,7 +2072,14 @@ mod tests {
     fn a_view_scaled_into_its_fixed_frame_keeps_its_one_sender_through_a_resize() {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (576, 304), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (576, 304),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let claimed = panels.backend().calls().len();
         let images = PanelImages::default();
@@ -1567,11 +2094,12 @@ mod tests {
             now += Duration::from_millis(250);
         }
         let calls = calls_from(&panels, claimed);
-        let mut expected = vec!["show 1", "set_state 25 Visible"];
+        let mut expected = vec!["show 1", "set_size 25 0.300", "set_state 25 Visible"];
         expected.extend(["show 1"].repeat(11));
         assert_eq!(
             calls, expected,
-            "the first frame shows the panel once more; no new sender, set_stream or set_size"
+            "the first frame sizes and shows the panel once more; no new sender, set_stream or \
+             resize"
         );
     }
 
@@ -1579,7 +2107,14 @@ mod tests {
     fn an_old_sender_whose_successor_never_gets_a_receiver_goes_after_ten_seconds() {
         let mut panels = StreamPanels::new(FakeBackend::default());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let images = PanelImages::default();
         let start = Instant::now();
@@ -1609,7 +2144,14 @@ mod tests {
     fn a_size_seen_in_one_publish_only_or_within_two_seconds_of_a_replacement_waits() {
         let mut panels = StreamPanels::new(FakeBackend::default());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let claimed = panels.backend().calls().len();
         let images = PanelImages::default();
@@ -1661,7 +2203,14 @@ mod tests {
         let failing = Rc::clone(&backend.failing);
         let mut panels = StreamPanels::new(backend);
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         let images = PanelImages::default();
         images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
@@ -1689,10 +2238,17 @@ mod tests {
     }
 
     #[test]
-    fn a_panel_closed_or_gone_while_held_is_released_once_and_not_revived() {
+    fn a_panel_closed_or_gone_while_held_is_released_once_and_gets_no_call_until_reopened() {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
             .claim(
@@ -1701,6 +2257,7 @@ mod tests {
                 &[],
                 (4, 2),
                 Some(PanelGestures::default()),
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let claimed = panels.backend().calls().len();
@@ -1715,18 +2272,25 @@ mod tests {
             PanelContent::Stream(StreamId([2; 16])),
         );
         assert_eq!(
-            panels.note_listing(&[camera_closed, timeline_visible.clone()]),
+            panels.note_listing(&[camera_closed, timeline_visible.clone()], Instant::now()),
             ["camera"]
         );
         assert_eq!(calls_from(&panels, claimed), ["destroy sender 1"]);
 
-        assert!(panels.note_listing(&[]).is_empty(), "one missing listing");
-        assert!(panels.note_listing(&[timeline_visible]).is_empty());
         assert!(
-            panels.note_listing(&[]).is_empty(),
+            panels.note_listing(&[], Instant::now()).is_empty(),
+            "one missing listing"
+        );
+        assert!(
+            panels
+                .note_listing(&[timeline_visible], Instant::now())
+                .is_empty()
+        );
+        assert!(
+            panels.note_listing(&[], Instant::now()).is_empty(),
             "the count starts again"
         );
-        assert_eq!(panels.note_listing(&[]), ["timeline.panel"]);
+        assert_eq!(panels.note_listing(&[], Instant::now()), ["timeline.panel"]);
         assert_eq!(
             calls_from(&panels, claimed),
             ["destroy sender 1", "cancel gestures 33", "destroy sender 2"]
@@ -1749,10 +2313,24 @@ mod tests {
     fn camera_plot_and_timeline_streaming() -> (StreamPanels<FakeBackend>, PanelImages) {
         let mut panels = StreamPanels::new(FakeBackend::ready());
         panels
-            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
-            .claim("plot", &config(PLOT), &[], (4, 2), None)
+            .claim(
+                "plot",
+                &config(PLOT),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
             .unwrap();
         panels
             .claim(
@@ -1761,6 +2339,7 @@ mod tests {
                 &[],
                 (4, 2),
                 Some(PanelGestures::default()),
+                &PanelPlace::AsHeld,
             )
             .unwrap();
         let images = PanelImages::default();
@@ -1837,5 +2416,257 @@ mod tests {
             ["set_state 33 Hidden"],
             "the camera and plot panels are hidden already; the timeline stays until Stop"
         );
+    }
+
+    fn config_placed_at(common_name: &str, x: f32, y: f32, z: f32) -> GuiPanelConfig {
+        GuiPanelConfig {
+            pose: Pose {
+                orientation: Quat::IDENTITY,
+                position: Vec3::new(x, y, z),
+            },
+            ..config(common_name)
+        }
+    }
+
+    #[test]
+    fn a_panel_moved_by_its_claim_is_sized_moved_and_shown_then_all_three_again_with_its_first_frame()
+     {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        let moved = PanelPlace::MovedBecause("held 9.1 m from the eyes".to_owned());
+        panels
+            .claim(
+                "camera",
+                &config_placed_at(CAMERA, 0.25, -0.3, -0.4),
+                &[hidden_by_an_earlier_run(CAMERA)],
+                (4, 2),
+                None,
+                &moved,
+            )
+            .unwrap();
+        let claim_calls = [
+            "create sender 1 4x2",
+            "get_or_create camera.stream.rerun.rerun stream 1",
+            "set_stream 25 1",
+            "set_size 25 0.300",
+            "set_pose 25 [0.25, -0.30, -0.40]",
+            "set_state 25 Visible",
+        ];
+        assert_eq!(panels.backend().calls(), claim_calls);
+
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, Instant::now());
+        panels.pump(&images, Instant::now() + STREAM_REFRESH);
+        assert_eq!(
+            calls_from(&panels, claim_calls.len()),
+            [
+                "show 1",
+                "set_size 25 0.300",
+                "set_pose 25 [0.25, -0.30, -0.40]",
+                "set_state 25 Visible",
+                "show 1"
+            ],
+            "the stale refusal of the claim's calls is answered once, with the first frame"
+        );
+    }
+
+    #[test]
+    fn a_panel_kept_where_it_is_held_gets_no_pose_call() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim(
+                "camera",
+                &config_placed_at(CAMERA, 0.25, -0.3, -0.4),
+                &[hidden_by_an_earlier_run(CAMERA)],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, Instant::now());
+        let calls = panels.backend().calls();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("set_pose")),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_closed_while_held_is_released_at_the_next_sync_and_not_hidden_at_stop() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        panels.backend().close_elsewhere(panel_id_of(CAMERA));
+        let closed = panels.backend().calls().len();
+
+        panels.maintain(&images, Instant::now(), panel_size_by_aspect);
+        assert_eq!(calls_from(&panels, closed), ["destroy sender 1"]);
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 2)).unwrap();
+        panels.pump(&images, Instant::now());
+        let released = panels.backend().calls().len();
+
+        panels.hide_all();
+        panels.close();
+        assert_eq!(
+            calls_from(&panels, released),
+            [
+                "set_state 23 Hidden",
+                "set_state 33 Hidden",
+                "cancel gestures 33",
+                "destroy sender 2",
+                "destroy sender 3"
+            ],
+            "the closed camera panel stays closed: no show, no hide"
+        );
+    }
+
+    #[test]
+    fn a_panel_closed_after_the_last_sync_is_not_hidden_at_stop() {
+        let (panels, _images) = camera_plot_and_timeline_streaming();
+        panels.backend().close_elsewhere(panel_id_of(PLOT));
+        let closed = panels.backend().calls().len();
+
+        panels.hide_all();
+        assert_eq!(
+            calls_from(&panels, closed),
+            ["set_state 25 Hidden", "set_state 33 Hidden"]
+        );
+    }
+
+    #[test]
+    fn without_a_state_watch_a_claimed_panel_is_hidden_at_stop_as_before() {
+        let backend = FakeBackend {
+            state_watch_fails: true,
+            ..FakeBackend::default()
+        };
+        let mut panels = StreamPanels::new(backend);
+        panels
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        panels.backend().close_elsewhere(panel_id_of(CAMERA));
+        let claimed = panels.backend().calls().len();
+        panels.hide_all();
+        assert_eq!(calls_from(&panels, claimed), ["set_state 25 Hidden"]);
+    }
+
+    #[test]
+    fn a_reset_closes_the_panel_through_the_close_call() {
+        let panels = StreamPanels::new(FakeBackend::default());
+        panels.close_for_reset(panel_id_of(CAMERA)).unwrap();
+        assert_eq!(panels.backend().calls(), ["close 25"]);
+    }
+
+    #[test]
+    fn a_panel_closed_as_its_headset_left_is_reopened_once_a_head_streams_after_the_close() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        let start = Instant::now();
+        panels.note_target_head(start);
+        panels.backend().close_elsewhere(panel_id_of(CAMERA));
+        panels.maintain(
+            &images,
+            start + Duration::from_secs(1),
+            panel_size_by_aspect,
+        );
+        assert!(
+            panels.panels_to_reopen().is_empty(),
+            "no head streamed since the close: the headset left with it"
+        );
+        panels.maintain(
+            &images,
+            start + Duration::from_secs(2),
+            panel_size_by_aspect,
+        );
+        assert!(panels.panels_to_reopen().is_empty());
+
+        panels.note_target_head(start + Duration::from_secs(10));
+        assert_eq!(panels.panels_to_reopen(), [panel_id_of(CAMERA)]);
+        assert!(panels.panels_to_reopen().is_empty(), "reopened once");
+
+        panels.backend().forget_the_close(panel_id_of(CAMERA));
+        let released = panels.backend().calls().len();
+        panels
+            .claim(
+                "camera",
+                &config_placed_at(CAMERA, 0.25, -0.3, -0.4),
+                &[closed_at(0.7, -0.3, 0.3)],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        assert_eq!(
+            calls_from(&panels, released),
+            [
+                "create sender 4 4x2",
+                "get_or_create camera.stream.rerun.rerun stream 4",
+                "set_stream 25 4",
+                "set_size 25 0.300",
+                "set_pose 25 [0.70, -0.30, 0.30]",
+                "set_state 25 Visible"
+            ]
+        );
+        panels.maintain(
+            &images,
+            start + Duration::from_secs(11),
+            panel_size_by_aspect,
+        );
+        panels.hide_all();
+        assert!(
+            panels
+                .backend()
+                .calls()
+                .contains(&"set_state 25 Hidden".to_owned()),
+            "the reopened panel is held again and hidden at Stop"
+        );
+    }
+
+    #[test]
+    fn a_panel_closed_while_a_head_streams_on_is_reopened_at_the_next_head() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        let start = Instant::now();
+        panels.backend().close_elsewhere(panel_id_of(PLOT));
+        panels.maintain(&images, start, panel_size_by_aspect);
+        panels.note_target_head(start + Duration::from_millis(16));
+        assert_eq!(
+            panels.panels_to_reopen(),
+            [panel_id_of(PLOT)],
+            "a close in the Hub Display cannot be told from a mixer's, so it is undone too"
+        );
+    }
+
+    #[test]
+    fn a_panel_closed_again_after_three_reopens_stays_closed_for_the_run() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        let mut now = Instant::now();
+        for reopen in 1..=4 {
+            panels.backend().close_elsewhere(panel_id_of(PLOT));
+            panels.maintain(&images, now, panel_size_by_aspect);
+            now += Duration::from_secs(1);
+            panels.note_target_head(now);
+            let reopened = panels.panels_to_reopen();
+            if reopen > 3 {
+                assert!(reopened.is_empty(), "the fourth close stands");
+                break;
+            }
+            assert_eq!(reopened, [panel_id_of(PLOT)], "reopen {reopen}");
+            panels.backend().forget_the_close(panel_id_of(PLOT));
+            panels
+                .claim(
+                    "plot",
+                    &config(PLOT),
+                    &[],
+                    (4, 2),
+                    None,
+                    &PanelPlace::AsHeld,
+                )
+                .unwrap();
+        }
     }
 }

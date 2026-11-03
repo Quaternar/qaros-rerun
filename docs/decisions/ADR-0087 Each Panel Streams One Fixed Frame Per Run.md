@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0087: Each view panel streams one fixed frame per run, and a resized view is scaled into it
 
+> Amended by ADR-0090: the claim's size is sent once more with the panel's first frame.
+
 ## Context
 
 A view's stream panel shows a CPU video sender whose texture has one size for its life (ADR-0076). The crop of a view follows the desktop layout, so resizing the desktop window changes every view's pixel size at every capture (250 ms). The sink answered a size that held for two publishes with a new sender, a `set_stream`, a `set_size`, and kept the old sender until the new one's first ready begin, at most 10 s.

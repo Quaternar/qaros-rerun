@@ -294,21 +294,39 @@ impl Fixture {
         drop(connection);
         let errors = self.calls_starting_with("ERROR");
         assert!(errors.is_empty(), "{errors:?}");
-        self.assert_volume_closed_after_its_contents_and_before_the_session();
+        self.assert_volume_hidden_after_its_contents_and_before_the_session();
         assert_eq!(self.live_handle_count(), 0, "every handle released");
     }
 
     /// In the latest teardown, the volume goes after every sender and panel in it, and before
     /// the session. The call log spans every session of the test.
-    fn assert_volume_closed_after_its_contents_and_before_the_session(&self) {
+    /// The volume is never closed, Stop lists nothing (the listing blocks for about 4 s in
+    /// QAROS), and a removal of a used-by peer comes after the volume's contents went and before
+    /// the session does.
+    fn assert_volume_hidden_after_its_contents_and_before_the_session(&self) {
         let calls = self.calls();
         let last_of = |name: &str| calls.iter().rposition(|call| call == name);
-        let volume_closed = last_of("app_volumes_close_volume").expect("the app volume is closed");
+        assert_eq!(
+            last_of("app_volumes_close_volume"),
+            None,
+            "the volume is never closed"
+        );
         let session_destroyed =
             last_of("session_handle_destroy").expect("the session is destroyed");
+        let last_subscription =
+            last_of("app_volumes_subscribe_updates").expect("the used-by peers are followed");
+        if let Some(last_listing) = last_of("query_app_volumes_count") {
+            assert!(
+                last_listing < last_subscription,
+                "a listing at call {last_listing}, after the connect's subscriptions"
+            );
+        }
+        let Some(removal) = last_of("app_volumes_update_used_by_peers") else {
+            return;
+        };
         assert!(
-            volume_closed < session_destroyed,
-            "volume closed at call {volume_closed}, session destroyed at {session_destroyed}"
+            removal < session_destroyed,
+            "removal at call {removal}, session destroyed at {session_destroyed}"
         );
         for contents in [
             "render_stream_handle_destroy",
@@ -317,8 +335,8 @@ impl Fixture {
         ] {
             if let Some(last) = last_of(contents) {
                 assert!(
-                    last < volume_closed,
-                    "{contents} at call {last} comes after the volume closed at {volume_closed}"
+                    last < removal,
+                    "{contents} at call {last} comes after the removal at {removal}"
                 );
             }
         }
@@ -930,9 +948,11 @@ fn unanswered_peers_file_text(fixture: &Fixture) -> String {
 }
 
 /// Without panels the viewer's sink holds the last reference to the connection; its senders
-/// still go before the volume closes.
+/// still go before the volume is hidden from the peer they streamed to. The stub reports no
+/// used-by peers, so the served peer is the one removed; it answers the removal with
+/// `QAR_STATUS_NOT_IMPLEMENTED`, and the volume is left open, never closed.
 #[test]
-fn a_sink_holding_the_last_connection_closes_the_volume_after_its_senders() {
+fn a_sink_holding_the_last_connection_hides_the_volume_after_its_senders() {
     let fixture = Fixture::new();
     let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
     let mut sink = new_sink(&connection, PoseSpace::Room);
@@ -941,8 +961,35 @@ fn a_sink_holding_the_last_connection_closes_the_volume_after_its_senders() {
     drop(sink);
     let errors = fixture.calls_starting_with("ERROR");
     assert!(errors.is_empty(), "{errors:?}");
-    fixture.assert_volume_closed_after_its_contents_and_before_the_session();
+    assert_eq!(count_calls(&fixture, "app_volumes_update_used_by_peers"), 1);
+    fixture.assert_volume_hidden_after_its_contents_and_before_the_session();
     assert_eq!(fixture.live_handle_count(), 0, "every handle released");
+}
+
+/// A removal QAROS takes but never confirms with a bake (the stub reports no used-by peers)
+/// is given up at the end of the hide's budget, and the teardown still ends well inside the
+/// stop watchdog's deadline, with the volume left open.
+#[test]
+fn a_hide_the_hub_never_confirms_ends_within_its_budget_and_leaves_the_volume_open() {
+    /// `QAR_STATUS_SUCCESS`, injected because the stub does not implement the removal.
+    const SUCCESS: i64 = 0;
+    let hide_budget = Duration::from_millis(180);
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let mut sink = new_sink(&connection, PoseSpace::Room);
+    single_request(&mut sink).expect("a sender exists");
+    drop(sink);
+    fixture.fail_next("app_volumes_update_used_by_peers", SUCCESS);
+
+    let stop_started = Instant::now();
+    fixture.assert_clean_teardown(connection);
+    let teardown = stop_started.elapsed();
+
+    assert_eq!(count_calls(&fixture, "app_volumes_update_used_by_peers"), 1);
+    assert!(
+        teardown >= hide_budget && teardown < qaros_sink::STOP_DEADLINE,
+        "the teardown took {teardown:?}"
+    );
 }
 
 fn left(events: &[PeerEvent]) -> Vec<PeerId> {
@@ -2492,6 +2539,106 @@ fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
         .unwrap();
     assert_eq!(after_reset.volume_transform(), requested);
     fixture.assert_clean_teardown(after_reset);
+}
+
+/// The stub has no used-by peers (`app_volume_get_used_by_peers_count` answers
+/// `QAR_STATUS_NOT_IMPLEMENTED`), so a run that served no headset does not know who uses its
+/// volume. Stop then removes nothing, lists nothing and closes nothing: the volume stays open as
+/// it is, and the teardown does not wait.
+#[test]
+fn a_volume_whose_peers_were_never_reported_is_left_open_at_stop_without_a_listing() {
+    let fixture = Fixture::new();
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    let calls_before_stop = fixture.calls().len();
+
+    let stop_started = Instant::now();
+    fixture.assert_clean_teardown(connection);
+    let teardown = stop_started.elapsed();
+
+    let stop_calls = fixture.calls().split_off(calls_before_stop);
+    for absent in [
+        "query_app_volumes_count",
+        "query_app_volumes",
+        "app_volume_get_used_by_peers_count",
+        "app_volumes_update_used_by_peers",
+        "app_volumes_close_volume",
+    ] {
+        assert!(
+            !stop_calls.iter().any(|call| call == absent),
+            "{absent} at Stop: {stop_calls:?}"
+        );
+    }
+    assert!(
+        teardown < Duration::from_millis(100),
+        "the teardown took {teardown:?}"
+    );
+}
+
+/// A volume that lists no used-by peer at connect, as one no headset was served is, is hidden
+/// at Stop by leaving it open: the peers are read once, at connect, and Stop makes no call.
+#[test]
+fn a_volume_no_peer_uses_stays_open_at_stop() {
+    /// `QAR_STATUS_SUCCESS`, injected because the stub does not implement the count: the call
+    /// then succeeds and leaves the count at 0.
+    const SUCCESS: i64 = 0;
+    let fixture = Fixture::new();
+    fixture.fail_next("app_volume_get_used_by_peers_count", SUCCESS);
+    let connection = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    assert_eq!(
+        count_calls(&fixture, "app_volume_get_used_by_peers_count"),
+        1
+    );
+    let calls_before_stop = fixture.calls().len();
+
+    drop(connection);
+
+    let stop_calls = fixture.calls().split_off(calls_before_stop);
+    for absent in [
+        "query_app_volumes_count",
+        "app_volume_get_used_by_peers_count",
+        "app_volumes_update_used_by_peers",
+        "app_volumes_close_volume",
+    ] {
+        assert!(
+            !stop_calls.iter().any(|call| call == absent),
+            "{absent} at Stop: {stop_calls:?}"
+        );
+    }
+    let errors = fixture.calls_starting_with("ERROR");
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(fixture.live_handle_count(), 0, "every handle released");
+}
+
+/// A volume handed back open keeps the transform QAROS holds (see
+/// `a_volume_held_with_another_transform_maps_eyes_with_the_live_one`), except under
+/// `--reset-placement`, which sets it to the requested placement.
+#[test]
+fn reset_placement_sets_a_taken_over_volume_to_the_requested_placement() {
+    let fixture = Fixture::new();
+    let first = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    change_volume(&first, dragged_volume(4.0));
+    fixture.assert_clean_teardown(first);
+    let calls_before_second_start = fixture.calls().len();
+
+    let resetting = ConnectOptions {
+        reset_placement: true,
+        ..connect_options(&fixture.scratch, None)
+    };
+    let second = connect(&resetting, wake_counter().1).map(Rc::new).unwrap();
+
+    assert_eq!(second.volume_transform(), placement().volume_transform());
+    let start_calls = fixture.calls().split_off(calls_before_second_start);
+    for setter in [
+        "app_volumes_change_pose",
+        "app_volumes_change_app_pose",
+        "app_volumes_change_app_scale",
+    ] {
+        assert!(
+            start_calls.iter().any(|call| call == setter),
+            "{setter} at start: {start_calls:?}"
+        );
+    }
+    fixture.assert_clean_teardown(second);
 }
 
 /// A change while the viewer runs applies from the next frame begun; a frame begun before it

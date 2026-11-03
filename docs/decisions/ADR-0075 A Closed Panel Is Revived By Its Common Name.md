@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0075: A panel closed in the Hub is claimed again by its common name, never replaced under a new one
 
+> Amended by ADR-0090: a run sees a close of a panel it holds through a state subscription, streams nothing more to it and does not hide it at Stop, so the next run creates it afresh.
+
 ## Context
 
 A user can close a GUI panel in the Hub Display. The panel stays in the session's panel list with the state `QAR_GUI_PANEL_STATE_CLOSED` ([HDR] L1142-1147); the docs list the states and say nothing of what a later `get_or_create` with that common name does ([GP] L136). The panel's id is derived from its common name ([GP] L101). Seen with the glasses: a `get_or_create` by the closed panel's common name brings that panel back in the Visualizer, and a panel created under a fresh common name appeared beside it, a duplicate.

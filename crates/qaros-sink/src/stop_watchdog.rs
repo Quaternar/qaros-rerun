@@ -30,8 +30,8 @@ pub enum TeardownStep {
     /// The stream panels' gesture subscriptions are cancelled and their video senders
     /// destroyed.
     ClosePanelStreams = 3,
-    /// The app volume is closed.
-    CloseVolume = 4,
+    /// The app volume is hidden from every peer for the next run; it is never closed.
+    HideVolume = 4,
     /// The subscriptions are cancelled and the session and its runtime destroyed.
     SessionDestroy = 5,
     /// The library is destroyed (and stays mapped).
@@ -46,7 +46,7 @@ impl TeardownStep {
         Self::LeaveSink,
         Self::HidePanels,
         Self::ClosePanelStreams,
-        Self::CloseVolume,
+        Self::HideVolume,
         Self::SessionDestroy,
         Self::LibraryDestroy,
         Self::EndProcess,
@@ -65,7 +65,7 @@ impl TeardownStep {
             Self::LeaveSink => "leave sink (render senders)",
             Self::HidePanels => "hide panels",
             Self::ClosePanelStreams => "close panel streams",
-            Self::CloseVolume => "close volume",
+            Self::HideVolume => "hide volume",
             Self::SessionDestroy => "session destroy",
             Self::LibraryDestroy => "library destroy",
             Self::EndProcess => "end process (flush)",
@@ -240,8 +240,8 @@ mod tests {
     fn the_panel_streams_close_after_the_hide_and_before_the_volume() {
         assert_eq!(TeardownStep::ClosePanelStreams as u8, 3);
         assert!((TeardownStep::HidePanels as u8) < TeardownStep::ClosePanelStreams as u8);
-        assert!((TeardownStep::ClosePanelStreams as u8) < TeardownStep::CloseVolume as u8);
-        assert!((TeardownStep::CloseVolume as u8) < TeardownStep::SessionDestroy as u8);
+        assert!((TeardownStep::ClosePanelStreams as u8) < TeardownStep::HideVolume as u8);
+        assert!((TeardownStep::HideVolume as u8) < TeardownStep::SessionDestroy as u8);
     }
 
     #[test]
