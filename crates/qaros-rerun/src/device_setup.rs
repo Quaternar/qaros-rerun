@@ -14,7 +14,8 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use vulkan_device::{
-    PhysicalDeviceSelector, VulkanDevice, VulkanDeviceConfig, WINDOWS_INTEROP_EXTENSIONS,
+    PhysicalDeviceSelector, RawQueueForecast, VulkanDevice, VulkanDeviceConfig,
+    WINDOWS_INTEROP_EXTENSIONS,
 };
 
 use crate::memory_knobs::{MemoryKnobs, memory_hints_with_blocks_of};
@@ -82,6 +83,7 @@ impl GraphicsChoice {
             device_descriptor: Box::new(device_descriptor_with_blocks_of(
                 self.memory_block_mebibytes,
             )),
+            separate_raw_queue: true,
         };
         let vulkan = VulkanDevice::create(config)
             .await
@@ -92,6 +94,19 @@ impl GraphicsChoice {
             vulkan.handles
         );
         Ok(vulkan)
+    }
+
+    /// Whether [`Self::create_vulkan_device`] would give raw batches a queue of their own on
+    /// the physical device `selector` picks, read on an instance of its own without a device.
+    pub async fn forecast_raw_queue(
+        selector: &PhysicalDeviceSelector,
+    ) -> Result<RawQueueForecast, String> {
+        RawQueueForecast::of(
+            re_renderer::device_caps::instance_descriptor(None),
+            selector.clone().into_picker(),
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     /// egui's setup: the viewer's own device when there is one, else a new one.

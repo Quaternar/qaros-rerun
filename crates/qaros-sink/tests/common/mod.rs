@@ -26,6 +26,7 @@ pub fn create_device() -> Option<VulkanDevice> {
             required_limits: adapter.limits(),
             ..Default::default()
         }),
+        separate_raw_queue: true,
     };
     match pollster::block_on(VulkanDevice::create(config)) {
         Ok(device) => Some(device),

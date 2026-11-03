@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0058: Decoupled eye rendering on a render thread with a second re_renderer context
 
+> Amended by ADR-0088: the render thread is the default; `--inline-render` draws the eyes inside the viewer frame, and the default does so where the sink or the GPU cannot run the render thread.
+
 ## Context
 
 The eyes are rendered inside the viewer frame (ADR-0017): the 3D view builds its draw data in Rerun's UI pass, the observer copies it per eye, and the eyes are drawn after the pass. Every eye frame therefore waits for a whole viewer frame, and a scene whose update takes tens of milliseconds (queries and visualizers over many entities, long time ranges) sets the headset rate. On the Mac a 45 ms scene update gives 11 eye frames per second on the CPU path [DOC].

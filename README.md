@@ -121,7 +121,7 @@ The tests load `qaros-stub` instead of QAROS, so they need no Hub and no headset
 | [docs/for-rerun.md](docs/for-rerun.md) | For the Rerun team: the two patches to Rerun crates, what they enable, and an upstream API |
 | [docs/vulkan-path.md](docs/vulkan-path.md) | The QAROS Vulkan path: startup order, one frame, the hand-over, depth |
 | [docs/vulkan-device.md](docs/vulkan-device.md) | The Vulkan device the viewer creates |
-| [docs/decoupled-render.md](docs/decoupled-render.md) | The experimental decoupled render loop (`--decoupled-render`) |
+| [docs/decoupled-render.md](docs/decoupled-render.md) | The decoupled render loop, the default (`--inline-render` opts out) |
 | [docs/known-issues.md](docs/known-issues.md) | QAROS runtime behaviour the viewer works around: symptom, cause, workaround, build seen on, status |
 | [docs/decisions/](docs/decisions/README.md) | Architecture decision records |
 

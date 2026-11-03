@@ -6,23 +6,24 @@ sidebar_position: 7
 
 # Decoupled headset render loop
 
-Experimental, opt-in with `--decoupled-render`; without the flag the eyes are rendered inside the viewer frame.
+The default (ADR-0088). `--inline-render` draws the eyes inside the viewer frame instead; `--decoupled-render` insists on the render thread and refuses to start where it cannot run.
 
 ## What it does
 
-By default the eyes are rendered inside the viewer frame: the 3D view builds its draw data in Rerun's UI pass, the observer copies it per eye, and the eyes are drawn after the pass. Every eye frame waits for a whole viewer frame, so a slow scene update sets the headset rate, and head motion stutters with it.
+Rendered inline (`--inline-render`), the 3D view builds its draw data in Rerun's UI pass, the observer copies it per eye, and the eyes are drawn after the pass. Every eye frame waits for a whole viewer frame, so a slow scene update sets the headset rate, and head motion stutters with it.
 
-With `--decoupled-render` a render thread draws the last finished scene for every user and eye at its own rate, from fresh head poses, while the UI thread rebuilds the scene at its own pace and swaps it in when it is complete. Head motion stays smooth; the data itself updates at the scene's rate.
+Decoupled, a render thread draws the last finished scene for every user and eye at its own rate, from fresh head poses, while the UI thread rebuilds the scene at its own pace and swaps it in when it is complete. Head motion stays smooth; the data itself updates at the scene's rate.
 
 The same idea applies to any application whose scene update is slower than the headset needs: keep the last complete scene, and draw it from new poses as often as the headset asks.
 
-## When to use it
+## When it runs
 
-Try it when your scene updates slowly: many entities, large point clouds, long time windows. With the flag on, head motion no longer waits for the scene update; the eyes still cost what the scene costs to draw.
+Without either flag the viewer renders decoupled wherever it can. It matters most when your scene updates slowly: many entities, large point clouds, long time windows. Head motion no longer waits for the scene update; the eyes still cost what the scene costs to draw. Every run logs how the eyes are drawn at start: `render: decoupled (raw batches on queue 1)` (or `share wgpu's queue under the submission lock` on a one-queue GPU, headless), `render: decoupled` without the viewer's own Vulkan device, `render: inline (--inline-render)`, or `render: inline, because ...`. Where it cannot run, the viewer draws the eyes inline and warns (`headset: the decoupled render loop cannot run, because ...`): without a sink, and with the QAROS Vulkan sink in a window on a GPU whose graphics queue family has one queue. That GPU is read at start, before onboarding, from `--vulkan-device` or else the first discrete NVIDIA GPU, else the first discrete GPU, else the first device (`render_loop.rs`). `--inline-render` compares the two loops on the same data.
 
 Limits:
 
-- With the QAROS Vulkan path it needs a headless viewer (`--headless WxH`, or `--launched-by-qaros` without `--window`); in a window, use `--qaros-graphics cpu`.
+- With the QAROS Vulkan path in a window, the GPU's graphics queue family needs a second queue (an RTX 5070 Laptop GPU's has 16, ADR-0081). On a GPU whose family has one (MoltenVK, many integrated GPUs) the default renders inline; `--decoupled-render` ends with an error after joining the session, so run it headless (`--headless WxH`, or `--launched-by-qaros` without `--window`) or with `--qaros-graphics cpu`. When the session names a one-queue GPU other than the one read at start, the default ends with that error too; add `--inline-render`, or name the session's GPU with `--vulkan-device`.
+- In a window the desktop still draws Rerun's 3D view every frame, which costs GPU time beside the eyes.
 - Videos and other textures Rerun rewrites in place can show newer content than the rest of a held scene.
 - Both threads share the GPU and the queue, so the eye rate is decoupled from the scene's CPU update time, not from its GPU time.
 - Shaders and pipelines compile twice, and the render thread's upload belt takes its own 32 MiB host-visible chunks.
@@ -59,18 +60,22 @@ Drawing another context's draw data needs nothing else: `QueueableDrawData::rend
 
 ### Queue access
 
-wgpu's own submissions are thread-safe; the QAROS Vulkan path's raw submits and the semaphores it stages on wgpu's queue are not. `re_renderer::queue_submission_lock()` covers Rerun's `before_submit`, the eye submit, the headless panel capture's two queue submits, and on the render thread the sink calls (begin, show, abandon, user changes, drop) of a GPU sink that submits outside wgpu (`GpuFrameSink::submits_outside_wgpu`, today the QAROS Vulkan sink). Sinks that submit through wgpu alone take no lock. Building the eye views and queuing the scene's draw data run outside it. eframe's window presentation does not take it, so the QAROS Vulkan sink with `--decoupled-render` is refused unless the viewer is headless, which is the launched-by-QAROS default.
+wgpu's own submissions are thread-safe; the QAROS Vulkan path's raw submits are not, since wgpu does not see them (ADR-0081).
+
+- **Two queues.** When wgpu's queue family has a second queue, the viewer's device is created with it, and every raw call (acquire and release batches, discard signals, idle waits) goes there (`vulkan_device::RawQueue`), under a mutex of its own. The semaphores the handover stages on wgpu's queue hold whichever thread's submission takes them: the wait is staged before our submission, the signal after it and flushed with an empty one. The render thread's sink calls take no lock, and eframe's window may submit and present at any time, so the decoupled loop with the Vulkan sink runs in a window.
+- **One queue.** Raw calls share wgpu's queue. `re_renderer::queue_submission_lock()` covers Rerun's `before_submit`, the eye submit, the headless panel capture's two queue submits, and on the render thread the sink calls (begin, show, abandon, user changes, drop) of a GPU sink whose raw work shares wgpu's queue (`GpuFrameSink::submits_raw_to_wgpu_queue`). Building the eye views and queuing the scene's draw data run outside it. eframe's window presentation does not take it, so the QAROS Vulkan sink renders decoupled in a window only with two queues: the default renders inline instead, and `--decoupled-render` ends with an error once the device is known; headless is the launched-by-QAROS default.
+- **Not covered.** A window resize makes wgpu wait for the whole device (`vkDeviceWaitIdle`) without synchronizing with our queue; see ADR-0081.
 
 ### Eye poses, panels, users
 
 - Poses: `begin_frames` runs on the render thread right before the eye views are built, so every eye frame uses the newest poses, whatever the scene's age. The perf log records the scene's age at every eye frame (`scene_age_at_eye_frame`).
 - Eye output resources (composite targets, output uniforms) belong to the render thread's `HeadsetRenderer` and are reused across frames.
 - Panels: capture (cropping the UI image) and the timeline panel's drawing stay on the UI thread; the QAROS GUI panel hook runs once per eye frame on the render thread and syncs once a second.
-- Users: joins, leaves and the user cap work as without the flag, inside the sink on the render thread; with two users each gets a frame per eye frame.
+- Users: joins, leaves and the user cap work as when rendered inline, inside the sink on the render thread; with two users each gets a frame per eye frame.
 
 ### Stop and teardown
 
-`Drop` of `DecoupledHeadset`, reached from `leave_qaros` (Stop, Ctrl+C, `--quit-when-done`) and `on_exit`: request the stop, wake the condvar, join the render thread. The thread finishes its eye frame, abandons every open frame on the sink, drops the sink (senders), then the panel hook, which holds the last reference to the QAROS connection, so session and library are released on the thread that created them; then its own context. The UI then clears its own frame hooks and ends the process as without the flag; the stop watchdog bounds the whole teardown. Dropping the QAROS sink first lets its senders' begin-frame waits end, for at most 500 ms. A panic anywhere after the sink was built is caught: the teardown runs as above, and the render thread marks itself failed, which the UI thread treats as a stop request and ends the run with an error. A panic in the teardown is caught too; the submission lock is taken before the sink is unpacked, so the sink drops under it even then.
+`Drop` of `DecoupledHeadset`, reached from `leave_qaros` (Stop, Ctrl+C, `--quit-when-done`) and `on_exit`: request the stop, wake the condvar, join the render thread. The thread finishes its eye frame, abandons every open frame on the sink, drops the sink (senders), then the panel hook, which holds the last reference to the QAROS connection, so session and library are released on the thread that created them; then its own context. The UI then clears its own frame hooks and ends the process as when rendered inline; the stop watchdog bounds the whole teardown. Dropping the QAROS sink first lets its senders' begin-frame waits end, for at most 500 ms. A panic anywhere after the sink was built is caught: the teardown runs as above, and the render thread marks itself failed, which the UI thread treats as a stop request and ends the run with an error. A panic in the teardown is caught too; the submission lock is taken before the sink is unpacked, so the sink drops under it even then.
 
 ## Changes to Rerun crates
 
@@ -78,7 +83,7 @@ wgpu's own submissions are thread-safe; the QAROS Vulkan path's raw submits and 
 
 | File | What and why |
 | --- | --- |
-| `src/context.rs` | `RenderContext::new_sharing_device`: a second context on a device another context renders with, which leaves the device's uncaptured error handler to the first (`new` replaces it). `queue_submission_lock()`: a process-wide mutex held around `before_submit`'s submit. |
+| `src/context.rs` | `RenderContext::new_sharing_device`: a second context on a device another context renders with, which leaves the device's uncaptured error handler to the first (`new` replaces it). `queue_submission_lock()`: a process-wide mutex held around `before_submit`'s submit, needed when raw Vulkan work shares wgpu's queue. |
 | `src/lib.rs` | exports `queue_submission_lock`. |
 | `src/renderer/point_cloud.rs` | hand-written `Clone`: a copy starts its own `SortedDrawables` instead of sharing the original's `Arc<Mutex<_>>`. |
 | `src/renderer/gaussian_splat.rs` | the same for gaussian splats. |
@@ -92,4 +97,4 @@ Carrying them across a Rerun upgrade: re-apply the changes to the new vendored c
 - **A minimal draw path of our own for retained scenes.** Draw data contents are private to `re_renderer`; it would mean reimplementing every renderer.
 - **Persistent variants of draw data or of the belt in `re_renderer`.** A patch across every renderer; unnecessary while pools recycle by reference count.
 - **Sink on the UI thread, proxied from the render thread.** Every begin and show would wait for the UI thread again.
-- **A second queue for the render thread.** wgpu 30 exposes one queue per device.
+- **A second queue for the render thread's wgpu work.** wgpu 30 exposes one queue per device; only the raw Vulkan work gets a queue of its own (ADR-0081).

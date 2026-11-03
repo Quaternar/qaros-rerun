@@ -1,5 +1,6 @@
-//! `--decoupled-render` (experiment): the eyes are drawn on a render thread of their own, from
-//! the last scene the UI thread finished, at whatever rate the sink and the GPU allow.
+//! The decoupled render loop, the default (ADR-0088): the eyes are drawn on a render thread of
+//! their own, from the last scene the UI thread finished, at whatever rate the sink and the GPU
+//! allow.
 //!
 //! The UI thread runs Rerun as usual. The 3D view observer only copies the streamed view's draw
 //! data ([`SceneCapture`]); after the UI pass, once Rerun's `before_submit` has queued the
@@ -68,9 +69,23 @@ impl RetainedScene {
 #[derive(Default)]
 struct HandoffState {
     scene: Option<Arc<RetainedScene>>,
-    /// Counts publications, wakes and the stop, so a waiter sees any change since it looked.
+    /// Counts publications, wakes, pauses and the stop, so a waiter sees any change since it
+    /// looked.
     generation: u64,
     stop_requested: bool,
+    pause_requested: bool,
+    render_thread: RenderThreadPlace,
+}
+
+/// Where the render thread is, as far as a pause cares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RenderThreadPlace {
+    /// Setting up or tearing down: a pause does not wait for it.
+    #[default]
+    OutsideEyeFrameLoop,
+    /// Running eye frames; it parks at the next boundary when a pause is requested.
+    InEyeFrameLoop,
+    ParkedBetweenEyeFrames,
 }
 
 /// The newest scene, handed from the UI thread to the render thread. Neither side holds the
@@ -128,6 +143,92 @@ impl SceneHandoff {
             .changed
             .wait_timeout_while(state, timeout, |state| state.generation == seen_generation)
             .unwrap_or_else(PoisonError::into_inner);
+    }
+
+    fn move_render_thread(&self, place: RenderThreadPlace) {
+        self.state().render_thread = place;
+        self.changed.notify_all();
+    }
+
+    /// The render thread's side of [`RenderThreadPause`]: between eye frames, while a pause
+    /// is requested, it waits here, with no wgpu submit and no raw batch of its own running.
+    fn park_while_paused(&self) {
+        let mut state = self.state();
+        if !state.pause_requested {
+            return;
+        }
+        state.render_thread = RenderThreadPlace::ParkedBetweenEyeFrames;
+        self.changed.notify_all();
+        while state.pause_requested && !state.stop_requested {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.render_thread = RenderThreadPlace::InEyeFrameLoop;
+    }
+
+    /// Requests the pause and waits up to `limit` for the render thread to park; true when it
+    /// parked or is not in its eye frame loop.
+    fn request_pause(&self, limit: Duration) -> bool {
+        let mut state = self.state();
+        state.pause_requested = true;
+        state.generation += 1;
+        self.changed.notify_all();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, limit, |state| {
+                state.render_thread == RenderThreadPlace::InEyeFrameLoop
+            })
+            .unwrap_or_else(PoisonError::into_inner);
+        state.render_thread != RenderThreadPlace::InEyeFrameLoop
+    }
+
+    fn end_pause(&self) {
+        self.state().pause_requested = false;
+        self.changed.notify_all();
+    }
+}
+
+/// Lets the UI thread hold the render thread between eye frames while eframe reconfigures the
+/// window's surface. wgpu-core's `Surface::configure` fails when another thread submits while
+/// it waits for the device to go idle, and wgpu-hal then calls `vkDeviceWaitIdle`, which must
+/// not run beside any other call on the device's queues, the raw queue's included (ADR-0081).
+#[derive(Clone)]
+pub struct RenderThreadPause {
+    handoff: Arc<SceneHandoff>,
+}
+
+impl RenderThreadPause {
+    /// Parks the render thread at its next eye frame boundary, waiting up to `limit` for it;
+    /// it stays parked until the guard drops. Past the limit the guard is returned anyway, with
+    /// the render thread parking whenever it reaches the boundary, and
+    /// [`PausedRenderThread::is_parked`] says so.
+    pub fn pause(&self, limit: Duration) -> PausedRenderThread<'_> {
+        let parked = self.handoff.request_pause(limit);
+        PausedRenderThread {
+            handoff: &self.handoff,
+            parked,
+        }
+    }
+}
+
+/// While it lives, the render thread stays parked between eye frames.
+pub struct PausedRenderThread<'pause> {
+    handoff: &'pause SceneHandoff,
+    parked: bool,
+}
+
+impl PausedRenderThread<'_> {
+    /// False when the render thread did not reach an eye frame boundary in time.
+    pub fn is_parked(&self) -> bool {
+        self.parked
+    }
+}
+
+impl Drop for PausedRenderThread<'_> {
+    fn drop(&mut self) {
+        self.handoff.end_pause();
     }
 }
 
@@ -369,6 +470,12 @@ impl DecoupledHeadset {
         self.status.is_streaming()
     }
 
+    pub fn render_thread_pause(&self) -> RenderThreadPause {
+        RenderThreadPause {
+            handoff: Arc::clone(&self.handoff),
+        }
+    }
+
     pub fn is_finished(&self) -> bool {
         self.status.is_finished()
     }
@@ -423,12 +530,14 @@ impl DecoupledHeadset {
     }
 }
 
-/// Raw Vulkan submissions of a GPU sink (acquire and release batches, semaphores staged on
-/// wgpu's queue, waits for an idle queue) must not interleave with another thread's submits.
-/// Sinks that submit through wgpu alone need no lock: wgpu synchronizes its own submits.
+/// Raw Vulkan submissions of a GPU sink on wgpu's own queue (acquire and release batches,
+/// waits for an idle queue) must not interleave with another thread's submits. A sink whose raw
+/// work has a queue of its own, or that submits through wgpu alone, needs no lock: wgpu
+/// synchronizes its own submits, and the staged semaphores hold whichever submission takes them.
 fn sink_submission_lock(sink: &HeadsetSink) -> Option<MutexGuard<'static, ()>> {
-    let submits_outside_wgpu = matches!(sink, HeadsetSink::Gpu(gpu) if gpu.submits_outside_wgpu());
-    submits_outside_wgpu.then(re_renderer::queue_submission_lock)
+    let shares_wgpu_queue =
+        matches!(sink, HeadsetSink::Gpu(gpu) if gpu.submits_raw_to_wgpu_queue());
+    shares_wgpu_queue.then(re_renderer::queue_submission_lock)
 }
 
 /// Marks the render thread failed when it unwinds past this point, whatever panicked.
@@ -545,10 +654,8 @@ fn render_until_stopped(
             return;
         }
     };
-    re_log::info!("headset: rendering on a thread of its own (--decoupled-render)");
-    let mut eye_frame = 0;
-    while !handoff.is_stop_requested() {
-        eye_frame += 1;
+    re_log::info!("headset: rendering on a thread of its own (the decoupled render loop)");
+    run_eye_frames_until_stopped(handoff, |eye_frame| {
         run_eye_frame(
             render_context,
             renderer,
@@ -557,6 +664,33 @@ fn render_until_stopped(
             status,
             eye_frame,
         );
+    });
+}
+
+/// Runs `eye_frame` with the frame's number until a stop is requested, parked between two
+/// frames while the UI thread holds a [`RenderThreadPause`].
+fn run_eye_frames_until_stopped(handoff: &SceneHandoff, mut eye_frame: impl FnMut(u64)) {
+    handoff.move_render_thread(RenderThreadPlace::InEyeFrameLoop);
+    let _leaves_loop = LeavesEyeFrameLoop(handoff);
+    let mut eye_frame_number = 0;
+    while !handoff.is_stop_requested() {
+        handoff.park_while_paused();
+        if handoff.is_stop_requested() {
+            break;
+        }
+        eye_frame_number += 1;
+        eye_frame(eye_frame_number);
+    }
+}
+
+/// A pause requested after the render thread left its eye frame loop, by a stop or a panic,
+/// does not wait for it.
+struct LeavesEyeFrameLoop<'handoff>(&'handoff SceneHandoff);
+
+impl Drop for LeavesEyeFrameLoop<'_> {
+    fn drop(&mut self) {
+        self.0
+            .move_render_thread(RenderThreadPlace::OutsideEyeFrameLoop);
     }
 }
 
@@ -691,6 +825,8 @@ fn tear_down(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use super::*;
 
     fn empty_scene(sequence: u64) -> Arc<RetainedScene> {
@@ -752,6 +888,141 @@ mod tests {
             "waited {waited:?}"
         );
         assert_eq!(handoff.latest().0.map(|scene| scene.sequence), Some(1));
+    }
+
+    /// The eye frame loop on a thread of its own: each frame counts itself and records
+    /// whether it ran during a pause, then idles in the handoff's wait as a frame that began
+    /// nothing does, for far longer than any test waits.
+    struct EyeFrameLoop {
+        handoff: Arc<SceneHandoff>,
+        frames: Arc<AtomicU64>,
+        frame_during_pause: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
+        thread: JoinHandle<()>,
+    }
+
+    impl EyeFrameLoop {
+        fn start() -> Self {
+            let handoff = Arc::new(SceneHandoff::default());
+            let frames = Arc::new(AtomicU64::new(0));
+            let frame_during_pause = Arc::new(AtomicBool::new(false));
+            let paused = Arc::new(AtomicBool::new(false));
+            let thread = {
+                let handoff = Arc::clone(&handoff);
+                let frames = Arc::clone(&frames);
+                let frame_during_pause = Arc::clone(&frame_during_pause);
+                let paused = Arc::clone(&paused);
+                std::thread::spawn(move || {
+                    run_eye_frames_until_stopped(&handoff, |_| {
+                        if paused.load(Ordering::SeqCst) {
+                            frame_during_pause.store(true, Ordering::SeqCst);
+                        }
+                        frames.fetch_add(1, Ordering::SeqCst);
+                        let (_, generation) = handoff.latest();
+                        handoff.wait_for_change(generation, Duration::from_mins(1));
+                    });
+                })
+            };
+            let eye_frame_loop = Self {
+                handoff,
+                frames,
+                frame_during_pause,
+                paused,
+                thread,
+            };
+            eye_frame_loop.wait_for_frames(1);
+            eye_frame_loop
+        }
+
+        fn pause_handle(&self) -> RenderThreadPause {
+            RenderThreadPause {
+                handoff: Arc::clone(&self.handoff),
+            }
+        }
+
+        fn frames(&self) -> u64 {
+            self.frames.load(Ordering::SeqCst)
+        }
+
+        fn wait_for_frames(&self, count: u64) {
+            let started = Instant::now();
+            while self.frames() < count {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "the loop never reached frame {count}"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn stop(self) {
+            self.handoff.request_stop();
+            self.thread.join().expect("the eye frame loop");
+        }
+    }
+
+    #[test]
+    fn a_pause_parks_the_render_thread_between_eye_frames_until_it_ends() {
+        let eye_frame_loop = EyeFrameLoop::start();
+        let render_thread_pause = eye_frame_loop.pause_handle();
+
+        let started = Instant::now();
+        let paused = render_thread_pause.pause(Duration::from_secs(5));
+        let waited = started.elapsed();
+        eye_frame_loop.paused.store(true, Ordering::SeqCst);
+        assert!(paused.is_parked());
+        assert!(
+            waited < Duration::from_secs(2),
+            "the pause ends the idle wait instead of waiting it out: {waited:?}"
+        );
+        let frames_at_pause = eye_frame_loop.frames();
+        eye_frame_loop.handoff.wake();
+        eye_frame_loop.handoff.publish(Some(empty_scene(1)));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            eye_frame_loop.frames(),
+            frames_at_pause,
+            "neither a wake nor a new scene runs a frame during the pause"
+        );
+
+        eye_frame_loop.paused.store(false, Ordering::SeqCst);
+        drop(paused);
+        eye_frame_loop.wait_for_frames(frames_at_pause + 1);
+        assert!(!eye_frame_loop.frame_during_pause.load(Ordering::SeqCst));
+        eye_frame_loop.stop();
+    }
+
+    #[test]
+    fn without_a_render_thread_in_its_loop_a_pause_does_not_wait() {
+        let render_thread_pause = RenderThreadPause {
+            handoff: Arc::new(SceneHandoff::default()),
+        };
+        let started = Instant::now();
+        let paused = render_thread_pause.pause(Duration::from_secs(5));
+        assert!(paused.is_parked());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_stop_ends_a_pause_and_a_later_pause_does_not_wait_for_the_stopped_thread() {
+        let eye_frame_loop = EyeFrameLoop::start();
+        let render_thread_pause = eye_frame_loop.pause_handle();
+        let paused = render_thread_pause.pause(Duration::from_secs(5));
+        assert!(paused.is_parked());
+        let frames_at_pause = eye_frame_loop.frames();
+        let frames = Arc::clone(&eye_frame_loop.frames);
+        eye_frame_loop.stop();
+        drop(paused);
+        assert_eq!(
+            frames.load(Ordering::SeqCst),
+            frames_at_pause,
+            "the stop ended the loop without another frame"
+        );
+
+        let started = Instant::now();
+        let later = render_thread_pause.pause(Duration::from_secs(5));
+        assert!(later.is_parked());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     mod on_the_gpu {

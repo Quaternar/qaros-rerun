@@ -4,16 +4,20 @@
 //! semaphore. A raw consumer batch acquires the image after that semaphore, copies it out and
 //! releases it back to `VK_QUEUE_FAMILY_EXTERNAL`, as an encoder would. Three frames run on the
 //! same image, wrapped again each frame, the way a render sender hands its images out: the
-//! first from `UNDEFINED`, the others from the external family.
+//! first from `UNDEFINED`, the others from the external family. With the raw batches on a queue
+//! of their own, another thread submits to wgpu's queue throughout every handover.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, unsafe_code)]
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ash::vk;
 use vulkan_device::{
-    HandoverQueue, ImageAcquire, ImageRelease, SemaphoreSignal, VulkanApi, attachment_layout,
-    image_aspect, texture_from_vk_image,
+    HandoverQueue, ImageAcquire, ImageRelease, SemaphoreSignal, VulkanApi, VulkanDevice,
+    attachment_layout, image_aspect, texture_from_vk_image,
 };
 
 const WIDTH: u32 = 32;
@@ -294,11 +298,52 @@ fn clear_commands(
     encoder.finish()
 }
 
+/// Another thread submitting to wgpu's queue throughout a handover, as eframe's window does with
+/// `--decoupled-render`, so its submissions can take the semaphores the handover staged. Only
+/// with the raw batches on a queue of their own: on wgpu's queue they need the submission lock.
+struct OtherSubmitter {
+    running: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<u64>>,
+}
+
+impl OtherSubmitter {
+    fn start_unless_shared(vulkan: &VulkanDevice) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let thread = (!vulkan.raw_queue.shares_wgpu_queue()).then(|| {
+            let queue = vulkan.queue.clone();
+            let keep_running = Arc::clone(&running);
+            std::thread::spawn(move || {
+                let mut submissions = 0;
+                loop {
+                    queue.submit([]);
+                    submissions += 1;
+                    if !keep_running.load(Ordering::SeqCst) {
+                        return submissions;
+                    }
+                }
+            })
+        });
+        Self { running, thread }
+    }
+
+    fn stop(self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(thread) = self.thread {
+            let submissions = thread.join().unwrap();
+            assert!(submissions > 0);
+        }
+    }
+}
+
 #[test]
 fn released_images_reach_the_consumer_after_the_frame_semaphore() {
-    let Some(vulkan) = common::default_device() else {
-        return;
-    };
+    for vulkan in common::devices_for_both_raw_queues() {
+        eprintln!("raw batches on {:?}", vulkan.raw_queue);
+        three_frames_reach_the_consumer(&vulkan);
+    }
+}
+
+fn three_frames_reach_the_consumer(vulkan: &VulkanDevice) {
     let device = &vulkan.device;
     let ash_device = common::ash_device(device);
     let memory_types = MemoryTypes::of(device);
@@ -306,7 +351,7 @@ fn released_images_reach_the_consumer_after_the_frame_semaphore() {
     let consumer = Consumer::new(device, &memory_types);
     let frame_ready =
         unsafe { ash_device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }.unwrap();
-    let mut handover_queue = HandoverQueue::new(device, 2).unwrap();
+    let mut handover_queue = HandoverQueue::new(device, &vulkan.raw_queue, 2).unwrap();
     assert_eq!(
         handover_queue.queue_family_index(),
         vulkan.handles.queue_family_index
@@ -347,6 +392,7 @@ fn released_images_reach_the_consumer_after_the_frame_semaphore() {
         let commands = clear_commands(device, &texture, clear_color);
         let format = texture.format();
         let (owner_layout, owner_family) = owner_state;
+        let other_submitter = OtherSubmitter::start_unless_shared(vulkan);
         unsafe {
             handover_queue.submit_handover(
                 &vulkan.queue,
@@ -372,6 +418,7 @@ fn released_images_reach_the_consumer_after_the_frame_semaphore() {
             )
         }
         .unwrap();
+        other_submitter.stop();
         drop(texture);
 
         let pixels = consumer.copy_out(image, frame_ready);

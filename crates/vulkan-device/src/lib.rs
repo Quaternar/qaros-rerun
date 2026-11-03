@@ -10,6 +10,9 @@
 //!   physical device, device, queue family, queue index and queue.
 //! - [`texture_from_vk_image`] wraps a `VkImage` created elsewhere on the same device as a
 //!   `wgpu::Texture`.
+//! - [`RawQueue`] is where raw batches go: queue 1 of wgpu's queue family on a device
+//!   [`VulkanDevice::create`] made with two queues there, else wgpu's own queue.
+//!   [`RawQueueForecast`] reads which of the two a device would get, without creating it.
 //! - [`stage_wait_semaphore`], [`stage_signal_semaphore`] and [`submit_sync_batch`] put
 //!   semaphores around wgpu's next submission, directly or through an empty raw batch.
 //! - [`HandoverQueue`] wraps wgpu's submission in raw batches that take images over from their
@@ -29,12 +32,13 @@ mod handles;
 mod handover;
 mod memory_budget;
 mod picker;
+mod raw_queue;
 mod semaphores;
 
 pub use ash::vk;
 pub use device::{
-    QAROS_WINDOWS_EXTENSIONS, VulkanDevice, VulkanDeviceConfig, VulkanDeviceError,
-    WINDOWS_INTEROP_EXTENSIONS,
+    QAROS_WINDOWS_EXTENSIONS, RawQueueForecast, VulkanDevice, VulkanDeviceConfig,
+    VulkanDeviceError, WINDOWS_INTEROP_EXTENSIONS,
 };
 pub use external_image::texture_from_vk_image;
 pub use handles::VulkanDeviceHandles;
@@ -45,6 +49,7 @@ pub use memory_budget::{MemoryHeapBudget, MemoryHeapBudgets, memory_heap_budgets
 pub use picker::{
     PhysicalDeviceIdentity, PhysicalDevicePicker, PhysicalDeviceSelector, describe_physical_devices,
 };
+pub use raw_queue::RawQueue;
 pub use semaphores::{
     KeyedMutexAcquire, KeyedMutexRelease, KeyedMutexSync, SemaphoreSignal, SemaphoreWait,
     stage_signal_semaphore, stage_wait_semaphore, submit_sync_batch, wait_queue_idle,

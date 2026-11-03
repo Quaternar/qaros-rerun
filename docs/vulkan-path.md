@@ -65,7 +65,7 @@ For development, `--depth-scale-down N` (with `--image-targets gpu`) makes the i
 
 Points to watch when you build the same path into your own application:
 
-- **Queue access.** wgpu and the release batches submit to queue 0 of family 0. If QAROS submits to the same `VkQueue` from its own threads, the two must not overlap. The viewer serializes its own submissions with a process-wide lock ([decoupled-render.md](decoupled-render.md#queue-access)).
+- **Queue access.** wgpu submits to queue 0 of family 0. The acquire and release batches, discard signals and idle waits go to queue 1 of that family when it has a second queue, else to queue 0 under a process-wide lock ([decoupled-render.md](decoupled-render.md#queue-access), ADR-0081). QAROS imports the images into a device of its own and submits there, never on the viewer's queues.
 - **Image usage.** The header reports format features but not usage flags; the sink wraps the images for render attachment use only.
 - **Depth size.** The "streaming to peer ... views" log line lists each image's size, so the log shows whether QAROS hands out depth at the color's resolution or smaller (the resampled pass then runs).
 - **Adapter.** The device must be on the session's adapter: on a laptop with two GPUs, the LUID `qar_session_get_graphics_device_id` reports decides which GPU renders.

@@ -60,9 +60,10 @@ pub trait GpuFrameSink {
     /// depth attachment holds values in `[0, 1]`.
     fn depth_range(&self) -> DepthRange;
 
-    /// The sink also submits to the queue outside wgpu (raw Vulkan batches, queue waits),
-    /// which must not interleave with another thread's wgpu submits.
-    fn submits_outside_wgpu(&self) -> bool {
+    /// The sink also submits to wgpu's own queue outside wgpu (raw Vulkan batches, queue
+    /// waits), which must not interleave with another thread's wgpu submits. A sink whose raw
+    /// work goes to a queue of its own returns `false`.
+    fn submits_raw_to_wgpu_queue(&self) -> bool {
         false
     }
 }

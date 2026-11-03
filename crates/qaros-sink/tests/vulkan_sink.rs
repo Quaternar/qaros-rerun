@@ -307,6 +307,7 @@ fn frames_render_into_the_sender_images_and_reach_the_consumer_released() {
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         LocalStream::new(images.clone(), semaphore, &log),
         VulkanSinkOptions {
             depth_range: depth_range(),
@@ -413,6 +414,7 @@ fn depth_images_smaller_than_color_are_handed_out_at_their_own_size() {
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         LocalStream::new(images.clone(), semaphore, &log),
         VulkanSinkOptions {
             depth_range: depth_range(),
@@ -479,6 +481,7 @@ fn an_abandoned_frame_still_signals_its_semaphore() {
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         ColorOnly(LocalStream::new(images, semaphore, &log)),
         VulkanSinkOptions {
             depth_range: depth_range(),
@@ -516,6 +519,7 @@ fn an_abandoned_frame_still_signals_its_semaphore() {
         VulkanSink::new(
             &vulkan.device,
             &vulkan.queue,
+            &vulkan.raw_queue,
             ColorOnly(LocalStream::new(Vec::new(), semaphore, &log)),
             VulkanSinkOptions {
                 depth_range: DepthRange::new(0.1, 10.0, DepthEncoding::LinearMeters).unwrap(),
@@ -554,6 +558,7 @@ fn each_user_renders_into_its_own_sender_and_a_leaving_user_stops_getting_frames
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         PerUserStreams {
             streams,
             leaving: Vec::new(),

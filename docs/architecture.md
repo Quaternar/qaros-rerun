@@ -24,7 +24,7 @@ Everything that talks to QAROS sits behind one trait, `FrameSink` ([The seam](#t
 
 The 3D view's draw data is what the eyes need, and Rerun 0.40.0 offers no public way to get it: a wrapper view class cannot reuse the `3D` identifier the spatial visualizers check for, and visualizers cannot see each other's output. So a small patch to `re_view_spatial` (one new module and one call site) hands the data to an optional observer right before the 3D view queues it into its own `ViewBuilder`, together with the view coordinates, scene bounds and desktop camera (`patches/re_view_spatial/src/view_3d_observer.rs`, call site in `src/ui_3d.rs`). While an observer is registered, the view also keeps encoded images and video frames that lie outside the desktop camera, which Rerun would otherwise skip (`src/eye.rs`). The workspace applies the patch with `[patch.crates-io]`. The case for upstreaming it is in [for-rerun.md](for-rerun.md).
 
-Per viewer frame, the headset renderer then:
+Rendered inline (`--inline-render`, or where the render thread cannot run), per viewer frame, the headset renderer then:
 
 1. while the 3D view draws (the sink is lent to the UI pass), shows the frames that are complete, then asks the sink for the next frame of every user that has none in flight (two poses and fields of view each, per-eye resolution);
 2. builds one `ViewBuilder` per eye of each of those frames from copies of the same draw data, with the off-axis projection of that frame's own pose and a full-eye picking layer for depth (`re_renderer` does not expose the main depth buffer); for a CPU sink also a screenshot readback for color and a readback of the picking depth, for a GPU sink neither (the patched `re_renderer` keeps the picking depth on the GPU, [vulkan-path.md](vulkan-path.md#why-the-extra-pass));
@@ -33,9 +33,9 @@ Per viewer frame, the headset renderer then:
 
 Every frame is keyed by user and a per-user frame id from the sink's request to `show_frame`, and every readback carries that key, so a user's frame is shown only with the pixels rendered for its own pose. Users render independently: a user whose readback is late does not hold up the others.
 
-The sink lives with the viewer app on the UI thread and is passed to the renderer per call: the renderer is shared with the 3D view observer, which must be `Send + Sync`, while QAROS handles are bound to one thread. Pixels where nothing was drawn are made transparent from the depth coverage. The viewer repaints continuously while at least one user is rendered, and otherwise behaves like the stock viewer, repainting every 0.5 s to poll the peer list; the QAROS peer update and frame callbacks wake it from library threads.
+Inline, the sink lives with the viewer app on the UI thread and is passed to the renderer per call: the renderer is shared with the 3D view observer, which must be `Send + Sync`, while QAROS handles are bound to one thread. Pixels where nothing was drawn are made transparent from the depth coverage. The viewer repaints continuously while at least one user is rendered, and otherwise behaves like the stock viewer, repainting every 0.5 s to poll the peer list; the QAROS peer update and frame callbacks wake it from library threads.
 
-When the scene updates slowly, `--decoupled-render` moves eye rendering to a thread of its own: [decoupled-render.md](decoupled-render.md).
+By default the eyes are drawn on a render thread of their own from the last finished scene, which also holds the sink, so a slow scene update no longer holds up head motion. Without a sink, or with the QAROS Vulkan sink in a window on a GPU whose graphics queue family has one queue, the viewer renders inline and logs why (ADR-0088): [decoupled-render.md](decoupled-render.md).
 
 ## The seam
 
@@ -66,7 +66,7 @@ A GPU variant, `GpuFrameSink`, hands out textures to render into instead of taki
 
 ## The QAROS sink
 
-`--sink qaros` connects before the viewer opens, on the UI thread (with `--decoupled-render`, on the render thread):
+`--sink qaros` connects before the viewer opens, on the render thread (inline, on the UI thread):
 
 1. **Library.** Loads `qar-streaming-c` from `--qaros-library` or `QAROS_DLL`, else with the binding's default lookup (a runtime already loaded, one beside the executable, `QAROS_RUNTIME_DIR`, the installed QAROS from `HKLM\SOFTWARE\Quaternar\QAROS`, then `PATH`), with the runtime binaries from the same directory (`QAROS_RUNTIME_DIR` overrides).
 2. **Session.** Rejoins with the id in `--onboarding-id-file` (default `qaros-rerun.onboarding-id.txt`), or onboards with `--pairing-code` and stores the new id; with `--local-app`, as a local app of the Hub on this PC; with `--launched-by-qaros`, as a local app on Windows and with the launch invite from stdin elsewhere. It then reads the session's adapter (`qar_session_get_graphics_device_id`), on which `--qaros-graphics vulkan` (the default on Windows; `cpu` elsewhere) creates the viewer's device.

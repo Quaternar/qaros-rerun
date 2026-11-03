@@ -2587,6 +2587,7 @@ fn a_vulkan_frame_after_an_app_volume_change_maps_with_it() {
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         stream,
         VulkanSinkOptions {
             depth_range: depth_range(),
@@ -2662,6 +2663,7 @@ fn vulkan_sink_on_stub(
     let sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         stream,
         VulkanSinkOptions {
             depth_range: depth_range(),
@@ -2979,6 +2981,7 @@ fn vulkan_frames_render_into_the_stub_sender_images() {
     let mut sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         stream,
         VulkanSinkOptions {
             depth_range: depth_range(),

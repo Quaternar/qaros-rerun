@@ -22,10 +22,14 @@ Headset stream:
                                free slot (default 2)
     --frame-stamp              draw user, frame id and eye (L/R) into every eye image, to check
                                frame and pose pairing in the visualizer (default off)
-    --decoupled-render         experiment: draw the eyes on a render thread of their own from the
-                               last scene the UI finished, at the sink's rate; the sink and the
-                               GUI panels live on that thread (default off); with the QAROS
-                               Vulkan sink only headless
+    --inline-render            draw the eyes inside the viewer frame, after Rerun rebuilds the
+                               scene, instead of on a render thread of their own
+    --decoupled-render         insist on the default render thread: the eyes are drawn from the
+                               last scene the UI finished, at the sink's rate, and the sink and
+                               the GUI panels live on that thread; where it cannot run (no sink,
+                               or the QAROS Vulkan sink in a window on a GPU whose graphics queue
+                               family has one queue) the viewer refuses to start instead of
+                               drawing inline, as it does without this flag
 
 Image sink:
     --out DIR                  output directory, one user-<n>/ per user (default out/headset)
@@ -182,6 +186,24 @@ pub enum PoseSpaceKind {
 pub enum PanelsAtStopKind {
     Hide,
     Keep,
+}
+
+/// Where the eyes are drawn (ADR-0088).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderLoop {
+    /// Neither flag: on a render thread of their own where the sink and the GPU allow it, else
+    /// inside the viewer frame (`render_loop::settle`).
+    DecoupledWherePossible,
+    /// `--decoupled-render`: on a render thread of their own, or the viewer refuses to start.
+    Decoupled,
+    /// `--inline-render`: inside the viewer frame.
+    Inline,
+}
+
+impl RenderLoop {
+    pub fn is_decoupled(self) -> bool {
+        self != Self::Inline
+    }
 }
 
 /// Who new GUI panels are placed for; see `qaros_sink::PanelPosture`.
@@ -446,7 +468,9 @@ pub struct Options {
     pub join_interval_in_viewer_frames: u64,
     pub max_users: usize,
     pub frame_stamp: bool,
-    pub decoupled_render: bool,
+    pub render_loop: RenderLoop,
+    /// Why the default renders inline, set by `render_loop::settle`.
+    pub render_fallback: Option<String>,
     pub quit_when_done: bool,
     pub opaque_background: bool,
     pub world_origin: Vec3,
@@ -487,7 +511,8 @@ impl Default for Options {
             join_interval_in_viewer_frames: 30,
             max_users: 2,
             frame_stamp: false,
-            decoupled_render: false,
+            render_loop: RenderLoop::DecoupledWherePossible,
+            render_fallback: None,
             quit_when_done: false,
             opaque_background: false,
             world_origin: Vec3::new(0.0, 0.5, -1.6),
@@ -705,7 +730,10 @@ impl Options {
                 }
                 "--max-users" => options.max_users = parse_positive(&flag, &value()?)?,
                 "--frame-stamp" => options.frame_stamp = true,
-                "--decoupled-render" => options.decoupled_render = true,
+                "--decoupled-render" => {
+                    options.request_render_loop(&flag, RenderLoop::Decoupled)?;
+                }
+                "--inline-render" => options.request_render_loop(&flag, RenderLoop::Inline)?,
                 "--out" => options.output_directory = PathBuf::from(value()?),
                 "--eye-resolution" => options.eye_resolution = parse_resolution(&flag, &value()?)?,
                 "--frames" => options.stop_after_frames = Some(parse_number(&flag, &value()?)?),
@@ -792,24 +820,35 @@ impl Options {
         Ok(options)
     }
 
-    /// In a window, egui submits its frames to the queue without the submission lock, which
-    /// the QAROS Vulkan sink's raw submits on the render thread need.
+    /// Only an explicit `--decoupled-render` is refused here; the default falls back to inline
+    /// rendering at start (`render_loop::settle`). The QAROS Vulkan sink in a window is checked
+    /// once the device exists (`qaros_setup::check_decoupled_window`), since it depends on the
+    /// device's queues.
     fn check_decoupled_render(&self) -> Result<(), ParseOutcome> {
-        if !self.decoupled_render {
-            return Ok(());
-        }
-        if self.sink == SinkKind::Off {
+        if self.render_loop == RenderLoop::Decoupled && self.sink == SinkKind::Off {
             return Err(ParseOutcome::Error(
                 "--decoupled-render needs a sink".to_owned(),
             ));
         }
-        if self.qaros_vulkan() && self.headless_size.is_none() {
-            return Err(ParseOutcome::Error(
-                "--decoupled-render with the QAROS Vulkan sink needs --headless (or \
-                 --launched-by-qaros without --window), or --qaros-graphics cpu"
-                    .to_owned(),
-            ));
+        Ok(())
+    }
+
+    fn request_render_loop(
+        &mut self,
+        flag: &str,
+        render_loop: RenderLoop,
+    ) -> Result<(), ParseOutcome> {
+        let other = self.render_loop;
+        if other != RenderLoop::DecoupledWherePossible && other != render_loop {
+            return Err(ParseOutcome::Error(format!(
+                "{flag} and {} exclude each other",
+                match other {
+                    RenderLoop::Inline => "--inline-render",
+                    _ => "--decoupled-render",
+                }
+            )));
         }
+        self.render_loop = render_loop;
         Ok(())
     }
 
@@ -900,7 +939,7 @@ mod tests {
         assert_eq!(options.max_users, 2);
         assert_eq!(options.simulated_users, 1);
         assert!(!options.frame_stamp);
-        assert!(!options.decoupled_render);
+        assert_eq!(options.render_loop, RenderLoop::DecoupledWherePossible);
     }
 
     #[test]
@@ -1356,11 +1395,94 @@ mod tests {
     }
 
     #[test]
-    fn decoupled_render_needs_a_sink_and_headless_for_the_qaros_vulkan_sink() {
-        let images = parse(&["--decoupled-render"]).unwrap();
-        assert!(images.decoupled_render);
-        assert!(parse(&["--decoupled-render", "--sink", "off"]).is_err());
+    fn decoupled_render_is_the_default_and_inline_render_opts_out() {
+        let default = parse(&[]).unwrap().render_loop;
+        assert_eq!(default, RenderLoop::DecoupledWherePossible);
+        assert!(default.is_decoupled());
 
+        let inline = parse(&["--inline-render"]).unwrap().render_loop;
+        assert_eq!(inline, RenderLoop::Inline);
+        assert!(!inline.is_decoupled());
+        assert_eq!(
+            parse(&["--inline-render", "--sink", "off"])
+                .unwrap()
+                .render_loop,
+            RenderLoop::Inline
+        );
+    }
+
+    #[test]
+    fn decoupled_render_is_kept_as_the_insisting_form_of_the_default() {
+        let insisted = parse(&["--decoupled-render"]).unwrap().render_loop;
+        assert_eq!(insisted, RenderLoop::Decoupled);
+        assert!(insisted.is_decoupled());
+        assert_eq!(
+            parse(&["--decoupled-render", "--decoupled-render"])
+                .unwrap()
+                .render_loop,
+            RenderLoop::Decoupled
+        );
+        assert_eq!(
+            parse(&["--decoupled-render", "--inline-render"]).err(),
+            Some(ParseOutcome::Error(
+                "--inline-render and --decoupled-render exclude each other".to_owned()
+            ))
+        );
+        assert_eq!(
+            parse(&["--inline-render", "--decoupled-render"]).err(),
+            Some(ParseOutcome::Error(
+                "--decoupled-render and --inline-render exclude each other".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn without_a_sink_only_an_insisted_decoupled_render_is_refused() {
+        assert_eq!(
+            parse(&["--sink", "off"]).unwrap().render_loop,
+            RenderLoop::DecoupledWherePossible
+        );
+        assert_eq!(
+            parse(&["--decoupled-render", "--sink", "off"]).err(),
+            Some(ParseOutcome::Error(
+                "--decoupled-render needs a sink".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn the_headset_session_flags_parse_together() {
+        for render_flag in [None, Some("--decoupled-render"), Some("--inline-render")] {
+            let mut arguments = vec![
+                "--sink",
+                "qaros",
+                "--local-app",
+                "--window",
+                "--panels",
+                "--panel-posture",
+                "standing",
+                "--depth",
+                "reverse-infinite",
+                "--reset-placement",
+            ];
+            arguments.extend(render_flag);
+            let options = parse(&arguments).unwrap();
+            assert_eq!(options.qaros.panel_posture, PanelPostureKind::Standing);
+            assert_eq!(options.depth_range.encoding, DepthEncoding::ReverseInfinite);
+            assert!(options.qaros.reset_placement);
+            assert!(options.panels);
+            assert!(options.headless_size.is_none());
+            let expected = match render_flag {
+                None => RenderLoop::DecoupledWherePossible,
+                Some("--decoupled-render") => RenderLoop::Decoupled,
+                Some(_) => RenderLoop::Inline,
+            };
+            assert_eq!(options.render_loop, expected);
+        }
+    }
+
+    #[test]
+    fn decoupled_render_parses_in_a_window_with_either_qaros_graphics() {
         let launched = parse(&[
             "--decoupled-render",
             "--sink",
@@ -1370,37 +1492,23 @@ mod tests {
             "--launched-by-qaros",
         ])
         .unwrap();
-        assert!(launched.decoupled_render);
+        assert_eq!(launched.render_loop, RenderLoop::Decoupled);
         assert_eq!(launched.headless_size, Some([1280, 720]));
 
-        let windowed_vulkan = [
-            "--decoupled-render",
-            "--sink",
-            "qaros",
-            "--qaros-graphics",
-            "vulkan",
-            "--launched-by-qaros",
-            "--window",
-        ];
-        assert_eq!(
-            parse(&windowed_vulkan).err(),
-            Some(ParseOutcome::Error(
-                "--decoupled-render with the QAROS Vulkan sink needs --headless (or \
-                 --launched-by-qaros without --window), or --qaros-graphics cpu"
-                    .to_owned()
-            ))
-        );
-        let windowed_cpu = parse(&[
-            "--decoupled-render",
-            "--sink",
-            "qaros",
-            "--qaros-graphics",
-            "cpu",
-            "--launched-by-qaros",
-            "--window",
-        ])
-        .unwrap();
-        assert!(windowed_cpu.headless_size.is_none());
+        for graphics in ["vulkan", "cpu"] {
+            let windowed = parse(&[
+                "--decoupled-render",
+                "--sink",
+                "qaros",
+                "--qaros-graphics",
+                graphics,
+                "--launched-by-qaros",
+                "--window",
+            ])
+            .unwrap();
+            assert_eq!(windowed.render_loop, RenderLoop::Decoupled);
+            assert!(windowed.headless_size.is_none());
+        }
     }
 
     #[test]

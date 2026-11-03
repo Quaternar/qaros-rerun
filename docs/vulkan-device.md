@@ -24,7 +24,7 @@ What egui's own setup does that this one does not:
 
 - **Surface-aware adapter choice.** Rerun's selector drops adapters that cannot present to the window (`re_renderer-0.38.1/src/device_caps.rs` L449-467). With an existing device, egui creates the surface afterwards and asks the given adapter for its formats (`egui-wgpu-0.36.2/src/lib.rs` L261-278); an adapter that cannot present fails there, at startup. The picker must name the GPU that drives the display, or the viewer must run headless.
 - **Rerun's adapter ranking** (`select_adapter`, same file from L436) only applies with `default`, and then as wgpu's order, not Rerun's.
-- **One queue.** wgpu-hal opens queue 0 of queue family 0 and nothing else (`adapter.rs` L3005, `let family_index = 0; //TODO`). Family 0 is the graphics queue on NVIDIA and MoltenVK; QAROS gets that same queue, not a dedicated one.
+- **wgpu's queue and ours.** wgpu-hal opens queue 0 of queue family 0 for itself (`adapter.rs` L3005, `let family_index = 0; //TODO`). Family 0 is the graphics family on NVIDIA and MoltenVK. `VulkanDevice::create` raises that family's queue count to two in the device creation callback when the family has a second queue, and `VulkanDevice::raw_queue` is queue 1, for raw batches only; otherwise it is wgpu's queue 0 (`RawQueue::shares_wgpu_queue`). The RTX 5070 Laptop GPU's family 0 has 16 queues, MoltenVK's one (ADR-0081).
 
 ## The handles and helpers the QAROS sink uses
 
@@ -33,13 +33,15 @@ What egui's own setup does that this one does not:
 | Raw objects to give QAROS | `VulkanDeviceHandles` (the `VulkanDevice::handles` field, or `VulkanDeviceHandles::of(&wgpu::Device)` for any Vulkan device): `instance`, `get_instance_proc_addr`, `instance_api_version`, `physical_device`, `device`, `queue_family_index`, `queue_index`, `queue`, enabled extensions |
 | A QAROS-owned `VkImage` as a render target | `texture_from_vk_image(device, image, descriptor, on_drop)`: wgpu-hal `texture_from_raw` with external memory and a drop callback (`wgpu-hal-30.0.0/src/vulkan/device.rs` L296), then `create_texture_from_hal` |
 | Wait for QAROS before rendering, signal QAROS after | `stage_wait_semaphore`, `stage_signal_semaphore`: wgpu-hal's `Queue::add_wait_semaphore` and `add_signal_semaphore` (`mod.rs` L1524-1572), binary or timeline, consumed by wgpu's next submission |
-| Keyed mutex or anything else wgpu cannot put on its submission | `submit_sync_batch`: an empty raw `vkQueueSubmit` on wgpu's queue with waits, signals and `VkWin32KeyedMutexAcquireReleaseInfoKHR` (Windows only), chained to wgpu's work through a semaphore |
-| Take images over from their owner and hand them back | `HandoverQueue::submit_handover`: a raw acquire batch (reported layout and queue family to the attachment layout), wgpu's submission, a raw release batch (final layout, release to the owner's family, the owner's semaphores signalled), chained by binary semaphores; slots with fences so command buffers are reused safely |
+| Where raw batches go | `RawQueue` (the `VulkanDevice::raw_queue` field, or `RawQueue::of_wgpu` for a device wgpu created): queue 1 of wgpu's family or wgpu's queue, with a mutex of its own around raw calls |
+| Keyed mutex or anything else wgpu cannot put on its submission | `submit_sync_batch`: an empty raw `vkQueueSubmit` on a `RawQueue` with waits, signals and `VkWin32KeyedMutexAcquireReleaseInfoKHR` (Windows only), chained to wgpu's work through a semaphore |
+| Take images over from their owner and hand them back | `HandoverQueue::submit_handover`: on a `RawQueue`, a raw acquire batch (reported layout and queue family to the attachment layout), wgpu's submission, a raw release batch (final layout, release to the owner's family, the owner's semaphores signalled), chained by binary semaphores; slots with fences so command buffers are reused safely |
 
 Rules that follow from Vulkan and wgpu, documented on the API:
 
 - A semaphore wait only orders the batch it is part of. A raw batch that acquires a keyed mutex therefore signals a binary semaphore that wgpu's submission waits on, and the release batch waits on a semaphore wgpu's submission signals; `crates/vulkan-device/tests` runs that chain with a host-signalled gate in place of the keyed mutex.
-- Staged semaphores attach to whichever `wgpu::Queue::submit` comes next, including egui's and Rerun's, and queue access must be externally synchronized. Stage right before the sink's own submit, on the UI thread that submits, and do not let QAROS submit to the same `VkQueue` from its own thread unless it serializes with the viewer.
+- Staged semaphores attach to whichever `wgpu::Queue::submit` comes next, including egui's and Rerun's. A wait staged right before our submit still orders it when an earlier submission takes the wait; a signal staged right after our submit and flushed with an empty one covers it whichever later submission takes it. `HandoverQueue` stages that way.
+- Queue access must be externally synchronized. Raw calls on a `RawQueue` of their own need nothing from wgpu; on wgpu's queue they must not overlap any wgpu submit (the queue submission lock of the decoupled render loop). QAROS imports the images into a device of its own and never submits on the viewer's queues.
 - A wrapped image starts in `VK_IMAGE_LAYOUT_UNDEFINED` for wgpu (content discarded on first use), and wgpu then tracks its layout. An image QAROS hands out again every frame either comes back in the layout wgpu left it in, or is wrapped again per frame.
 
 ## Windows and NVIDIA

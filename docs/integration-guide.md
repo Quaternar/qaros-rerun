@@ -309,13 +309,15 @@ Users are the running target apps in the QAROS peer list. The viewer creates a r
 
 A target that does not answer sender creation costs no slot. It is retried about once a minute, so a headset switched on after the viewer started gets its stream within about a minute. The viewer remembers such targets for 10 minutes in `qaros-rerun.unanswered-peers.txt`, next to the onboarding id file.
 
-Each user's two eyes are drawn from the same scene in every viewer frame.
+Each user's two eyes are drawn from the same scene in every eye frame.
 
-### The decoupled render loop (`--decoupled-render`)
+### The decoupled render loop (the default)
 
-This mode is experimental, off by default, and may change in a later version. By default the eyes are drawn inside the viewer frame, after Rerun rebuilds the scene from your data, so a slow scene update holds the headset at the scene's rate and head motion stutters. `--decoupled-render` draws the eyes on a render thread of their own from the last finished scene, with fresh head poses: head motion stays smooth while the data itself updates at the scene's rate. Try it when your scene updates slowly (many entities, large point clouds, long time windows).
+By default the eyes are drawn on a render thread of their own from the last finished scene, with fresh head poses: head motion stays smooth while the data itself updates at the scene's rate, which matters when your scene updates slowly (many entities, large point clouds, long time windows). `--inline-render` draws the eyes inside the viewer frame instead, after Rerun rebuilds the scene from your data, so a slow scene update holds the headset at the scene's rate.
 
-- With the Vulkan path it needs a headless viewer (`--headless WxH`, or `--launched-by-qaros` without `--window`); in a window, use `--qaros-graphics cpu`.
+- Every run logs `render: decoupled ...` or `render: inline ...` at start, with the reason when the default could not run decoupled.
+- Where the render thread cannot run, the viewer draws inline and warns, `headset: the decoupled render loop cannot run, because ...`: without a sink, and with the Vulkan path in a window on a GPU whose graphics queue family has one queue (MoltenVK, many integrated GPUs).
+- `--decoupled-render` insists on the render thread: in those cases the viewer refuses to start instead.
 - Videos and other textures Rerun rewrites in place can show newer content than the rest of a held scene.
 - A failure on the render thread ends the viewer with exit code 1.
 
@@ -332,7 +334,7 @@ This mode is experimental, off by default, and may change in a later version. By
 | `QAROS handed back app volume "rerun" closed by an earlier run; content may not show` | QAROS returned a volume a previous run closed | Start with another `--volume-name` |
 | Nothing in the headset, the log streams | Data outside the app volume, no 3D view, or left-handed coordinates | See [Place your data in the app volume](#place-your-data-in-the-app-volume) and [What the headset shows](#what-the-headset-shows) |
 | An SDK on another machine cannot connect | Firewall, or the wrong address | Allow TCP 9876 for `qaros-rerun.exe` ([What you need](#what-you-need)); connect to the Hub machine's LAN address |
-| `--decoupled-render with the QAROS Vulkan sink needs --headless ...` | Decoupled render in a window on the Vulkan path | Add `--headless WxH`, or use `--qaros-graphics cpu` |
+| `--decoupled-render with the QAROS Vulkan sink in a window needs a second queue ...` or `the decoupled render loop (the default) with the QAROS Vulkan sink in a window needs a second queue ...` | The session's GPU has one queue in its graphics queue family | Add `--inline-render`, or `--headless WxH`, or use `--qaros-graphics cpu` |
 | `--qaros-graphics vulkan (the default on Windows) and --image-targets gpu write depth into a depth image ...` | `--depth linear` on the Vulkan path | `--depth reverse-infinite`, `forward` or `reverse`, or `--qaros-graphics cpu` |
 | Build fails with E0514 ("found crate compiled by an incompatible version of rustc") | Crates from two toolchains in `target` | Run `cargo` from inside the repository, then `cargo clean` |
 | On a Mac, the Vulkan backend is missing | No Vulkan loader on the library path | `brew install molten-vk vulkan-loader` and `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`, set on the viewer itself (Homebrew's `cargo` drops it) |
@@ -355,7 +357,8 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--opaque-background` | off | Keep Rerun's background instead of making empty pixels transparent |
 | `--max-users N` | 2 | Render for at most N users at a time; later users wait for a slot |
 | `--frame-stamp` | off | Draw user, frame id and eye into every eye image |
-| `--decoupled-render` | off | Experimental: draw the eyes on a render thread from the last finished scene; needs a sink; with the QAROS Vulkan path only headless |
+| `--inline-render` | off | Draw the eyes inside the viewer frame instead of on a render thread of their own |
+| `--decoupled-render` | off | Insist on the render thread (the default): refuse to start where it cannot run instead of drawing inline |
 
 **QAROS**
 

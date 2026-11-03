@@ -11,7 +11,7 @@ use qaros::{
     AppVolumeId, ColorAlphaMode, Eye, FrameLayout, FrameViewSpec, OwnedFrame, PeerId, PixelFormat,
     RenderSender, RenderSenderConfig, StatusCode, VideoFrameView, ViewKind,
 };
-use vulkan_device::{VulkanDevice, VulkanDeviceHandles, vk};
+use vulkan_device::{RawQueue, VulkanDevice, VulkanDeviceHandles, vk};
 use xr_math::{Fov, VolumeTransform};
 
 use super::sink::{signal_discarded_frame, wait_for_device};
@@ -118,6 +118,7 @@ struct FrameRecord {
 /// stream holds the last reference the app volume is closed after its senders.
 pub struct QarosVulkanStream {
     device: wgpu::Device,
+    raw_queue: RawQueue,
     parameters: VulkanStreamParams,
     options: QarosVulkanStreamOptions,
     users: PeerUsers,
@@ -134,12 +135,14 @@ impl QarosVulkanStream {
     ///
     /// `device` is the viewer's wgpu device on Vulkan, created on the connection's adapter when
     /// the session names one (`QarosConnection::adapter`), with
-    /// `qaros::vulkan::required_device_extensions()` enabled; it outlives the stream, and
-    /// nothing but the thread using the stream submits to its queue.
+    /// `qaros::vulkan::required_device_extensions()` enabled; it outlives the stream.
+    /// `raw_queue` is the device's; when it shares wgpu's queue, nothing but the thread using
+    /// the stream submits to that queue.
     #[allow(unsafe_code)]
     pub unsafe fn new(
         connection: Rc<QarosConnection>,
         device: &wgpu::Device,
+        raw_queue: &RawQueue,
         options: QarosVulkanStreamOptions,
     ) -> Result<Self, SinkError> {
         let handles = VulkanDeviceHandles::of(device)
@@ -163,6 +166,7 @@ impl QarosVulkanStream {
         );
         Ok(Self {
             device: device.clone(),
+            raw_queue: raw_queue.clone(),
             parameters: VulkanStreamParams {
                 physical_device: handles.physical_device,
                 device: handles.device,
@@ -206,7 +210,7 @@ impl QarosVulkanStream {
         // session's adapter when the session names one, the stream owns a clone of it, and the
         // stream is not `Send`.
         unsafe {
-            Self::new(connection, &vulkan.device, options)
+            Self::new(connection, &vulkan.device, &vulkan.raw_queue, options)
         }
     }
 
@@ -366,16 +370,16 @@ impl QarosVulkanStream {
             .and_then(|frame| Self::read_record(frame).ok())
             .map(|record| record.semaphore);
         #[allow(unsafe_code)]
-        // SAFETY: an open or early frame's semaphore has not been signalled yet, and this is
-        // the thread that submits to the device's queue.
+        // SAFETY: an open or early frame's semaphore has not been signalled yet, and when the
+        // raw queue shares wgpu's queue, this is the thread that submits to it.
         unsafe {
             if let Some(open) = &open_frame {
-                signal_discarded_frame(&self.device, open.semaphore);
+                signal_discarded_frame(&self.raw_queue, open.semaphore);
             }
             if let Some(semaphore) = early_semaphore {
-                signal_discarded_frame(&self.device, semaphore);
+                signal_discarded_frame(&self.raw_queue, semaphore);
             }
-            wait_for_device(&self.device);
+            wait_for_device(&self.device, &self.raw_queue);
         }
         drop(open_frame);
         drop(early_frame);
@@ -674,10 +678,10 @@ impl VulkanFrameStream for QarosVulkanStream {
             }
             Err(error) => {
                 #[allow(unsafe_code)]
-                // SAFETY: the frame just began, so its semaphore is unsignalled, and this is
-                // the thread that submits to the device's queue.
+                // SAFETY: the frame just began, so its semaphore is unsignalled, and when the
+                // raw queue shares wgpu's queue, this is the thread that submits to it.
                 unsafe {
-                    signal_discarded_frame(&self.device, record.semaphore);
+                    signal_discarded_frame(&self.raw_queue, record.semaphore);
                 }
                 Err(error)
             }

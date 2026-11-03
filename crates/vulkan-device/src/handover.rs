@@ -1,22 +1,29 @@
 //! Rendering with wgpu into images another API or process owns between frames. wgpu can record
 //! neither a queue family ownership transfer nor a final layout of our choosing, so a frame is
-//! three batches on wgpu's queue:
+//! three batches:
 //!
-//! 1. a raw acquire batch: each image from the layout and queue family its owner reports to
-//!    the attachment layout on wgpu's family;
+//! 1. a raw acquire batch on the [`RawQueue`]: each image from the layout and queue family its
+//!    owner reports to the attachment layout on wgpu's family;
 //! 2. wgpu's submission, which renders;
-//! 3. a raw release batch: each image to its final layout, released to the owner's family,
-//!    then the owner's semaphores are signalled.
+//! 3. a raw release batch on the [`RawQueue`]: each image to its final layout, released to the
+//!    owner's family, then the owner's semaphores are signalled.
 //!
-//! A semaphore wait only orders the batch it belongs to, so the batches are chained through
-//! binary semaphores of ours: the acquire batch signals one that wgpu's submission waits on,
-//! and wgpu's submission signals one the release batch waits on.
+//! The raw queue is queue 1 of wgpu's family where the device has it, so no ownership transfer
+//! is needed between it and wgpu's queue, or wgpu's queue itself. The batches are chained
+//! through binary semaphores of ours: the acquire batch signals one that wgpu's submission
+//! waits on, and wgpu's submission signals one the release batch waits on. Both are staged on
+//! wgpu's queue, where another thread's submission may take them: the wait is staged before our
+//! submission, so whichever submission takes it comes no later than ours and the wait covers
+//! ours; the signal is staged after our submission and flushed with an empty one, so whichever
+//! submission takes it comes after ours and the signal covers ours.
 
 use std::fmt;
 
 use ash::vk;
 
 use crate::VulkanApi;
+use crate::handles::VulkanDeviceHandles;
+use crate::raw_queue::RawQueue;
 use crate::semaphores::{
     SemaphoreSignal, SemaphoreWait, stage_signal_semaphore, stage_wait_semaphore,
 };
@@ -95,6 +102,8 @@ fn whole_image(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
 pub enum HandoverError {
     /// The device or queue is not on wgpu's Vulkan backend.
     NotVulkan,
+    /// The raw queue is not in wgpu's queue family.
+    ForeignQueueFamily { raw: u32, wgpu: u32 },
     Vulkan {
         operation: &'static str,
         result: vk::Result,
@@ -102,13 +111,24 @@ pub enum HandoverError {
     /// An earlier release batch failed after wgpu's submission had signalled its chain
     /// semaphore; that semaphore can no longer be signalled safely.
     Broken,
+    /// wgpu's submissions did not reach the driver (a lost device), so the release batch was
+    /// not submitted either.
+    NotSubmitted,
 }
 
 impl fmt::Display for HandoverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotVulkan => write!(formatter, "the wgpu device is not on Vulkan"),
+            Self::ForeignQueueFamily { raw, wgpu } => write!(
+                formatter,
+                "the raw queue is in queue family {raw}, wgpu's queue in {wgpu}"
+            ),
             Self::Vulkan { operation, result } => write!(formatter, "{operation}: {result}"),
+            Self::NotSubmitted => write!(
+                formatter,
+                "wgpu's submission did not reach the driver; the release batch was not submitted"
+            ),
             Self::Broken => write!(
                 formatter,
                 "an earlier release batch failed; the handover queue cannot be used again"
@@ -136,13 +156,12 @@ struct HandoverSlot {
     submitted: bool,
 }
 
-/// Acquire and release batches on wgpu's queue, a few slots deep so a slot is free again by
-/// the time it comes round. Use it on the thread that submits to wgpu.
+/// Acquire and release batches on a [`RawQueue`], a few slots deep so a slot is free again by
+/// the time it comes round.
 pub struct HandoverQueue {
     /// Keeps the `VkDevice` alive for as long as the raw objects below exist.
-    _device: wgpu::Device,
+    raw_queue: RawQueue,
     raw_device: ash::Device,
-    queue: vk::Queue,
     queue_family_index: u32,
     command_pool: vk::CommandPool,
     slots: Vec<HandoverSlot>,
@@ -151,23 +170,25 @@ pub struct HandoverQueue {
 }
 
 impl HandoverQueue {
-    pub fn new(device: &wgpu::Device, slot_count: usize) -> Result<Self, HandoverError> {
-        #[allow(unsafe_code)]
-        // SAFETY: only handles are read; the clone of the ash device stays valid while the
-        // `wgpu::Device` clone kept in the queue lives.
-        let (raw_device, queue, queue_family_index) = {
-            let hal_device =
-                unsafe { device.as_hal::<VulkanApi>() }.ok_or(HandoverError::NotVulkan)?;
-            (
-                hal_device.raw_device().clone(),
-                hal_device.raw_queue(),
-                hal_device.queue_family_index(),
-            )
-        };
+    /// Batches on `raw_queue`, for wgpu submissions on `device`'s queue.
+    pub fn new(
+        device: &wgpu::Device,
+        raw_queue: &RawQueue,
+        slot_count: usize,
+    ) -> Result<Self, HandoverError> {
+        let wgpu_family = VulkanDeviceHandles::of(device)
+            .ok_or(HandoverError::NotVulkan)?
+            .queue_family_index;
+        let queue_family_index = raw_queue.family_index();
+        if queue_family_index != wgpu_family {
+            return Err(HandoverError::ForeignQueueFamily {
+                raw: queue_family_index,
+                wgpu: wgpu_family,
+            });
+        }
         let mut handover_queue = Self {
-            _device: device.clone(),
-            raw_device,
-            queue,
+            raw_queue: raw_queue.clone(),
+            raw_device: raw_queue.raw_device().clone(),
             queue_family_index,
             command_pool: vk::CommandPool::null(),
             slots: Vec::with_capacity(slot_count),
@@ -244,9 +265,9 @@ impl HandoverQueue {
     }
 
     /// Submits the acquire batch for `acquires` (skipped when empty), `command_buffers`
-    /// through wgpu, then the release batch that moves each image of `releases` to its new
-    /// layout and queue family and signals `signals` (and nothing else) once those barriers
-    /// have run.
+    /// through wgpu, an empty wgpu submission that carries the chain's signal, then the release
+    /// batch that moves each image of `releases` to its new layout and queue family and signals
+    /// `signals` (and nothing else) once those barriers have run.
     ///
     /// When recording or the acquire batch fails, nothing is submitted, not even
     /// `command_buffers`. When the release batch fails after wgpu's submission, the queue is
@@ -254,8 +275,9 @@ impl HandoverQueue {
     ///
     /// # Safety
     ///
-    /// - `queue` is the queue of the device this handover queue was made from, and no other
-    ///   thread submits to it during the call.
+    /// - `queue` is the queue of the device this handover queue was made from. Other threads
+    ///   may submit to it through wgpu meanwhile, unless the raw queue shares wgpu's queue;
+    ///   no other thread stages semaphores on it.
     /// - Every image belongs to that device and has `aspect` as its aspects; an acquired image
     ///   is in `old_layout`, owned by `source_queue_family`; a released image is used by
     ///   `command_buffers` last in `old_layout`.
@@ -329,6 +351,7 @@ impl HandoverQueue {
                 );
             }
         }
+        let submission = queue.submit(command_buffers);
         // SAFETY: `render_done` is unsignalled (the slot's previous release batch waited on it
         // and has completed), and it belongs to this queue's device.
         let staged = unsafe {
@@ -341,9 +364,16 @@ impl HandoverQueue {
             )
         };
         if !staged {
+            self.broken = true;
             return Err(HandoverError::NotVulkan);
         }
-        let submission = queue.submit(command_buffers);
+        // By the time it returns, whichever submission took the signal has been submitted:
+        // wgpu holds its submission lock across the staged lists and `vkQueueSubmit`.
+        queue.submit([]);
+        if Self::withdraw_unsubmitted(queue, acquire_done, render_done) {
+            self.broken = true;
+            return Err(HandoverError::NotSubmitted);
+        }
 
         let fence = self.slots[slot_index].fence;
         let release_submitted = self
@@ -359,6 +389,26 @@ impl HandoverQueue {
                 Err(error)
             }
         }
+    }
+
+    /// A wgpu submission that ends before reaching the driver (a lost device) leaves the staged
+    /// semaphores behind; then the release batch would wait on a signal never submitted. Takes
+    /// both back off wgpu's lists and reports whether the signal was still there.
+    #[allow(unsafe_code)]
+    fn withdraw_unsubmitted(
+        queue: &wgpu::Queue,
+        acquire_done: vk::Semaphore,
+        render_done: vk::Semaphore,
+    ) -> bool {
+        // SAFETY: only wgpu-hal's pending semaphore lists are touched.
+        let Some(hal_queue) = (unsafe { queue.as_hal::<VulkanApi>() }) else {
+            return true;
+        };
+        let signal_left = hal_queue.remove_signal_semaphore(render_done);
+        if signal_left {
+            hal_queue.remove_wait_semaphore(acquire_done);
+        }
+        signal_left
     }
 
     #[allow(unsafe_code)]
@@ -484,12 +534,9 @@ impl HandoverQueue {
         if signals.iter().any(|signal| signal.value.is_some()) {
             submit_info = submit_info.push_next(&mut timeline_info);
         }
-        // SAFETY: the caller of `submit_handover` guarantees exclusive queue access and valid
-        // signal semaphores; the arrays and chained structs outlive the call.
-        unsafe {
-            self.raw_device
-                .queue_submit(self.queue, &[submit_info], fence)
-        }
+        // SAFETY: the caller of `submit_handover` guarantees valid signal semaphores and, on
+        // wgpu's queue, exclusive access; the arrays and chained structs outlive the call.
+        unsafe { self.raw_queue.submit(&[submit_info], fence) }
     }
 }
 

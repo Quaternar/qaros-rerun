@@ -31,7 +31,9 @@ use vulkan_device::{PhysicalDeviceIdentity, PhysicalDeviceSelector, VulkanDevice
 
 use crate::device_setup::GraphicsChoice;
 use crate::headset::HeadsetSink;
-use crate::options::{ColorFormatKind, Options, PoseSpaceKind, QarosGraphics, QarosOptions};
+use crate::options::{
+    ColorFormatKind, Options, PoseSpaceKind, QarosGraphics, QarosOptions, RenderLoop,
+};
 use crate::panel_capture::PanelOutlet;
 use crate::viewer_app::{FrameHook, HeadsetFrame, StopRequest};
 
@@ -231,6 +233,7 @@ fn vulkan_sink(
     connection: &Rc<QarosConnection>,
     vulkan: &VulkanDevice,
 ) -> Result<HeadsetSink, String> {
+    check_decoupled_window(options, vulkan.raw_queue.shares_wgpu_queue())?;
     let stream = QarosVulkanStream::on_device(
         Rc::clone(connection),
         vulkan,
@@ -244,6 +247,7 @@ fn vulkan_sink(
     let sink = VulkanSink::new(
         &vulkan.device,
         &vulkan.queue,
+        &vulkan.raw_queue,
         stream,
         VulkanSinkOptions {
             depth_range: options.depth_range,
@@ -253,6 +257,36 @@ fn vulkan_sink(
     .map_err(|error| error.to_string())?;
     re_log::info!("qaros: frames go straight into the Vulkan render senders' images");
     Ok(HeadsetSink::Gpu(Box::new(sink)))
+}
+
+/// In a window, eframe submits and presents on wgpu's queue without the queue submission lock,
+/// so the decoupled render loop needs the raw batches on a queue of their own (ADR-0081). The
+/// device decides that, so this is checked once it exists rather than with the options. The
+/// default reaches this only on a GPU other than the one forecast at start (ADR-0088).
+fn check_decoupled_window(
+    options: &Options,
+    raw_queue_shares_wgpu_queue: bool,
+) -> Result<(), String> {
+    let windowed = options.headless_size.is_none();
+    if !(windowed && raw_queue_shares_wgpu_queue) {
+        return Ok(());
+    }
+    match options.render_loop {
+        RenderLoop::Inline => Ok(()),
+        RenderLoop::Decoupled => Err(
+            "--decoupled-render with the QAROS Vulkan sink in a window needs a second queue in \
+             the GPU's graphics queue family, which this device does not have; use --headless \
+             (or --launched-by-qaros without --window), --qaros-graphics cpu or --inline-render"
+                .to_owned(),
+        ),
+        RenderLoop::DecoupledWherePossible => Err(
+            "the decoupled render loop (the default) with the QAROS Vulkan sink in a window \
+             needs a second queue in the GPU's graphics queue family; the session's GPU has \
+             one, unlike the GPU checked at start; add --inline-render, or use --headless or \
+             --vulkan-device with the session's GPU"
+                .to_owned(),
+        ),
+    }
 }
 
 /// The adapter id QAROS gets for the viewer's device: the LUID on Windows (where the header
@@ -443,6 +477,68 @@ impl FrameHook for PanelHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn options(arguments: &[&str]) -> Options {
+        Options::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+            .expect("valid options")
+    }
+
+    #[test]
+    fn decoupled_render_in_a_window_needs_raw_batches_off_wgpus_queue() {
+        let windowed = options(&[
+            "--decoupled-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&windowed, false), Ok(()));
+        let refusal = check_decoupled_window(&windowed, true).expect_err("refused");
+        assert!(refusal.starts_with(
+            "--decoupled-render with the QAROS Vulkan sink in a window needs a second queue"
+        ));
+
+        let headless = options(&[
+            "--decoupled-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+        ]);
+        assert_eq!(check_decoupled_window(&headless, true), Ok(()));
+
+        let inline_window = options(&[
+            "--inline-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&inline_window, true), Ok(()));
+    }
+
+    #[test]
+    fn the_default_in_a_window_refuses_only_a_one_queue_gpu_the_start_forecast_missed() {
+        let default_window = options(&[
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&default_window, false), Ok(()));
+        let refusal = check_decoupled_window(&default_window, true).expect_err("refused");
+        assert!(
+            refusal.starts_with("the decoupled render loop (the default) with the QAROS Vulkan")
+        );
+        assert!(refusal.contains("add --inline-render"));
+    }
 
     #[test]
     fn closing_the_watched_input_requests_a_stop_and_wakes_the_viewer() {

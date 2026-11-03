@@ -1,6 +1,6 @@
 //! The Rerun viewer with a headset renderer: the streamed 3D view is rendered once per eye of
-//! every rendered user, inside the viewer frame, and handed to a sink with color, depth and the
-//! near/far planes used. On a Mac the sink writes PNGs per simulated user; the QAROS render
+//! every rendered user, on a render thread of its own or inside the viewer frame
+//! (`render_loop`), and handed to a sink with color, depth and the near/far planes used. On a Mac the sink writes PNGs per simulated user; the QAROS render
 //! senders (one per user) are the Windows sink, fed from the CPU or, in their Vulkan mode,
 //! rendered into directly on the viewer's own Vulkan device.
 
@@ -20,6 +20,7 @@ mod panel_capture;
 mod panel_render;
 #[cfg(feature = "qaros")]
 mod qaros_setup;
+mod render_loop;
 #[cfg(feature = "qaros")]
 mod timeline_panel;
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
@@ -27,6 +28,7 @@ mod timeline_requests;
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 mod timeline_scrub;
 mod viewer_app;
+mod window_resize;
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -37,7 +39,9 @@ use frame_sink::{
 use rerun::external::re_sdk_types::blueprint::components::PanelState;
 use rerun::external::{eframe, re_crash_handler, re_grpc_server, re_memory, re_viewer, tokio};
 
-use crate::decoupled::{DecoupledHeadset, RenderThreadSink, SceneCapture, SceneHandoff};
+use crate::decoupled::{
+    DecoupledHeadset, RenderThreadPause, RenderThreadSink, SceneCapture, SceneHandoff,
+};
 use crate::device_setup::GraphicsChoice;
 use crate::headless::{HeadlessOptions, run_headless};
 use crate::headset::{HeadsetRenderer, HeadsetSettings, HeadsetSink};
@@ -221,6 +225,7 @@ fn headset_for(options: &Options, memory_knobs: &MemoryKnobs, sink: HeadsetSink)
 struct ViewerSinks {
     headset: Option<Headset>,
     decoupled: Option<DecoupledHeadset>,
+    render_thread_pause: Option<RenderThreadPause>,
     frame_hooks: Vec<Box<dyn FrameHook>>,
     stop_request: Option<StopRequest>,
     vulkan: Option<vulkan_device::VulkanDevice>,
@@ -233,7 +238,7 @@ async fn build_viewer_sinks(
     egui_context: &Arc<OnceLock<egui::Context>>,
     panel_outlet: Option<PanelOutlet>,
 ) -> Result<ViewerSinks, String> {
-    if !options.decoupled_render {
+    if !options.render_loop.is_decoupled() {
         let SinkSetup {
             sink,
             frame_hooks,
@@ -249,6 +254,7 @@ async fn build_viewer_sinks(
         return Ok(ViewerSinks {
             headset: sink.map(|sink| headset_for(options, memory_knobs, sink)),
             decoupled: None,
+            render_thread_pause: None,
             frame_hooks,
             stop_request,
             vulkan,
@@ -283,11 +289,25 @@ async fn build_viewer_sinks(
     )?;
     Ok(ViewerSinks {
         headset: None,
+        render_thread_pause: Some(decoupled.render_thread_pause()),
         decoupled: Some(decoupled),
         frame_hooks: Vec::new(),
         stop_request,
         vulkan,
     })
+}
+
+/// egui's wgpu setup on the viewer's own device, if any, once the startup summary has said how
+/// the eyes are drawn; egui keeps its own handles to the device from here on.
+fn egui_setup_logging_the_render_loop(
+    options: &Options,
+    graphics: &GraphicsChoice,
+    vulkan: Option<vulkan_device::VulkanDevice>,
+) -> egui_wgpu::WgpuSetup {
+    re_log::info!("{}", render_loop::summary(options, vulkan.as_ref()));
+    let wgpu_setup = graphics.wgpu_setup(vulkan.as_ref());
+    drop(vulkan);
+    wgpu_setup
 }
 
 /// `QAROS_RERUN_SCENE_DELAY_MS`: milliseconds slept after every UI pass, a stand-in for a
@@ -336,7 +356,7 @@ fn install_view_3d_observer(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = match Options::parse(std::env::args().skip(1)) {
+    let mut options = match Options::parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(ParseOutcome::Help) => {
             print!("{USAGE}");
@@ -351,6 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let main_thread_token = rerun::MainThreadToken::i_promise_i_am_on_the_main_thread();
     re_log::setup_logging();
     re_crash_handler::install_crash_handlers(re_viewer::build_info());
+    render_loop::settle(&mut options).await;
 
     // What can fail without QAROS fails here, before the QAROS library is loaded.
     let memory_knobs = MemoryKnobs::from_environment()?;
@@ -409,6 +430,7 @@ async fn run_viewer(
     let ViewerSinks {
         headset,
         decoupled,
+        render_thread_pause,
         frame_hooks,
         stop_request,
         vulkan,
@@ -420,8 +442,7 @@ async fn run_viewer(
         panel_capture.as_ref().map(PanelCapture::outlet),
     )
     .await?;
-    let wgpu_setup = graphics.wgpu_setup(vulkan.as_ref());
-    drop(vulkan);
+    let wgpu_setup = egui_setup_logging_the_render_loop(options, &graphics, vulkan);
     install_view_3d_observer(
         headset.as_ref(),
         decoupled
@@ -502,6 +523,7 @@ async fn run_viewer(
         &graphics,
         wgpu_setup,
         main_thread_token,
+        render_thread_pause,
         panel_capture,
         build_app,
     )
@@ -513,6 +535,7 @@ fn run_app(
     graphics: &GraphicsChoice,
     wgpu_setup: egui_wgpu::WgpuSetup,
     main_thread_token: rerun::MainThreadToken,
+    render_thread_pause: Option<RenderThreadPause>,
     panel_capture: Option<PanelCapture>,
     build_app: impl FnOnce(&eframe::CreationContext<'_>, Option<PanelCapture>) -> HeadsetViewerApp
     + 'static,
@@ -532,6 +555,7 @@ fn run_app(
         run_windowed(
             main_thread_token,
             (!graphics.is_rerun_default()).then_some(wgpu_setup),
+            render_thread_pause,
             panel_capture,
             build_app,
         )?;
@@ -605,15 +629,17 @@ fn log_wgpu_device(creation_context: &eframe::CreationContext<'_>) -> Option<Mem
     Some(memory_budget_log)
 }
 
-/// `wgpu_setup` replaces Rerun's own; `None` keeps it.
+/// `wgpu_setup` replaces Rerun's own; `None` keeps it. With a render thread, a window resize
+/// parks it before eframe reconfigures the surface (`window_resize`).
 fn run_windowed(
     main_thread_token: rerun::MainThreadToken,
     wgpu_setup: Option<egui_wgpu::WgpuSetup>,
+    render_thread_pause: Option<RenderThreadPause>,
     mut panel_capture: Option<PanelCapture>,
     build_app: impl FnOnce(&eframe::CreationContext<'_>, Option<PanelCapture>) -> HeadsetViewerApp
     + 'static,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(wgpu_setup) = wgpu_setup else {
+    if wgpu_setup.is_none() && render_thread_pause.is_none() {
         re_viewer::run_native_app(
             main_thread_token,
             Box::new(move |creation_context| {
@@ -622,18 +648,25 @@ fn run_windowed(
             None,
         )?;
         return Ok(());
-    };
-    // `re_viewer::run_native_app` with only the wgpu setup replaced.
+    }
+    // `re_viewer::run_native_app` with only the wgpu setup and the event loop replaced.
     let mut native_options = re_viewer::native::eframe_options(None);
-    native_options.wgpu_options.wgpu_setup = wgpu_setup;
-    eframe::run_native(
-        "Rerun",
-        native_options,
-        Box::new(move |creation_context| {
-            re_viewer::customize_eframe_and_setup_renderer(creation_context)?;
-            Ok(Box::new(build_app(creation_context, panel_capture.take())))
-        }),
-    )?;
+    if let Some(wgpu_setup) = wgpu_setup {
+        native_options.wgpu_options.wgpu_setup = wgpu_setup;
+    }
+    let app_creator: eframe::AppCreator<'_> = Box::new(move |creation_context| {
+        re_viewer::customize_eframe_and_setup_renderer(creation_context)?;
+        Ok(Box::new(build_app(creation_context, panel_capture.take())))
+    });
+    match render_thread_pause {
+        Some(render_thread) => window_resize::run_native_parking_render_thread_on_resize(
+            "Rerun",
+            native_options,
+            app_creator,
+            render_thread,
+        )?,
+        None => eframe::run_native("Rerun", native_options, app_creator)?,
+    }
     Ok(())
 }
 

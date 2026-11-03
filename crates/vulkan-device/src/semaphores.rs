@@ -1,17 +1,21 @@
 //! Semaphores around wgpu's submissions, for work shared with another API on the same device.
 //!
 //! - Staged on wgpu's queue: [`stage_wait_semaphore`] and [`stage_signal_semaphore`] attach to
-//!   the next `wgpu::Queue::submit`, whichever code calls it, so stage right before your own
-//!   submit, on the thread that submits.
-//! - A raw batch: [`submit_sync_batch`] is an empty `vkQueueSubmit` on wgpu's queue carrying
+//!   the next `wgpu::Queue::submit`, whichever code calls it. A wait staged right before your
+//!   submit orders it even when another thread's submission takes the wait first, since a wait
+//!   covers every later submission on the queue; a signal staged right after your submit, then
+//!   flushed with an empty `wgpu::Queue::submit`, covers it whichever submission takes it.
+//! - A raw batch: [`submit_sync_batch`] is an empty `vkQueueSubmit` on a [`RawQueue`] carrying
 //!   waits, signals and optionally a Win32 keyed mutex acquire/release, things wgpu cannot put
-//!   on its own submissions. A semaphore wait only orders the batch it belongs to, so a raw batch
-//!   is chained to wgpu's work through a semaphore: the raw batch signals one that wgpu's
-//!   submission waits on, or waits on one that wgpu's submission signals.
+//!   on its own submissions. A semaphore wait only orders the batch it belongs to and later
+//!   ones on its queue, so a raw batch is chained to wgpu's work through a semaphore: the raw
+//!   batch signals one that wgpu's submission waits on, or waits on one that wgpu's submission
+//!   signals.
 
 use ash::vk;
 
 use crate::VulkanApi;
+use crate::raw_queue::RawQueue;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SemaphoreWait {
@@ -83,19 +87,19 @@ pub unsafe fn stage_signal_semaphore(queue: &wgpu::Queue, signal: SemaphoreSigna
     true
 }
 
-/// Submits a batch without command buffers to wgpu's queue: `waits`, then the keyed mutex
+/// Submits a batch without command buffers to `raw_queue`: `waits`, then the keyed mutex
 /// acquires, then the releases and `signals`. `fence` may be null.
 ///
 /// # Safety
 ///
-/// - Every handle belongs to `device`'s `VkDevice`; the semaphores are of the kinds their
+/// - Every handle belongs to `raw_queue`'s `VkDevice`; the semaphores are of the kinds their
 ///   `value` says, `VK_KHR_win32_keyed_mutex` is enabled when `keyed_mutex` is given, and the
 ///   memories were imported from keyed-mutex D3D resources.
-/// - No other thread submits to wgpu's queue meanwhile (Vulkan requires queue access to be
-///   externally synchronized; wgpu submits from the thread calling `wgpu::Queue::submit`).
+/// - When `raw_queue` shares wgpu's queue, no other thread submits to wgpu meanwhile (Vulkan
+///   requires queue access to be externally synchronized, and wgpu does not see this batch).
 #[allow(unsafe_code)]
 pub unsafe fn submit_sync_batch(
-    device: &wgpu::Device,
+    raw_queue: &RawQueue,
     waits: &[SemaphoreWait],
     signals: &[SemaphoreSignal],
     keyed_mutex: Option<&KeyedMutexSync>,
@@ -160,34 +164,20 @@ pub unsafe fn submit_sync_batch(
         submit_info = submit_info.push_next(&mut keyed_mutex_info);
     }
 
-    // SAFETY: the caller guarantees the handles and exclusive queue access; the arrays and
-    // chained structs outlive the call.
-    let Some(hal_device) = (unsafe { device.as_hal::<VulkanApi>() }) else {
-        return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
-    };
-    unsafe {
-        hal_device
-            .raw_device()
-            .queue_submit(hal_device.raw_queue(), &[submit_info], fence)
-    }
+    // SAFETY: the caller guarantees the handles and, on wgpu's queue, exclusive access; the
+    // arrays and chained structs outlive the call.
+    unsafe { raw_queue.submit(&[submit_info], fence) }
 }
 
-/// Waits until wgpu's queue has finished everything submitted to it, raw batches included
-/// (`vkQueueWaitIdle`); `wgpu::Device::poll` waits only for wgpu's own submissions.
+/// Waits until `raw_queue` has finished everything submitted to it (`vkQueueWaitIdle`);
+/// `wgpu::Device::poll` waits only for wgpu's own submissions.
 ///
 /// # Safety
 ///
-/// No other thread submits to wgpu's queue meanwhile (queue access is externally
-/// synchronized in Vulkan).
+/// When `raw_queue` shares wgpu's queue, no other thread submits to wgpu meanwhile (queue
+/// access is externally synchronized in Vulkan).
 #[allow(unsafe_code)]
-pub unsafe fn wait_queue_idle(device: &wgpu::Device) -> Result<(), vk::Result> {
+pub unsafe fn wait_queue_idle(raw_queue: &RawQueue) -> Result<(), vk::Result> {
     // SAFETY: as the caller guarantees.
-    let Some(hal_device) = (unsafe { device.as_hal::<VulkanApi>() }) else {
-        return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
-    };
-    unsafe {
-        hal_device
-            .raw_device()
-            .queue_wait_idle(hal_device.raw_queue())
-    }
+    unsafe { raw_queue.wait_idle() }
 }

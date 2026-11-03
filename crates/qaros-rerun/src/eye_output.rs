@@ -675,6 +675,7 @@ mod tests {
                 required_limits: adapter.limits(),
                 ..Default::default()
             }),
+            separate_raw_queue: true,
         };
         match pollster::block_on(VulkanDevice::create(config)) {
             Ok(device) => Some(device),

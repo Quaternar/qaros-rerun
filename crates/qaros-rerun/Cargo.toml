@@ -37,6 +37,7 @@ tracing.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 wgpu.workspace = true
+winit.workspace = true
 egui_kittest.workspace = true
 image.workspace = true
 mimalloc.workspace = true

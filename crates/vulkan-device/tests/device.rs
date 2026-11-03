@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use vulkan_device::{
-    MemoryHeapBudget, MemoryHeapBudgets, PhysicalDeviceSelector, VulkanApi, VulkanDeviceError,
-    VulkanDeviceHandles, describe_physical_devices, memory_heap_budgets,
+    MemoryHeapBudget, MemoryHeapBudgets, PhysicalDeviceSelector, RawQueueForecast, VulkanApi,
+    VulkanDeviceError, VulkanDeviceHandles, describe_physical_devices, memory_heap_budgets,
 };
 
 #[test]
@@ -61,6 +61,63 @@ fn handles_read_from_the_wgpu_device_match_the_ones_from_creation() {
     assert_eq!(handles.queue_index, device.handles.queue_index);
     // wgpu-hal 30 always opens queue 0 of family 0.
     assert_eq!((handles.queue_family_index, handles.queue_index), (0, 0));
+}
+
+#[test]
+fn raw_batches_get_queue_1_of_wgpus_family_when_it_has_two_queues() {
+    let devices = common::devices_for_both_raw_queues();
+    let Some(separate_requested) = devices.first() else {
+        return;
+    };
+    let family_queue_count = common::wgpu_family_queue_count(separate_requested);
+    let raw_queue = &separate_requested.raw_queue;
+    eprintln!("wgpu's family has {family_queue_count} queue(s); raw batches on {raw_queue:?}");
+    assert_eq!(
+        raw_queue.family_index(),
+        separate_requested.handles.queue_family_index
+    );
+    if family_queue_count >= 2 {
+        assert!(!raw_queue.shares_wgpu_queue());
+        assert_eq!(raw_queue.queue_index(), 1);
+        assert_ne!(raw_queue.handle(), separate_requested.handles.queue);
+        assert_eq!(separate_requested.handles.queue_index, 0);
+    } else {
+        assert!(raw_queue.shares_wgpu_queue());
+        assert_eq!(raw_queue.handle(), separate_requested.handles.queue);
+    }
+
+    let shared_requested = &devices[1];
+    assert!(shared_requested.raw_queue.shares_wgpu_queue());
+    assert_eq!(
+        shared_requested.raw_queue.handle(),
+        shared_requested.handles.queue
+    );
+    assert_eq!(shared_requested.raw_queue.queue_index(), 0);
+}
+
+#[test]
+fn the_raw_queue_forecast_matches_the_device_create_makes() {
+    let Some(device) = common::default_device() else {
+        return;
+    };
+    let forecast = pollster::block_on(RawQueueForecast::of(
+        wgpu::InstanceDescriptor::new_without_display_handle(),
+        common::test_selector().into_picker(),
+    ))
+    .unwrap();
+    // Handles differ between the two instances; the UUID names the device.
+    assert_eq!(
+        forecast.physical_device.device_uuid,
+        device.physical_device.device_uuid
+    );
+    assert_eq!(
+        forecast.wgpu_family_queue_count,
+        common::wgpu_family_queue_count(&device)
+    );
+    assert_eq!(
+        forecast.raw_batches_get_a_queue_of_their_own(),
+        !device.raw_queue.shares_wgpu_queue()
+    );
 }
 
 #[test]

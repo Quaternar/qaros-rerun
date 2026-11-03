@@ -5,8 +5,8 @@ use frame_sink::{
     GpuFrameRequest, GpuFrameSink, ShowInfo, SinkError, UserId, ViewRequest, perf,
 };
 use vulkan_device::{
-    HandoverQueue, ImageAcquire, ImageRelease, SemaphoreSignal, attachment_layout, image_aspect,
-    submit_sync_batch, texture_from_vk_image, vk, wait_queue_idle,
+    HandoverQueue, ImageAcquire, ImageRelease, RawQueue, SemaphoreSignal, attachment_layout,
+    image_aspect, submit_sync_batch, texture_from_vk_image, vk, wait_queue_idle,
 };
 
 use super::stream::{ImageState, SenderFrame, SenderImage, VulkanFrameStream};
@@ -45,10 +45,11 @@ struct OpenFrame {
 /// and the release batch that moves the images to `TRANSFER_SRC_OPTIMAL`, releases them to
 /// `VK_QUEUE_FAMILY_EXTERNAL` and signals the frame's semaphore, and the new state is written
 /// back before the frame is shown. A frame that is not shown still gets its semaphore
-/// signalled.
+/// signalled. The raw batches go to the device's [`RawQueue`].
 pub struct VulkanSink<Stream: VulkanFrameStream> {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    raw_queue: RawQueue,
     options: VulkanSinkOptions,
     open_frames: BTreeMap<UserId, OpenFrame>,
     /// Per user with a sender; a user admitted again starts at 0.
@@ -63,6 +64,7 @@ impl<Stream: VulkanFrameStream> VulkanSink<Stream> {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        raw_queue: &RawQueue,
         stream: Stream,
         options: VulkanSinkOptions,
     ) -> Result<Self, SinkError> {
@@ -73,11 +75,12 @@ impl<Stream: VulkanFrameStream> VulkanSink<Stream> {
                     .to_owned(),
             ));
         }
-        let handover_queue = HandoverQueue::new(device, HANDOVER_SLOTS)
+        let handover_queue = HandoverQueue::new(device, raw_queue, HANDOVER_SLOTS)
             .map_err(|error| SinkError::Backend(error.to_string()))?;
         Ok(Self {
             device: device.clone(),
             queue: queue.clone(),
+            raw_queue: raw_queue.clone(),
             options,
             open_frames: BTreeMap::new(),
             next_frame_ids: BTreeMap::new(),
@@ -105,7 +108,7 @@ impl<Stream: VulkanFrameStream> VulkanSink<Stream> {
         // SAFETY: the semaphore is the frame's, of this device, binary and unsignalled: every
         // path that signals it (the release batch) ends the frame without coming here.
         unsafe {
-            signal_discarded_frame(&self.device, frame.semaphore);
+            signal_discarded_frame(&self.raw_queue, frame.semaphore);
         }
         self.stream.discard_frame(user);
     }
@@ -255,14 +258,14 @@ impl<Stream: VulkanFrameStream> VulkanSink<Stream> {
 ///
 /// # Safety
 ///
-/// `semaphore` is a binary semaphore of `device`, unsignalled with no pending signal, and no
-/// other thread submits to `device`'s queue meanwhile.
+/// `semaphore` is a binary semaphore of `raw_queue`'s device, unsignalled with no pending
+/// signal; when `raw_queue` shares wgpu's queue, no other thread submits to wgpu meanwhile.
 #[allow(unsafe_code)]
-pub(crate) unsafe fn signal_discarded_frame(device: &wgpu::Device, semaphore: vk::Semaphore) {
+pub(crate) unsafe fn signal_discarded_frame(raw_queue: &RawQueue, semaphore: vk::Semaphore) {
     // SAFETY: as the caller guarantees.
     let signalled = unsafe {
         submit_sync_batch(
-            device,
+            raw_queue,
             &[],
             &[SemaphoreSignal {
                 semaphore,
@@ -376,8 +379,9 @@ impl<Stream: VulkanFrameStream> GpuFrameSink for VulkanSink<Stream> {
         // SAFETY: the images are in the layout and queue family the sender reported, and
         // `commands` is the renderer's last use of them, as attachments (the `GpuFrameSink`
         // contract); the images and the binary semaphore belong to this device, and the
-        // semaphore has not been signalled for this frame. Submissions happen on the thread
-        // that renders, the only one submitting to wgpu's queue.
+        // semaphore has not been signalled for this frame. Only this thread stages semaphores
+        // on wgpu's queue, and when the raw queue shares it, this is the only thread submitting
+        // to it (the queue submission lock of `--decoupled-render`).
         let handover_outcome = unsafe {
             self.handover_queue.submit_handover(
                 &self.queue,
@@ -450,8 +454,8 @@ impl<Stream: VulkanFrameStream> GpuFrameSink for VulkanSink<Stream> {
         self.options.depth_range
     }
 
-    fn submits_outside_wgpu(&self) -> bool {
-        true
+    fn submits_raw_to_wgpu_queue(&self) -> bool {
+        self.raw_queue.shares_wgpu_queue()
     }
 }
 
@@ -462,9 +466,9 @@ impl<Stream: VulkanFrameStream> Drop for VulkanSink<Stream> {
         }
         // The senders destroy their images and semaphores when the stream goes.
         #[allow(unsafe_code)]
-        // SAFETY: this is the thread that submits to the device's queue.
+        // SAFETY: when the raw queue shares wgpu's queue, this is the thread that submits to it.
         unsafe {
-            wait_for_device(&self.device);
+            wait_for_device(&self.device, &self.raw_queue);
         }
     }
 }
@@ -475,14 +479,14 @@ impl<Stream: VulkanFrameStream> Drop for VulkanSink<Stream> {
 ///
 /// # Safety
 ///
-/// No other thread submits to `device`'s queue meanwhile.
+/// When `raw_queue` shares wgpu's queue, no other thread submits to it meanwhile.
 #[allow(unsafe_code)]
-pub(crate) unsafe fn wait_for_device(device: &wgpu::Device) {
+pub(crate) unsafe fn wait_for_device(device: &wgpu::Device, raw_queue: &RawQueue) {
     if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
         log::error!("qaros: waiting for wgpu's work before a sender goes: {error}");
     }
     // SAFETY: as the caller guarantees.
-    if let Err(result) = unsafe { wait_queue_idle(device) } {
+    if let Err(result) = unsafe { wait_queue_idle(raw_queue) } {
         log::error!("qaros: waiting for the queue before a sender goes: {result}");
     }
 }
