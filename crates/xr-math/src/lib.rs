@@ -16,7 +16,7 @@ mod pose;
 mod projection;
 
 pub use coordinates::{AxisDirection, CoordinatesError, ViewCoordinates};
-pub use depth::{DepthEncoding, DepthRange};
+pub use depth::{DepthEncoding, DepthRange, INFINITE_FAR_PLANE_MARKER};
 pub use eye::{EyeCamera, EyeCameraError};
 pub use placement::{AppPlacement, VolumeTransform};
 pub use pose::{Fov, NearFar, Pose};

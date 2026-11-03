@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0015: Forward normalized depth with a finite far plane, sRGB-encoded color
 
+> The depth encoding is superseded by ADR-0084: Rerun's reverse-Z depth goes to QAROS unchanged, declared as reverse-Z with an infinite far plane, and QAROS converts it once. Forward and reverse normalized and linear meters stay selectable with `--depth`. The color conventions stand.
+
 ## Context
 
 QAROS reprojects with the depth it receives, but its documentation does not define what a depth pixel holds or what `depth_scale` scales. The header states the units of near and far and how reverse-Z is signalled. Color is defined: a sender declares `QarColorEncoding` and, without a declaration, its color is read as sRGB-encoded, "The default; nothing is converted" ([HDR] L876-885, L2290-2298). Rerun renders infinite reverse-Z.

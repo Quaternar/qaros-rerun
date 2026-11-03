@@ -81,6 +81,13 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **Seen on.** 0.9.0-dev.3184, METALENSE 2.
 - **Status.** Under investigation in the QAROS gesture detector.
 
+## An infinite far plane is not in the header
+
+- **Symptom.** None seen. The header says only that near > far declares reverse-Z ([HDR] `QarNearFar`); that a reverse-Z `near_plane` above 1e20 declares an infinite far plane is in qar-streaming's source alone (`IsInfiniteFar`, `PixelShaderHelper.hpp` L397-404 at `e487a31`).
+- **What the viewer does.** By default it sends Rerun's infinite reverse-Z depth as it is and declares it with `near_plane` 1e30 ([ADR-0084](decisions/ADR-0084%20Rerun%20Reverse-Z%20Depth%20Declared%20With%20An%20Infinite%20Far%20Plane.md)). `--depth forward` and `--depth reverse` convert to a finite far plane instead, should a QAROS build read the declaration differently.
+- **Seen on.** qar-streaming source at `e487a31`.
+- **Status.** Open, to raise with QuaternAR: document the infinite far plane in `qar_streaming.h`. The finite-far encodings can go once the header carries it and a headset run confirms the default.
+
 ## History: why panels need 0.9.0-dev.3177
 
 Mixers up to build 3137 gave every GUI panel a browser with its own Ultralight renderer, stream panels included, while Ultralight allows one per process. Closing or reviving a panel next to live ones crashed the mixer in `WebCore.dll`, and a stream panel is closed by the mixer once its sender is gone, so restarting an app with stream panels crashed it. 0.9.0-dev.3177 shares one renderer across the panels, and restarts there are clean. That build is the viewer's minimum, and the viewer logs a warning on an older runtime.

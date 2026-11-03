@@ -1411,6 +1411,50 @@ mod tests {
         assert!(frame_sink::frame_stamp::read_strip(&unstamped.color_rgba8, resolution).is_none());
     }
 
+    #[test]
+    #[allow(clippy::float_cmp, reason = "Rerun's values are copied, not computed")]
+    fn reverse_infinite_eye_images_carry_rerun_depth_unchanged_and_stay_transparent_where_empty() {
+        let depth_range =
+            DepthRange::new(0.05, 20.0, xr_math::DepthEncoding::ReverseInfinite).unwrap();
+        let key = FrameKey {
+            user: UserId(1),
+            frame_id: 7,
+        };
+        let drawn_far_past_the_far_plane = 0.05 / 400.0;
+        let reverse_depth = [
+            0.0,
+            drawn_far_past_the_far_plane,
+            0.01,
+            0.5,
+            1.0,
+            0.0,
+            0.25,
+            0.125,
+        ];
+        let image = renderer(false, depth_range).eye_image(
+            key,
+            0,
+            vec![200; reverse_depth.len() * 4],
+            &reverse_depth,
+            [4, 2],
+            depth_range,
+        );
+        assert_eq!(image.depth, reverse_depth);
+        assert_eq!(image.color_rgba8[0..4], [0, 0, 0, 0], "nothing drawn");
+        assert_eq!(image.color_rgba8[4..8], [200; 4], "drawn 400 m away");
+
+        let stamped = renderer(true, depth_range).eye_image(
+            key,
+            0,
+            vec![200; 256 * 128 * 4],
+            &vec![0.0; 256 * 128],
+            [256, 128],
+            depth_range,
+        );
+        assert_eq!(stamped.depth[0], 0.05, "the stamp sits 1 m away");
+        assert_eq!(stamped.depth[0], stamp_reverse_depth(depth_range));
+    }
+
     fn image_sink_with_one_user(directory: &std::path::Path) -> HeadsetSink {
         let options = frame_sink::ImageSinkOptions {
             output_directory: directory.to_owned(),

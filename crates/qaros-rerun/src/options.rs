@@ -107,8 +107,12 @@ also the app volume's center, app pose and app scale):
 Depth reported to the sink (the QAROS sink converts near and far to the poses' units, see
 --pose-space):
     --near METERS              near plane in room meters (default 0.05)
-    --far METERS               finite far plane in room meters (default 20)
-    --depth forward|reverse|linear   depth encoding (default forward)
+    --far METERS               finite far plane in room meters for the forward, reverse and
+                               linear encodings (default 20)
+    --depth reverse-infinite|forward|reverse|linear
+                               depth encoding (default reverse-infinite: Rerun's reverse-Z as
+                               it is, declared to QAROS with an infinite far plane; the others
+                               convert to a finite far plane)
 
 2D views as QAROS GUI panels (with --sink qaros; QAROS 0.9.0-dev.3177 or later):
     --panels                   open each non-3D view and a timeline as GUI panels within reach
@@ -473,7 +477,7 @@ impl Default for Options {
                     near_plane: 0.05,
                     far_plane: 20.0,
                 },
-                encoding: DepthEncoding::ForwardNormalized,
+                encoding: DepthEncoding::ReverseInfinite,
             },
             panels: false,
             // Each capture reads the whole window back from the GPU on the UI thread; on air
@@ -616,7 +620,7 @@ impl Options {
             return Err(ParseOutcome::Error(
                 "--qaros-graphics vulkan (the default on Windows) and --image-targets gpu write \
                  depth into a depth image, which holds normalized values only; use --depth \
-                 forward or reverse, or --qaros-graphics cpu"
+                 reverse-infinite, forward or reverse, or --qaros-graphics cpu"
                     .to_owned(),
             ));
         }
@@ -719,6 +723,7 @@ impl Options {
                 "--far" => far = parse_number(&flag, &value()?)?,
                 "--depth" => {
                     encoding = match value()?.as_str() {
+                        "reverse-infinite" => DepthEncoding::ReverseInfinite,
                         "forward" => DepthEncoding::ForwardNormalized,
                         "reverse" => DepthEncoding::ReverseNormalized,
                         "linear" => DepthEncoding::LinearMeters,
@@ -858,16 +863,47 @@ mod tests {
         let options = parse(&[]).unwrap();
         assert_eq!(options.sink, SinkKind::Images);
         assert_eq!(options.eye_resolution, [960, 1000]);
-        assert_eq!(
-            options.depth_range.encoding,
-            DepthEncoding::ForwardNormalized
-        );
+        assert_eq!(options.depth_range.encoding, DepthEncoding::ReverseInfinite);
+        assert!((options.depth_range.near() - 0.05).abs() < f32::EPSILON);
+        assert!((options.depth_range.far() - 20.0).abs() < f32::EPSILON);
         assert!(!options.panels);
         assert_eq!(options.panel_capture_interval, Duration::from_millis(250));
         assert_eq!(options.max_users, 2);
         assert_eq!(options.simulated_users, 1);
         assert!(!options.frame_stamp);
         assert!(!options.decoupled_render);
+    }
+
+    #[test]
+    fn every_depth_encoding_is_selectable_and_the_finite_ones_remain_as_fallback() {
+        for (value, encoding) in [
+            ("reverse-infinite", DepthEncoding::ReverseInfinite),
+            ("forward", DepthEncoding::ForwardNormalized),
+            ("reverse", DepthEncoding::ReverseNormalized),
+            ("linear", DepthEncoding::LinearMeters),
+        ] {
+            let options = parse(&["--depth", value, "--near", "0.1", "--far", "30"]).unwrap();
+            assert_eq!(options.depth_range.encoding, encoding, "--depth {value}");
+            assert!((options.depth_range.near() - 0.1).abs() < f32::EPSILON);
+            assert!((options.depth_range.far() - 30.0).abs() < f32::EPSILON);
+        }
+        assert!(matches!(
+            parse(&["--depth", "infinite"]),
+            Err(ParseOutcome::Error(_))
+        ));
+    }
+
+    #[test]
+    fn reverse_infinite_depth_goes_into_depth_images() {
+        for arguments in [
+            &["--sink", "qaros", "--qaros-graphics", "vulkan"][..],
+            &["--image-targets", "gpu", "--vulkan-device", "default"],
+        ] {
+            let mut with_depth = arguments.to_vec();
+            with_depth.extend(["--depth", "reverse-infinite"]);
+            let options = parse(&with_depth).unwrap();
+            assert_eq!(options.depth_range.encoding, DepthEncoding::ReverseInfinite);
+        }
     }
 
     #[test]

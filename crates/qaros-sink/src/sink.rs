@@ -682,6 +682,31 @@ mod tests {
         assert_eq!((app.near, app.far), (5.0, 0.05));
     }
 
+    /// QAROS reads a reverse-Z `near_plane` above 1e20 as an infinite far plane
+    /// (`IsInfiniteFar`, `PixelShaderHelper.hpp` L397-404 at qar-streaming `e487a31`).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "divisions by a power of two are exact")]
+    fn reverse_infinite_depth_reaches_qaros_as_reverse_z_with_an_infinite_far_plane() {
+        let range = DepthRange::new(0.2, 20.0, DepthEncoding::ReverseInfinite).unwrap();
+        let show = ShowInfo::from_depth_range(range);
+        let app = pose_mapping(PoseSpace::App).show_params(show, false);
+        assert_eq!((app.near, app.far, app.depth_scale), (2.5e29, 0.05, 1.0));
+        let room = pose_mapping(PoseSpace::Room).show_params(show, false);
+        assert_eq!((room.near, room.far), (1.0e30, 0.2));
+
+        let thousandth = PoseMapping {
+            app_scale: 0.001,
+            ..pose_mapping(PoseSpace::App)
+        };
+        let scaled = thousandth.show_params(show, false);
+        assert!(
+            scaled.near.is_finite() && scaled.near > 1.0e20,
+            "{}",
+            scaled.near
+        );
+        assert!((scaled.far - 200.0).abs() < 1e-3, "{}", scaled.far);
+    }
+
     fn layout_view(kind: ViewKind, eye: Eye, corners: [u32; 4]) -> VideoFrameView {
         let [start_x, start_y, end_x, end_y] = corners;
         VideoFrameView {

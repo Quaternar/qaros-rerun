@@ -19,6 +19,7 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Changed
 
+- Depth goes to QAROS as Rerun draws it, infinite reverse-Z, declared as reverse-Z with an infinite far plane (`near_plane` 1e30, `far_plane` the near plane), so QAROS converts it once and the viewer no longer clamps content past `--far`: `--depth reverse-infinite`, the new default on both paths. `--depth forward`, `reverse` and `linear` remain as the fallback until a headset run confirms the default (ADR-0084, superseding ADR-0015's depth encoding).
 - A stream panel whose stream id QAROS cannot read is listed without it, so the other panels still open (QAROS 0.9.0-dev.3184 reports such a panel as "0 payload bytes").
 - The QAROS Rust binding is pinned to QAROS `main` at `e0c0195a`, whose C header matches the 0.9.0-dev.3184 runtime apart from one added status code. Dropping a sender creation in flight returns at once; the session's teardown waits for its callback.
 - Panels are listed through a raw listing that reads each panel's content type first, so a stream panel in the session no longer makes the listing fail.

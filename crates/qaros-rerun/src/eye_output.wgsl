@@ -5,7 +5,8 @@
 // (0 where nothing was drawn, near / distance elsewhere).
 // stamp: the frame stamp (`--frame-stamp`) over the top `stamp_rows` rows of the eye; a texel
 // with alpha is stamped, and a stamped pixel takes the stamp's color and `stamp_reverse_depth`.
-// The conversion mirrors xr_math::DepthRange::encode_from_reverse_z.
+// The depth written mirrors xr_math::DepthRange::encode_from_reverse_z: Rerun's reverse-Z as it
+// is for the reverse-infinite encoding (the default), converted for the finite-far ones.
 //
 // A depth target of the color's size is written together with color, pixel for pixel. A depth
 // target of another size gets a pass of its own: each depth pixel takes the nearest depth
@@ -13,6 +14,7 @@
 // another app volume shows.
 
 const ENCODING_FORWARD_NORMALIZED: u32 = 0u;
+const ENCODING_REVERSE_INFINITE: u32 = 2u;
 
 struct DepthOutput {
     near_plane: f32,
@@ -73,6 +75,9 @@ fn covered_color(pixel: vec2i) -> vec4f {
 }
 
 fn encoded_depth(reverse: f32) -> f32 {
+    if depth_output.encoding == ENCODING_REVERSE_INFINITE {
+        return reverse;
+    }
     let near = depth_output.near_plane;
     let far = depth_output.far_plane;
     // Nothing drawn is infinitely far, which the clamp puts on the far plane.

@@ -270,7 +270,7 @@ Recordings with many small chunks load slowly. `rerun rrd optimize in.rrd -o out
 | When a frame goes out | In the viewer frame its eyes were drawn in | One viewer frame or more later, once the readback arrives |
 | Rate | Set by the viewer's own frame time | Bound by the readback; two users share it, so each gets about half |
 | Needs | A Vulkan driver with `VK_KHR_external_memory_win32` and `VK_KHR_external_semaphore_win32`; the Vulkan graphics backend | Any graphics backend |
-| Depth | `--depth forward` or `reverse` | Also `--depth linear` |
+| Depth | `--depth reverse-infinite` (default), `forward` or `reverse` | Also `--depth linear` |
 
 Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulkan path does not start on your GPU, to compare against it when frames look wrong, or with `--depth linear`.
 
@@ -282,7 +282,7 @@ Use the Vulkan path on the Hub machine. Use `--qaros-graphics cpu` when the Vulk
 | --- | --- |
 | Red and blue swapped | `--color-format rgba` (default `bgra`) |
 | Content offset, at the wrong scale, or turning twice with the volume | `--pose-space room` (default `app`) |
-| Content swims or tears as the head moves while placement is right | `--depth reverse`, then on the CPU path `--depth linear` |
+| Content swims or tears as the head moves while placement is right | `--depth forward`, then `--depth reverse`, then on the CPU path `--depth linear` |
 | Black or garbage on the Vulkan path | `--qaros-graphics cpu` on the same machine, to tell the path from the scene |
 | Wrong eye image for the pose | `--frame-stamp`, which draws `U<user> F<frame> L\|R` into every eye: both eyes of a stream must show the same frame number, counting up |
 
@@ -331,7 +331,7 @@ This mode is experimental, off by default, and may change in a later version. By
 | Nothing in the headset, the log streams | Data outside the app volume, no 3D view, or left-handed coordinates | See [Place your data in the app volume](#place-your-data-in-the-app-volume) and [What the headset shows](#what-the-headset-shows) |
 | An SDK on another machine cannot connect | Firewall, or the wrong address | Allow TCP 9876 for `qaros-rerun.exe` ([What you need](#what-you-need)); connect to the Hub machine's LAN address |
 | `--decoupled-render with the QAROS Vulkan sink needs --headless ...` | Decoupled render in a window on the Vulkan path | Add `--headless WxH`, or use `--qaros-graphics cpu` |
-| `--qaros-graphics vulkan (the default on Windows) and --image-targets gpu write depth into a depth image ...` | `--depth linear` on the Vulkan path | `--depth forward` or `reverse`, or `--qaros-graphics cpu` |
+| `--qaros-graphics vulkan (the default on Windows) and --image-targets gpu write depth into a depth image ...` | `--depth linear` on the Vulkan path | `--depth reverse-infinite`, `forward` or `reverse`, or `--qaros-graphics cpu` |
 | Build fails with E0514 ("found crate compiled by an incompatible version of rustc") | Crates from two toolchains in `target` | Run `cargo` from inside the repository, then `cargo clean` |
 | On a Mac, the Vulkan backend is missing | No Vulkan loader on the library path | `brew install molten-vk vulkan-loader` and `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`, set on the viewer itself (Homebrew's `cargo` drops it) |
 
@@ -383,7 +383,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--up CODE` | the view's own | Override the view coordinates, for example `RFU` |
 | `--near METERS` | 0.05 | Near plane in room meters |
 | `--far METERS` | 20 | Finite far plane in room meters |
-| `--depth forward\|reverse\|linear` | `forward` | Depth encoding; `linear` only on the CPU path |
+| `--depth reverse-infinite\|forward\|reverse\|linear` | `reverse-infinite` | Depth encoding: Rerun's reverse-Z as it is with an infinite far plane, or converted to a finite `--far`; `linear` only on the CPU path |
 
 **Panels**
 

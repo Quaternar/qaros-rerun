@@ -213,11 +213,13 @@ impl DepthOutput {
         let encoding: u32 = match self.depth_range.encoding {
             DepthEncoding::LinearMeters if has_depth_target => {
                 return Err(
-                    "linear depth cannot be written into a depth target; use forward or reverse"
+                    "linear depth cannot be written into a depth target; use reverse-infinite, \
+                     forward or reverse"
                         .to_owned(),
                 );
             }
             DepthEncoding::ReverseNormalized => 1,
+            DepthEncoding::ReverseInfinite => 2,
             // Without a depth target the shader never reads the encoding.
             DepthEncoding::ForwardNormalized | DepthEncoding::LinearMeters => 0,
         };
@@ -967,12 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn depth_matches_the_cpu_conversion_in_both_normalized_encodings() {
+    fn depth_matches_the_cpu_conversion_in_every_depth_image_encoding() {
         let Some(vulkan_device) = create_device() else {
             return;
         };
         let mut eye_output = EyeOutput::new(&vulkan_device.device, false);
         for encoding in [
+            DepthEncoding::ReverseInfinite,
             DepthEncoding::ForwardNormalized,
             DepthEncoding::ReverseNormalized,
         ] {
@@ -1009,7 +1012,7 @@ mod tests {
             eye_index: 1,
         };
         frame_sink::stamp_eye(&mut stamp_image, stamp, 0.0);
-        let settings = depth_output(DepthEncoding::ForwardNormalized, true);
+        let settings = depth_output(DepthEncoding::ReverseInfinite, true);
         let stamp_distance = 1.0;
         let overlay = StampOverlay {
             image: &stamp_image,
@@ -1279,12 +1282,21 @@ mod tests {
 
     #[test]
     fn smaller_depth_keeps_the_nearest_depth_of_each_footprint() {
+        assert_smaller_depth_keeps_the_nearest_depth(DepthEncoding::ForwardNormalized);
+    }
+
+    #[test]
+    fn smaller_reverse_infinite_depth_keeps_the_nearest_depth_of_each_footprint() {
+        assert_smaller_depth_keeps_the_nearest_depth(DepthEncoding::ReverseInfinite);
+    }
+
+    fn assert_smaller_depth_keeps_the_nearest_depth(encoding: DepthEncoding) {
         let Some(vulkan_device) = create_device() else {
             return;
         };
         let device = &vulkan_device.device;
         let mut eye_output = EyeOutput::new(device, false);
-        let settings = depth_output(DepthEncoding::ForwardNormalized, true);
+        let settings = depth_output(encoding, true);
         let composited = composite_target(device, wgpu::TextureFormat::Rgba8Unorm, [4, 4]);
         let pattern = sampleable_depth(device, [4, 4]);
         let nothing_drawn = sampleable_depth(device, [4, 4]);
@@ -1341,13 +1353,19 @@ mod tests {
         for (depth, expected) in depths(device, &pattern_depth).into_iter().zip(expected) {
             assert!(
                 (depth - expected).abs() <= DEPTH_TOLERANCE,
-                "GPU {depth}, CPU {expected}"
+                "{encoding:?}: GPU {depth}, CPU {expected}"
             );
         }
+        let nothing_drawn_depth = match encoding {
+            DepthEncoding::ReverseInfinite => 0.0,
+            DepthEncoding::ForwardNormalized
+            | DepthEncoding::ReverseNormalized
+            | DepthEncoding::LinearMeters => 1.0,
+        };
         assert_eq!(
             depths(device, &empty_depth),
-            [1.0; 4],
-            "nothing drawn is far"
+            [nothing_drawn_depth; 4],
+            "{encoding:?}: nothing drawn is infinitely far"
         );
         assert!(
             pixels(device, &pattern_color)
@@ -1380,5 +1398,20 @@ mod tests {
         assert_eq!(u32::from_ne_bytes(word(3)), 1);
         assert_eq!(word(4), 2.0_f32.to_ne_bytes());
         assert_eq!(word(5), 4.0_f32.to_ne_bytes());
+    }
+
+    #[test]
+    fn uniform_selects_the_shader_encoding_of_each_depth_image_encoding() {
+        let encoding_word = |encoding| {
+            let bytes = depth_output(encoding, true)
+                .uniform_bytes(true, [1.0, 1.0], None)
+                .expect("a depth image encoding");
+            let mut four = [0_u8; 4];
+            four.copy_from_slice(&bytes[8..12]);
+            u32::from_ne_bytes(four)
+        };
+        assert_eq!(encoding_word(DepthEncoding::ForwardNormalized), 0);
+        assert_eq!(encoding_word(DepthEncoding::ReverseNormalized), 1);
+        assert_eq!(encoding_word(DepthEncoding::ReverseInfinite), 2);
     }
 }
