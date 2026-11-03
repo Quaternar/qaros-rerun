@@ -37,6 +37,8 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Fixed
 
+- A stream panel the claim shows is shown once more with its first frame. QAROS 0.9.0-dev.3184 refuses the claim's show as stale because it follows the claim's `set_stream`, and after a Stop and a Start in the same Hub session the view panels did not come back ([Known issues](docs/known-issues.md)).
+- Resizing the desktop window no longer blanks the panels in the glasses. Each 2D view streams one frame per run, fixed from the first crop size that holds for 1 s, and every later crop is scaled into it on the CPU, aspect preserved and letterboxed in the view's background colour, so a resize never replaces a panel's stream. On QAROS 0.9.0-dev.3184 every replaced stream stayed blank (ADR-0087).
 - Panels follow the active recording: when another recording is opened (for example from the command palette) or the blueprint drops or hides a 2D view, the panels of views no longer in the layout are hidden instead of staying open with their last image, and shown again when their views return. The new recording's 2D views get panels as before, and the timeline panel follows the active recording's time (ADR-0082).
 - Both render senders declare premultiplied alpha (`ColorAlphaMode::Premultiplied`), so the mixer blends the stream by its coverage; an undeclared stream is drawn opaque, uncovered pixels included.
 

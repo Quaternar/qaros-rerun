@@ -21,6 +21,10 @@ use crate::timeline_requests::{TimelinePosition, TimelineRequests};
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 pub const STREAM_PIXEL_CAP: u32 = 1280;
 
+/// How long a view's crop keeps one size before its stream frame is fixed from it. A desktop
+/// resize changes the crop at every capture, so a size held this long is the layout at rest.
+pub const STREAM_FRAME_SETTLE: Duration = Duration::from_secs(1);
+
 /// QAROS issue #343 test: every mixer `VulkanDeviceLost` on 3177 came as a mixer connected
 /// one of our stream panel streams, at 1016x665 and 960x256. The mixer's panel copy has no
 /// size-dependent arithmetic, so aligned sizes are not expected to avoid the fault by
@@ -117,6 +121,7 @@ pub struct PanelCapture {
     view_directory: SharedViewDirectory,
     announced_views: HashSet<String>,
     panel_names: PanelNames,
+    stream_frames: StreamFrames,
 }
 
 impl PanelCapture {
@@ -135,6 +140,7 @@ impl PanelCapture {
             view_directory,
             announced_views: HashSet::new(),
             panel_names: PanelNames::default(),
+            stream_frames: StreamFrames::default(),
         }
     }
 
@@ -152,22 +158,37 @@ impl PanelCapture {
         )
     }
 
-    /// The stream panels' images, at most [`STREAM_PIXEL_CAP`] a side and padded for the
-    /// mixer.
+    /// Publishes the view scaled into its fixed stream frame ([`StreamFrames`]), so its
+    /// panel's sender never has to change size. A view whose frame is not fixed yet is not
+    /// published; returns the frame it was published in.
     #[cfg(feature = "qaros")]
     fn publish_view(
-        &self,
+        &mut self,
         name: &str,
         width: u32,
         height: u32,
         rgba8: Vec<u8>,
-    ) -> Result<(), String> {
-        let (width, height, rgba8) = fit_within_cap(width, height, rgba8, STREAM_PIXEL_CAP);
-        publish_padded_for_mixer(&self.outlet.images, name, width, height, rgba8)
+        now: Instant,
+    ) -> Result<Option<StreamFrame>, String> {
+        let Some(frame) = self.stream_frames.frame_for(name, width, height, now) else {
+            return Ok(None);
+        };
+        let framed = letterbox_into_frame(width, height, rgba8, frame)?;
+        self.outlet
+            .images
+            .publish_rgba8(name, frame.frame_width, frame.frame_height, framed)?;
+        Ok(Some(frame))
     }
 
     #[cfg(not(feature = "qaros"))]
-    fn publish_view(&self, _: &str, _: u32, _: u32, _: Vec<u8>) -> Result<(), String> {
+    fn publish_view(
+        &mut self,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: Vec<u8>,
+        _: Instant,
+    ) -> Result<Option<StreamFrame>, String> {
         match self.outlet {}
     }
 
@@ -255,7 +276,12 @@ impl PanelCapture {
                     .map(|view_info| (view_id, view_info))
             })
             .collect();
-        self.publish_on_screen_views(on_screen_views, screenshot, pixels_per_point);
+        self.publish_on_screen_views(
+            on_screen_views,
+            screenshot,
+            pixels_per_point,
+            Instant::now(),
+        );
     }
 
     /// Publishes the views on screen in this capture, and withdraws those that were published
@@ -267,6 +293,7 @@ impl PanelCapture {
         on_screen_views: Vec<(ViewId, PublishedViewInfo)>,
         screenshot: &egui::ColorImage,
         pixels_per_point: f32,
+        now: Instant,
     ) {
         self.panel_names.assign(&on_screen_views);
         let on_screen_names: Vec<String> = on_screen_views
@@ -286,16 +313,22 @@ impl PanelCapture {
             else {
                 continue;
             };
-            if let Err(error) = self.publish_view(&panel_name, width, height, rgba8) {
-                re_log::warn_once!("panels: cannot publish {panel_name}: {error}");
-                continue;
-            }
+            let frame = match self.publish_view(&panel_name, width, height, rgba8, now) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
+                Err(error) => {
+                    re_log::warn_once!("panels: cannot publish {panel_name}: {error}");
+                    continue;
+                }
+            };
             if !self.announced_views.insert(panel_name.clone()) {
                 continue;
             }
             re_log::info!(
-                "panels: {:?} published as {panel_name} at {width}x{height}",
-                view_info.name
+                "panels: {:?} published as {panel_name} at {width}x{height} in a {}x{} frame",
+                view_info.name,
+                frame.frame_width,
+                frame.frame_height
             );
         }
     }
@@ -444,22 +477,231 @@ pub fn crop_rgba8(
     ))
 }
 
-/// Halves `rgba8` with a 2x2 box filter until neither side exceeds `cap`. An odd last row or
-/// column is dropped at each halving.
-#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
-pub fn fit_within_cap(
-    mut width: u32,
-    mut height: u32,
-    mut rgba8: Vec<u8>,
-    cap: u32,
-) -> (u32, u32, Vec<u8>) {
-    while (width > cap || height > cap) && width >= 2 && height >= 2 {
-        let (half_width, half_height) = (width / 2, height / 2);
-        rgba8 = halve_rgba8(width, &rgba8, half_width, half_height);
-        width = half_width;
-        height = half_height;
+/// The fixed size a view streams at for the rest of the run. The content box is the view's
+/// settled size, halved until neither side exceeds [`STREAM_PIXEL_CAP`]; the frame is the
+/// content box padded to the mixer multiples ([`MIXER_WIDTH_ALIGNMENT`],
+/// [`MIXER_HEIGHT_ALIGNMENT`]). Its sender, and the panel's metres, are sized from the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamFrame {
+    pub content_width: u32,
+    pub content_height: u32,
+    pub frame_width: u32,
+    pub frame_height: u32,
+}
+
+impl StreamFrame {
+    pub fn for_settled_view(width: u32, height: u32) -> Self {
+        let (mut content_width, mut content_height) = (width.max(1), height.max(1));
+        while (content_width > STREAM_PIXEL_CAP || content_height > STREAM_PIXEL_CAP)
+            && content_width >= 2
+            && content_height >= 2
+        {
+            content_width /= 2;
+            content_height /= 2;
+        }
+        Self {
+            content_width,
+            content_height,
+            frame_width: content_width.next_multiple_of(MIXER_WIDTH_ALIGNMENT),
+            frame_height: content_height.next_multiple_of(MIXER_HEIGHT_ALIGNMENT),
+        }
     }
-    (width, height, rgba8)
+
+    /// The largest size of `width` by `height`'s aspect that fits the content box, at least
+    /// one pixel a side.
+    fn fitted_content_size(&self, width: u32, height: u32) -> (u32, u32) {
+        let (width, height) = (u64::from(width.max(1)), u64::from(height.max(1)));
+        let (box_width, box_height) = (
+            u64::from(self.content_width),
+            u64::from(self.content_height),
+        );
+        let (fitted_width, fitted_height) = if width * box_height <= height * box_width {
+            ((width * box_height + height / 2) / height, box_height)
+        } else {
+            (box_width, (height * box_width + width / 2) / width)
+        };
+        (
+            u32::try_from(fitted_width.clamp(1, box_width)).unwrap_or(self.content_width),
+            u32::try_from(fitted_height.clamp(1, box_height)).unwrap_or(self.content_height),
+        )
+    }
+}
+
+/// Each view's stream frame, fixed once per run from the first crop size that holds for
+/// [`STREAM_FRAME_SETTLE`] and kept for the rest of the run, also while the view is off screen,
+/// because its panel keeps its sender (ADR-0082). A desktop resize then changes only how the
+/// view is scaled into its frame, never the size its sender streams at.
+#[derive(Default)]
+pub struct StreamFrames {
+    fixed: HashMap<String, StreamFrame>,
+    /// A view without a frame yet: the crop size seen last and since when.
+    settling: HashMap<String, SettlingSize>,
+}
+
+#[derive(Clone, Copy)]
+struct SettlingSize {
+    width: u32,
+    height: u32,
+    since: Instant,
+}
+
+impl StreamFrames {
+    /// The view's frame, fixing it when the view's crop has kept `width` by `height` for
+    /// [`STREAM_FRAME_SETTLE`]; `None` while it has not.
+    #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+    pub fn frame_for(
+        &mut self,
+        name: &str,
+        width: u32,
+        height: u32,
+        now: Instant,
+    ) -> Option<StreamFrame> {
+        if let Some(frame) = self.fixed.get(name) {
+            if (width, height) != (frame.content_width, frame.content_height) {
+                re_log::debug!(
+                    "panels: {name} at {width}x{height} is scaled into its fixed {}x{} stream frame",
+                    frame.frame_width,
+                    frame.frame_height
+                );
+            }
+            return Some(*frame);
+        }
+        let settling = self
+            .settling
+            .entry(name.to_owned())
+            .or_insert(SettlingSize {
+                width,
+                height,
+                since: now,
+            });
+        if (settling.width, settling.height) != (width, height) {
+            *settling = SettlingSize {
+                width,
+                height,
+                since: now,
+            };
+        }
+        if now.saturating_duration_since(settling.since) < STREAM_FRAME_SETTLE {
+            return None;
+        }
+        self.settling.remove(name);
+        let frame = StreamFrame::for_settled_view(width, height);
+        re_log::info!(
+            "panels: {name} streams in a fixed {}x{} frame for this run, from its settled \
+             {width}x{height} crop; a later size is scaled into it",
+            frame.frame_width,
+            frame.frame_height
+        );
+        self.fixed.insert(name.to_owned(), frame);
+        Some(frame)
+    }
+}
+
+/// Scales `rgba8`, keeping its aspect, to the largest size that fits the frame's content box,
+/// and centres it in the frame. The rest of the frame takes the bottom-right pixel's colour,
+/// the view's background in a Rerun view, as the mixer padding does: the panel images are
+/// opaque (`PanelImages` stores alpha 255), so the bars cannot be transparent. A crop of the
+/// settled size is copied unscaled. Shrinking first halves with a 2x2 box filter while the
+/// crop is at least twice the target, then bilinear sampling covers the rest, so text in a
+/// shrunken plot does not alias.
+#[cfg_attr(not(feature = "qaros"), allow(dead_code))]
+pub fn letterbox_into_frame(
+    width: u32,
+    height: u32,
+    rgba8: Vec<u8>,
+    frame: StreamFrame,
+) -> Result<Vec<u8>, String> {
+    let expected_length = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || rgba8.len() != expected_length {
+        return Err(format!("{} bytes for a {width}x{height} crop", rgba8.len()));
+    }
+    let background: [u8; 4] = rgba8[expected_length - 4..]
+        .try_into()
+        .map_err(|_| "no bottom-right pixel".to_owned())?;
+    let (target_width, target_height) = frame.fitted_content_size(width, height);
+    let (mut source_width, mut source_height, mut source) = (width, height, rgba8);
+    while source_width >= 2 * target_width && source_height >= 2 * target_height {
+        let (half_width, half_height) = (source_width / 2, source_height / 2);
+        source = halve_rgba8(source_width, &source, half_width, half_height);
+        source_width = half_width;
+        source_height = half_height;
+    }
+    let content = if (source_width, source_height) == (target_width, target_height) {
+        source
+    } else {
+        resample_bilinear(
+            (source_width, source_height),
+            &source,
+            (target_width, target_height),
+        )
+    };
+    let frame_row = frame.frame_width as usize * 4;
+    let mut framed = background.repeat(frame.frame_width as usize * frame.frame_height as usize);
+    let left = (frame.frame_width - target_width) as usize / 2;
+    let top = (frame.frame_height - target_height) as usize / 2;
+    let content_row = target_width as usize * 4;
+    for (row, content_pixels) in content.chunks_exact(content_row).enumerate() {
+        let start = (top + row) * frame_row + left * 4;
+        framed[start..start + content_row].copy_from_slice(content_pixels);
+    }
+    Ok(framed)
+}
+
+/// One source sample per output column or row: the two neighbours and the second one's weight
+/// out of 256, pixel centres aligned.
+fn bilinear_taps(source_length: u32, target_length: u32) -> Vec<(usize, usize, u32)> {
+    let last = source_length as usize - 1;
+    #[allow(clippy::cast_precision_loss)]
+    let step = source_length as f32 / target_length as f32;
+    (0..target_length)
+        .map(|target| {
+            #[allow(clippy::cast_precision_loss)]
+            let position = ((target as f32 + 0.5) * step - 0.5).clamp(0.0, last as f32);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let first = position.floor() as usize;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let second_weight = ((position - position.floor()) * 256.0).round() as u32;
+            (first, (first + 1).min(last), second_weight)
+        })
+        .collect()
+}
+
+/// Separable: every source row is resampled across once, into weighted sums out of 256 (at most
+/// 255 * 256, which fits a `u16`), then each target row blends two of those.
+fn resample_bilinear(
+    (source_width, source_height): (u32, u32),
+    source: &[u8],
+    (target_width, target_height): (u32, u32),
+) -> Vec<u8> {
+    let column_taps = bilinear_taps(source_width, target_width);
+    let row_taps = bilinear_taps(source_height, target_height);
+    let target_row = target_width as usize * 4;
+    let mut widened_rows: Vec<u16> = Vec::with_capacity(target_row * source_height as usize);
+    for source_pixels in source.chunks_exact(source_width as usize * 4) {
+        for &(left_column, right_column, right_weight) in &column_taps {
+            let left_pixel = &source_pixels[left_column * 4..][..4];
+            let right_pixel = &source_pixels[right_column * 4..][..4];
+            for (&left, &right) in left_pixel.iter().zip(right_pixel) {
+                let widened =
+                    u32::from(left) * (256 - right_weight) + u32::from(right) * right_weight;
+                #[allow(clippy::cast_possible_truncation)]
+                widened_rows.push(widened as u16);
+            }
+        }
+    }
+    let mut resampled = Vec::with_capacity(target_row * target_height as usize);
+    for &(upper_row, lower_row, lower_weight) in &row_taps {
+        let upper = &widened_rows[upper_row * target_row..][..target_row];
+        let lower = &widened_rows[lower_row * target_row..][..target_row];
+        resampled.extend(upper.iter().zip(lower).map(|(&upper_sum, &lower_sum)| {
+            let blended =
+                u32::from(upper_sum) * (256 - lower_weight) + u32::from(lower_sum) * lower_weight;
+            #[allow(clippy::cast_possible_truncation)]
+            let rounded = ((blended + (1 << 15)) >> 16) as u8;
+            rounded
+        }));
+    }
+    resampled
 }
 
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
@@ -520,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn a_2600_pixel_crop_is_halved_twice_to_650_with_the_box_averages() {
+    fn a_2600_pixel_crop_is_halved_twice_to_650_with_the_box_averages_and_centred() {
         let width = 2600;
         let height = 4;
         // Columns alternate 0 and 100 in red; rows alternate 0 and 40 in green.
@@ -532,22 +774,173 @@ mod tests {
                 rgba8.extend_from_slice(&[red, green, 7, 255]);
             }
         }
-        let (fitted_width, fitted_height, fitted) =
-            fit_within_cap(2600, 4, rgba8, STREAM_PIXEL_CAP);
-        assert_eq!((fitted_width, fitted_height), (650, 1));
-        assert_eq!(fitted.len(), 650 * 4);
-        assert!(
-            fitted
-                .chunks_exact(4)
-                .all(|pixel| pixel == [50, 20, 7, 255]),
-            "{:?}",
-            &fitted[..8]
-        );
-        let (kept_width, kept_height, kept) =
-            fit_within_cap(1280, 720, vec![9; 1280 * 720 * 4], 1280);
+        let frame = StreamFrame::for_settled_view(2600, 4);
         assert_eq!(
-            (kept_width, kept_height, kept.len()),
-            (1280, 720, 1280 * 720 * 4)
+            frame,
+            StreamFrame {
+                content_width: 650,
+                content_height: 1,
+                frame_width: 704,
+                frame_height: 8,
+            }
+        );
+
+        let framed = letterbox_into_frame(2600, 4, rgba8, frame).unwrap();
+
+        assert_eq!(framed.len(), 704 * 8 * 4);
+        let pixel = |x: usize, y: usize| &framed[(y * 704 + x) * 4..][..4];
+        let (left, top) = ((704 - 650) / 2, (8 - 1) / 2);
+        assert_eq!((left, top), (27, 3));
+        assert!(
+            (left..left + 650).all(|x| pixel(x, top) == [50, 20, 7, 255]),
+            "{:?}",
+            pixel(left, top)
+        );
+        let bottom_right_of_the_crop = [100, 40, 7, 255];
+        assert_eq!(pixel(left - 1, top), bottom_right_of_the_crop);
+        assert_eq!(pixel(left + 650, top), bottom_right_of_the_crop);
+        assert_eq!(pixel(left, top - 1), bottom_right_of_the_crop);
+        assert_eq!(pixel(703, 7), bottom_right_of_the_crop);
+    }
+
+    #[test]
+    fn a_settled_crop_within_the_cap_keeps_its_size_padded_for_the_mixer() {
+        assert_eq!(
+            StreamFrame::for_settled_view(572, 301),
+            StreamFrame {
+                content_width: 572,
+                content_height: 301,
+                frame_width: 576,
+                frame_height: 304,
+            }
+        );
+        assert_eq!(
+            StreamFrame::for_settled_view(1280, 720),
+            StreamFrame {
+                content_width: 1280,
+                content_height: 720,
+                frame_width: 1280,
+                frame_height: 720,
+            }
+        );
+    }
+
+    /// A `width` by `height` crop whose every pixel is `[x, y, 9, 255]`.
+    fn coordinate_crop(width: u32, height: u32) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| {
+                    [
+                        u8::try_from(x).unwrap(),
+                        u8::try_from(y).unwrap(),
+                        9,
+                        u8::MAX,
+                    ]
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_crop_of_the_settled_size_is_copied_unscaled_into_the_frame_centre() {
+        let frame = StreamFrame::for_settled_view(60, 5);
+        assert_eq!((frame.frame_width, frame.frame_height), (64, 8));
+
+        let framed = letterbox_into_frame(60, 5, coordinate_crop(60, 5), frame).unwrap();
+
+        let pixel = |x: usize, y: usize| &framed[(y * 64 + x) * 4..][..4];
+        assert_eq!(pixel(2, 1), [0, 0, 9, 255], "the crop's top-left pixel");
+        assert_eq!(
+            pixel(61, 5),
+            [59, 4, 9, 255],
+            "the crop's bottom-right pixel"
+        );
+        assert_eq!(pixel(33, 3), [31, 2, 9, 255]);
+        assert_eq!(pixel(1, 1), [59, 4, 9, 255], "bar left");
+        assert_eq!(pixel(62, 1), [59, 4, 9, 255], "bar right");
+        assert_eq!(pixel(2, 0), [59, 4, 9, 255], "bar above");
+        assert_eq!(pixel(2, 6), [59, 4, 9, 255], "bar below");
+    }
+
+    #[test]
+    fn a_crop_of_another_aspect_is_letterboxed_at_the_largest_size_that_fits() {
+        // Settled wide; the window then makes the view square.
+        let frame = StreamFrame::for_settled_view(8, 4);
+        assert_eq!((frame.frame_width, frame.frame_height), (64, 8));
+        let framed = letterbox_into_frame(4, 4, coordinate_crop(4, 4), frame).unwrap();
+
+        let pixel = |x: usize, y: usize| &framed[(y * 64 + x) * 4..][..4];
+        let (left, top) = ((64 - 4) / 2, (8 - 4) / 2);
+        assert_eq!((left, top), (30, 2));
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    pixel(left + x, top + y),
+                    [u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 9, 255]
+                );
+            }
+        }
+        assert_eq!(pixel(left - 1, top), [3, 3, 9, 255], "bar left");
+        assert_eq!(pixel(left + 4, top + 3), [3, 3, 9, 255], "bar right");
+        assert_eq!(pixel(0, 0), [3, 3, 9, 255]);
+    }
+
+    #[test]
+    fn a_larger_crop_is_box_halved_and_a_smaller_one_sampled_up_bilinearly() {
+        let frame = StreamFrame::for_settled_view(4, 2);
+        let grown = coordinate_crop(8, 4);
+        let shrunk_into_the_frame = letterbox_into_frame(8, 4, grown, frame).unwrap();
+        let pixel = |framed: &[u8], x: usize, y: usize| framed[(y * 64 + x) * 4..][..4].to_vec();
+        let (left, top) = ((64 - 4) / 2, (8 - 2) / 2);
+        // A 2x2 box over columns 2 and 3 and rows 2 and 3 averages to 2.5, rounded up.
+        assert_eq!(
+            pixel(&shrunk_into_the_frame, left + 1, top + 1),
+            [3, 3, 9, 255]
+        );
+        assert_eq!(pixel(&shrunk_into_the_frame, left, top), [1, 1, 9, 255]);
+
+        let black_then_white = vec![0, 0, 0, 255, 255, 255, 255, 255];
+        let stretched = letterbox_into_frame(2, 1, black_then_white, frame).unwrap();
+        let reds: Vec<u8> = (0..4)
+            .map(|x| pixel(&stretched, left + x, top)[0])
+            .collect();
+        assert_eq!(reds, [0, 64, 191, 255]);
+        assert_eq!(
+            pixel(&stretched, left + 1, top + 1)[0],
+            64,
+            "both rows sample row 0"
+        );
+    }
+
+    #[test]
+    fn a_crop_whose_bytes_do_not_match_its_size_is_refused() {
+        let frame = StreamFrame::for_settled_view(4, 2);
+        assert!(letterbox_into_frame(4, 2, vec![0; 12], frame).is_err());
+        assert!(letterbox_into_frame(0, 2, Vec::new(), frame).is_err());
+    }
+
+    #[test]
+    fn a_frame_is_fixed_once_the_crop_size_holds_for_the_settle_time_and_kept_after() {
+        let mut frames = StreamFrames::default();
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        assert_eq!(frames.frame_for("camera", 441, 238, at(0)), None);
+        assert_eq!(
+            frames.frame_for("camera", 572, 301, at(250)),
+            None,
+            "a new size starts the settle time again"
+        );
+        assert_eq!(frames.frame_for("camera", 572, 301, at(1_249)), None);
+        let fixed = frames.frame_for("camera", 572, 301, at(1_250));
+        assert_eq!(fixed, Some(StreamFrame::for_settled_view(572, 301)));
+
+        for (width, height) in [(666, 317), (783, 450), (729, 382), (635, 315), (899, 470)] {
+            assert_eq!(frames.frame_for("camera", width, height, at(1_500)), fixed);
+        }
+        assert_eq!(
+            frames.frame_for("plot", 899, 470, at(1_500)),
+            None,
+            "each view settles on its own"
         );
     }
 
@@ -593,6 +986,94 @@ mod tests {
         )
     }
 
+    /// Two captures of `layout` a settle time apart, so every view in it is published.
+    #[cfg(feature = "qaros")]
+    fn publish_settled(
+        capture: &mut PanelCapture,
+        layout: &[(ViewId, PublishedViewInfo)],
+        screenshot: &egui::ColorImage,
+        start: Instant,
+    ) {
+        capture.publish_on_screen_views(layout.to_vec(), screenshot, 1.0, start);
+        capture.publish_on_screen_views(
+            layout.to_vec(),
+            screenshot,
+            1.0,
+            start + STREAM_FRAME_SETTLE,
+        );
+    }
+
+    /// The window resize of QAROS 3184 (log of 2026-11-02 12:55:32 on): the camera view's crop
+    /// sizes at successive captures, in pixels.
+    const RESIZE_DRAG: [(f32, f32); 7] = [
+        (666.0, 317.0),
+        (783.0, 450.0),
+        (729.0, 382.0),
+        (635.0, 315.0),
+        (834.0, 456.0),
+        (899.0, 470.0),
+        (441.0, 238.0),
+    ];
+
+    #[cfg(feature = "qaros")]
+    #[test]
+    fn a_desktop_resize_keeps_the_published_size_and_scales_the_view_into_it() {
+        let images = PanelImages::default();
+        let mut capture = capture_into(&images);
+        let mut screenshot = egui::ColorImage::filled([1000, 600], egui::Color32::BLACK);
+        let camera_id = ViewId::random();
+        let camera_of_size = |width: f32, height: f32| {
+            // The capture shrinks each view's rectangle by 2.5 points a side.
+            let rect =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width + 5.0, height + 5.0));
+            vec![(
+                camera_id,
+                PublishedViewInfo {
+                    name: "Camera".to_owned(),
+                    rect,
+                },
+            )]
+        };
+        let start = Instant::now();
+        publish_settled(
+            &mut capture,
+            &camera_of_size(572.0, 301.0),
+            &screenshot,
+            start,
+        );
+        let settled = images.latest("camera").unwrap();
+        assert_eq!((settled.width, settled.height), (576, 304));
+
+        let mut captured_at = start + STREAM_FRAME_SETTLE;
+        for (step, (width, height)) in RESIZE_DRAG.into_iter().enumerate() {
+            let shade = u8::try_from(step + 1).unwrap() * 20;
+            screenshot.pixels.fill(egui::Color32::from_rgb(shade, 0, 0));
+            captured_at += Duration::from_millis(250);
+            capture.publish_on_screen_views(
+                camera_of_size(width, height),
+                &screenshot,
+                1.0,
+                captured_at,
+            );
+            let published = images.latest("camera").unwrap();
+            assert_eq!(
+                (published.width, published.height),
+                (576, 304),
+                "at {width}x{height}"
+            );
+            assert_eq!(
+                published.bgra8[(152 * 576 + 288) * 4 + 2],
+                shade,
+                "the frame centre shows this capture's pixels"
+            );
+        }
+        assert_eq!(
+            images.latest("camera").unwrap().sequence,
+            u64::try_from(RESIZE_DRAG.len()).unwrap(),
+            "one new image per capture, all of the one size"
+        );
+    }
+
     #[cfg(feature = "qaros")]
     #[test]
     fn a_recording_switch_withdraws_the_views_that_left_and_publishes_the_new_ones() {
@@ -603,12 +1084,18 @@ mod tests {
             .unwrap();
         let screenshot = egui::ColorImage::filled([400, 400], egui::Color32::BLACK);
         let demo_layout = vec![view_at("Camera", 0.0, 0.0), view_at("Plot", 200.0, 0.0)];
-        capture.publish_on_screen_views(demo_layout, &screenshot, 1.0);
+        let start = Instant::now();
+        publish_settled(&mut capture, &demo_layout, &screenshot, start);
         assert_eq!(images.view_names(), ["camera", "plot"]);
 
         // The opened recording's blueprint: new view ids, a plot of the same name, no camera.
         let opened_layout = vec![view_at("Plot", 0.0, 0.0), view_at("Image", 200.0, 0.0)];
-        capture.publish_on_screen_views(opened_layout, &screenshot, 1.0);
+        publish_settled(
+            &mut capture,
+            &opened_layout,
+            &screenshot,
+            start + Duration::from_secs(5),
+        );
 
         assert_eq!(images.view_names(), ["image", "plot"]);
         assert!(images.latest("camera").is_none());
@@ -624,10 +1111,21 @@ mod tests {
         let images = PanelImages::default();
         let mut capture = capture_into(&images);
         let screenshot = egui::ColorImage::filled([400, 400], egui::Color32::BLACK);
-        capture.publish_on_screen_views(vec![view_at("Camera", 0.0, 0.0)], &screenshot, 1.0);
+        let start = Instant::now();
+        publish_settled(
+            &mut capture,
+            &[view_at("Camera", 0.0, 0.0)],
+            &screenshot,
+            start,
+        );
         assert_eq!(images.view_names(), ["camera"]);
 
-        capture.publish_on_screen_views(Vec::new(), &screenshot, 1.0);
+        capture.publish_on_screen_views(
+            Vec::new(),
+            &screenshot,
+            1.0,
+            start + Duration::from_secs(5),
+        );
 
         assert!(images.view_names().is_empty());
     }

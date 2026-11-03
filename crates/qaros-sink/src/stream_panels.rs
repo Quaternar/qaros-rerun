@@ -205,6 +205,16 @@ pub(crate) struct PanelStream<Sender, Subscription> {
     /// Hidden by [`StreamPanels::follow_published_views`] because its view left the layout;
     /// shown again when the view is back.
     hidden_with_its_view: bool,
+    first_frame_show: FirstFrameShow,
+}
+
+/// Whether the panel's first frame shows the panel once more. The claim shows the panel right
+/// after pointing it at its stream, and QAROS refuses such a show once as stale (see
+/// [`StreamPanels::claim`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstFrameShow {
+    Due,
+    NotDue,
 }
 
 pub(crate) struct StreamPanels<Backend: StreamBackend> {
@@ -244,6 +254,10 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
     /// 4. The size follows this run's image; a panel the earlier run hid is shown again once
     ///    its stream is in place.
     /// 5. With `gestures`, the panel's gestures are subscribed into it.
+    /// 6. A panel the claim showed is shown once more with its first frame: the QAROS
+    ///    authority commits the stream with a snapshot that stamps every field, so the show
+    ///    sent right after it is refused as stale ("field 'State' no longer matches") and
+    ///    lives only on the library's resend (see `docs/known-issues.md`).
     pub(crate) fn claim(
         &mut self,
         image_key: &str,
@@ -279,6 +293,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         // sender; the listing is not trusted to show every panel, so the stream is always set.
         self.backend.set_stream(panel, stream)?;
         self.backend.set_size(panel, config.size)?;
+        let mut first_frame_show = FirstFrameShow::NotDue;
         if let Some(earlier) = earlier {
             log::info!(
                 "qaros: stream panel {panel} reattached (listed as {:?}, {:?}, showing {:?}); \
@@ -291,12 +306,14 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             // minimised stays minimised.
             if earlier.state == GuiPanelState::Hidden {
                 self.backend.set_state(panel, GuiPanelState::Visible)?;
+                first_frame_show = FirstFrameShow::Due;
                 log::info!("qaros: stream panel {panel} shown again after the earlier run hid it");
             }
         } else {
             // New, or existing but missing from the listing (an earlier run's hidden panel
             // would otherwise stay hidden): shown either way, after its stream is set.
             self.backend.set_state(panel, GuiPanelState::Visible)?;
+            first_frame_show = FirstFrameShow::Due;
             let listed_names: Vec<&str> = listed
                 .iter()
                 .map(|listed_panel| listed_panel.display_name.as_str())
@@ -330,6 +347,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             size_candidate: None,
             absent_listings: 0,
             hidden_with_its_view: false,
+            first_frame_show,
         };
         subscribe_if_wanted(&self.backend, &mut claimed);
         self.streams.push(claimed);
@@ -391,6 +409,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
                     stream.sender_proven = true;
                     retire_all_senders(stream, "its successor had its first ready begin");
                 }
+                show_again_with_its_first_frame(&self.backend, stream);
             }
             Ok(false) => {}
             Err(error) => {
@@ -704,6 +723,32 @@ fn show_with_its_view<Backend: StreamBackend>(
         }
         Err(error) => log::warn!(
             "qaros: showing the panel of {} again: {error}",
+            stream.image_key
+        ),
+    }
+}
+
+/// Shows the panel once more with its claim's first frame, unless its view has left the
+/// layout since, which leaves the showing to [`StreamPanels::follow_published_views`]. By the
+/// first frame the mixer has taken the claim's stream, so this show follows the stream's commit
+/// instead of racing it. A failure is logged and not retried: the claim's own show stands.
+fn show_again_with_its_first_frame<Backend: StreamBackend>(
+    backend: &Backend,
+    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
+) {
+    let due = std::mem::replace(&mut stream.first_frame_show, FirstFrameShow::NotDue);
+    if due == FirstFrameShow::NotDue || stream.hidden_with_its_view {
+        return;
+    }
+    match backend.set_state(stream.panel, GuiPanelState::Visible) {
+        Ok(()) => log::info!(
+            "qaros: stream panel {} of {} shown again with its first frame (the claim's show \
+             is refused once as stale by QAROS 0.9.0-dev.3184)",
+            stream.panel,
+            stream.image_key
+        ),
+        Err(error) => log::warn!(
+            "qaros: showing the panel of {} again with its first frame: {error}",
             stream.image_key
         ),
     }
@@ -1097,6 +1142,164 @@ mod tests {
         );
     }
 
+    fn hidden_by_an_earlier_run(display_name: &str) -> ListedPanel {
+        let mut earlier = listed(
+            display_name,
+            GuiPanelState::Hidden,
+            PanelContent::Stream(StreamId([9; 16])),
+        );
+        earlier.display_name = String::new();
+        earlier
+    }
+
+    #[test]
+    fn a_reattached_hidden_panel_is_shown_again_once_with_its_first_frame() {
+        let mut panels = StreamPanels::new(FakeBackend::default());
+        panels
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[hidden_by_an_earlier_run(CAMERA)],
+                (4, 2),
+                None,
+            )
+            .unwrap();
+        let claimed = panels.backend().calls().len();
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+
+        let start = Instant::now();
+        panels.pump(&images, start);
+        assert_eq!(
+            calls_from(&panels, claimed),
+            ["not ready 1"],
+            "no receiver yet: no frame shown, so no second show"
+        );
+
+        *panels.backend().ready.borrow_mut() = true;
+        panels.pump(&images, start + STREAM_REFRESH);
+        panels.pump(&images, start + STREAM_REFRESH * 2);
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 2)).unwrap();
+        panels.pump(&images, start + STREAM_REFRESH * 2);
+        assert_eq!(
+            calls_from(&panels, claimed),
+            [
+                "not ready 1",
+                "show 1",
+                "set_state 25 Visible",
+                "show 1",
+                "show 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_panel_is_shown_again_with_its_first_frame_and_the_timeline_too() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .unwrap();
+        panels
+            .claim(
+                TIMELINE_IMAGE_KEY,
+                &config(TIMELINE),
+                &[hidden_by_an_earlier_run(TIMELINE)],
+                (4, 2),
+                Some(PanelGestures::default()),
+            )
+            .unwrap();
+        let claimed = panels.backend().calls().len();
+        let images = PanelImages::default();
+        for key in ["camera", TIMELINE_IMAGE_KEY] {
+            images.publish_rgba8(key, 4, 2, rgba(4, 2, 1)).unwrap();
+        }
+        panels.pump(&images, Instant::now());
+        panels.pump(&images, Instant::now());
+        assert_eq!(
+            calls_from(&panels, claimed),
+            [
+                "show 1",
+                "set_state 25 Visible",
+                "show 2",
+                "set_state 33 Visible"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_minimised_panel_is_not_shown_with_its_first_frame() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        let minimised = listed(
+            CAMERA,
+            GuiPanelState::Minimized,
+            PanelContent::Stream(StreamId([9; 16])),
+        );
+        panels
+            .claim("camera", &config(CAMERA), &[minimised], (4, 2), None)
+            .unwrap();
+        let claimed = panels.backend().calls().len();
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, Instant::now());
+        assert_eq!(calls_from(&panels, claimed), ["show 1"]);
+    }
+
+    #[test]
+    fn a_panel_whose_view_left_before_its_first_frame_is_not_shown_with_it() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[hidden_by_an_earlier_run(CAMERA)],
+                (4, 2),
+                None,
+            )
+            .unwrap();
+        panels.follow_published_views(&[], &[]);
+        let hidden = panels.backend().calls().len();
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, Instant::now());
+        assert_eq!(calls_from(&panels, hidden), ["show 1"]);
+    }
+
+    #[test]
+    fn a_replaced_sender_s_first_frame_shows_the_panel_no_second_time() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .unwrap();
+        let images = PanelImages::default();
+        let start = Instant::now();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, start);
+        images.publish_rgba8("camera", 8, 2, rgba(8, 2, 1)).unwrap();
+        panels.maintain(&images, start, panel_size_by_aspect);
+        images.publish_rgba8("camera", 8, 2, rgba(8, 2, 2)).unwrap();
+        let later = start + Duration::from_secs(5);
+        panels.maintain(&images, later, panel_size_by_aspect);
+        let replaced = panels.backend().calls().len();
+        panels.pump(&images, later);
+        let calls = panels.backend().calls();
+        assert!(
+            calls.iter().any(|call| call == "set_stream 25 2"),
+            "the sender was replaced: {calls:?}"
+        );
+        assert_eq!(
+            calls_from(&panels, replaced),
+            ["show 2", "destroy sender 1"]
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "set_state 25 Visible")
+                .count(),
+            2,
+            "the claim's show and the one with the claim's first frame: {calls:?}"
+        );
+    }
+
     #[test]
     fn a_website_panel_under_our_name_gets_no_call() {
         let mut panels = StreamPanels::new(FakeBackend::default());
@@ -1282,7 +1485,10 @@ mod tests {
         *ready.borrow_mut() = true;
         panels.pump(&images, now);
         let calls = panels.backend().calls();
-        assert_eq!(&calls[calls.len() - 2..], ["not ready 1", "show 1"]);
+        assert_eq!(
+            &calls[calls.len() - 3..],
+            ["not ready 1", "show 1", "set_state 25 Visible"]
+        );
     }
 
     #[test]
@@ -1332,7 +1538,40 @@ mod tests {
         panels.pump(&images, start + Duration::from_secs(3));
         assert_eq!(
             calls_from(&panels, replaced),
-            ["not ready 2", "show 2", "destroy sender 1"]
+            [
+                "not ready 2",
+                "show 2",
+                "destroy sender 1",
+                "set_state 25 Visible"
+            ],
+            "the panel's first frame, on the replacing sender, shows it again"
+        );
+    }
+
+    #[test]
+    fn a_view_scaled_into_its_fixed_frame_keeps_its_one_sender_through_a_resize() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim("camera", &config(CAMERA), &[], (576, 304), None)
+            .unwrap();
+        let claimed = panels.backend().calls().len();
+        let images = PanelImages::default();
+        let mut now = Instant::now();
+        // A desktop resize changes what the frame shows at every capture, never its size.
+        for shade in 1..=12 {
+            images
+                .publish_rgba8("camera", 576, 304, rgba(576, 304, shade))
+                .unwrap();
+            panels.pump(&images, now);
+            panels.maintain(&images, now, panel_size_by_aspect);
+            now += Duration::from_millis(250);
+        }
+        let calls = calls_from(&panels, claimed);
+        let mut expected = vec!["show 1", "set_state 25 Visible"];
+        expected.extend(["show 1"].repeat(11));
+        assert_eq!(
+            calls, expected,
+            "the first frame shows the panel once more; no new sender, set_stream or set_size"
         );
     }
 

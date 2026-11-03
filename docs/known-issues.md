@@ -56,7 +56,7 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 ## A stream panel's mixer loses its Vulkan device on a replaced stream
 
 - **Symptom.** When a stream panel connected the stream it had just been pointed at, a mixer failed with `VulkanDeviceLost` and closed the panel. It was intermittent, and was seen in the glasses' mixer and in a Display Receiver's mixer after the headset had left the session ([Quaternar#343]).
-- **What the viewer does.** The panel stays closed until the next run claims it again by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). Every failure seen came with NVIDIA driver Event 153 as a mixer connected a stream of 1016x665 or 960x256 px, so stream panel images are padded on the right and at the bottom to a width that is a multiple of 64 and a height that is a multiple of 8, and the log names the padded size. The mixer's panel copy has no size-dependent arithmetic, so this is a test that rules out a size mismatch between the exported destination and its alias rather than an expected fix: `MIXER_WIDTH_ALIGNMENT` and `MIXER_HEIGHT_ALIGNMENT` in `crates/qaros-rerun/src/panel_capture.rs` set to 1 turn it off.
+- **What the viewer does.** The panel stays closed until the next run claims it again by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). Every failure seen came with NVIDIA driver Event 153 as a mixer connected a stream of 1016x665 or 960x256 px, so stream panel images are padded on the right and at the bottom to a width that is a multiple of 64 and a height that is a multiple of 8, and the log names the padded size (a view's fixed stream frame). A desktop resize no longer replaces a view's stream: each view streams one frame per run ([ADR-0087](decisions/ADR-0087%20Each%20Panel%20Streams%20One%20Fixed%20Frame%20Per%20Run.md)). The mixer's panel copy has no size-dependent arithmetic, so this is a test that rules out a size mismatch between the exported destination and its alias rather than an expected fix: `MIXER_WIDTH_ALIGNMENT` and `MIXER_HEIGHT_ALIGNMENT` in `crates/qaros-rerun/src/panel_capture.rs` set to 1 turn it off.
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS.
 
@@ -73,6 +73,14 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **What the viewer does.** It cannot tell such a close from a user's, so it does not reopen the panel during a run; the next run revives it by its common name ([ADR-0075](decisions/ADR-0075%20A%20Closed%20Panel%20Is%20Revived%20By%20Its%20Common%20Name.md)). With a Display Receiver connected, panels are more exposed to this through the issue above.
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS.
+
+## A panel's show right after its new stream is refused as stale
+
+- **Symptom.** After a Stop and a Start in the same Hub session, the timeline panel came back, but the two view panels stayed out of sight until the owner showed them in the Hub, although the viewer logged each one "shown again after the earlier run hid it" and streamed its first frame.
+- **Cause.** A claim sends two sparse proposals back to back: `set_stream` (field `Content`), then `set_state(VISIBLE)` (field `State`), both on the same base revision. The authority commits the first and publishes a snapshot with it, and that snapshot stamps every field at the new revision (`PublishAcceptedSnapshot` calls `MarkAllFieldsAtRevision`, `GuiPanelProcessor.hpp` L975-985 at [QS]). The show then fails the per-field check (`SharedObjectArbitration.hpp` L815-830 at [QS]), against the stated intent that proposals on disjoint fields both succeed (L777-787). The Hub's log shows it for every claimed panel of the run, the timeline's included: `refused guiPanel proposal ... field 'State' no longer matches` within 1 ms of the `Content` commit, then a resend 100 to 200 ms later with no further refusal. Whether that resend lands is logged only at trace level, so the log cannot say why the view panels stayed out of sight while the timeline did not.
+- **What the viewer does.** A panel the claim showed is shown once more with its first frame, which the mixer can show only after it took the claim's stream, so that show follows the stream's commit instead of racing it (`show_again_with_its_first_frame` in `crates/qaros-sink/src/stream_panels.rs`). A minimised panel is not shown, nor one whose view left the layout before its first frame.
+- **Seen on.** 0.9.0-dev.3184, Hub session log of 2026-11-02, three claims at 13:52:17, 13:52:56 and 13:52:58 local time, and the next run's at 13:59:51 and 13:59:55.
+- **Status.** Open, to raise with QuaternAR. The second show can go once a snapshot no longer stamps the fields its commit did not touch.
 
 ## A two-hand spread ends before it scales the scene
 
@@ -98,6 +106,7 @@ Mixers up to build 3137 gave every GUI panel a browser with its own Ultralight r
 - [GP] QAROS docs at `ebfe3bf`, `docs/website/docs/developer-guide/gui-panels.mdx`.
 - [CL] QAROS `CHANGELOG.md` at `ebfe3bf`, 0.9.0.
 - [QP] The `qaros` crate at `ebfe3bf`, `qar-streaming-rust/crates/qaros/src/panels.rs` (`GuiPanels::list`).
+- [QS] qar-streaming source at `e487a311`, `libs/qar-streaming/src/`.
 - [Quaternar#343]: Mixer: VulkanDeviceLost when a GUI stream panel connects its replaced stream (3177).
 - [Quaternar#344]: Mixer: a GUI panel failure in one viewer's mixer closes the panel for every viewer.
 - [Quaternar#345]: SDK: GUI panel queries block the calling thread for about 2 s each (3177).
