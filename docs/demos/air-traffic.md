@@ -14,7 +14,7 @@ Rerun's `air_traffic_data` example on its 10-minute dataset: ADS-B aircraft posi
 
 ## What you see
 
-- Each dot is an aircraft with a trail of its last minute of flight. Its height is its altitude, exaggerated 20x (the example uses 10x), so cruising aircraft fly about 0.4 m above the outlines.
+- Each dot is an aircraft with a trail of its last minute of flight. Its height is its altitude, exaggerated 20x (the example uses 10x), so cruising aircraft fly about 0.25 m above the outlines.
 - Each aircraft has a light colour of its own: see-through glasses add light to the room, so dark colours would barely show.
 - The red lines are the NUTS region outlines.
 - The **map panel** shows the same aircraft on OpenStreetMap.
@@ -24,7 +24,7 @@ Rerun's `air_traffic_data` example on its 10-minute dataset: ADS-B aircraft posi
 
 ## What it shows about QAROS
 
-Geospatial data at the scale of a region, on a table: a whole airspace in 2.4 m, with the familiar 2D map next to it. The 3D view gives what the map cannot (altitude, separation, climb and descent), and the map panel keeps everyone oriented.
+Geospatial data at the scale of a region, on a table: a whole airspace in 1.5 m, with the familiar 2D map next to it. The 3D view gives what the map cannot (altitude, separation, climb and descent), and the map panel keeps everyone oriented.
 
 ## Run it
 
@@ -43,7 +43,7 @@ The first start downloads the aircraft data (2.7 MB) and the region outlines (30
 
 ## Placement
 
-Centered on the traffic (`--center 900000,5520000,120000`) at `--scale 1.8e-6`, in a 2.4 m app volume (`--volume-size 2.4,2.4,2.4`); the region outlines reach about 1.1 m north of the center. North is up in both the 3D view and the map.
+Centered on the traffic (`--center 900000,5520000,120000`) at `--scale 1.125e-6`, in the default 1.5 m app volume; the region outlines reach about 0.7 m north of the center. North is up in both the 3D view and the map.
 
 ## Tuning
 

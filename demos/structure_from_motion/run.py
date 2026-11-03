@@ -56,8 +56,8 @@ DEMO = Demo(
         "examples/python/structure_from_motion/structure_from_motion/read_write_model.py",
     ],
     example_arguments=["-m", "structure_from_motion", "--dataset", "colmap_fiat", "--resize", "800x600"],
-    # The median of the reconstructed points (Y down); the car is about 1 m long here.
-    placement=Placement(center=(-0.7, 1.3, 1.5), scale=0.18),
+    # The median of the reconstructed points (Y down); the car is about 0.75 m long here.
+    placement=Placement(center=(-0.7, 1.3, 1.5), scale=0.135),
     blueprint=blueprint,
 )
 

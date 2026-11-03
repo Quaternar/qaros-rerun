@@ -1,6 +1,6 @@
 ---
 title: Robot arm
-description: An SO-ARM100 robot arm, loaded from its URDF, moves through its joint ranges on the table at twice its real size.
+description: An SO-ARM100 robot arm, loaded from its URDF, moves through its joint ranges on the table at 1.5 times its real size.
 sidebar_position: 4
 ---
 
@@ -16,7 +16,7 @@ Rerun's `animated_urdf` example: an SO-ARM100 robot arm loaded from its URDF, mo
 
 - The arm is loaded straight from its URDF, the standard robot description format, with its visual meshes; the collision meshes are hidden.
 - Each joint follows joint angles the example generates and logs over time.
-- The arm stands on the table at twice its real size, its sweep about 1.4 m wide. Walk around it to see the joints from the side.
+- The arm stands on the table at 1.5 times its real size, its sweep about 1.05 m wide. Walk around it to see the joints from the side.
 
 ## What it shows about QAROS
 
@@ -38,7 +38,7 @@ The demo has no 2D views. With `--panels` you get the timeline panel: drag to po
 
 ## Placement
 
-The middle of the arm's sweep (`--center 0,-0.03,0.23`) at `--scale 2.0`, 0.65 m above and 1.7 m in front of the room origin, so its base stays just above a table with the origin marker on it. Pass `-- --scale 1.0` for real size; a later `--scale` overrides the launcher's.
+The middle of the arm's sweep (`--center 0,-0.03,0.23`) at `--scale 1.5`, 0.65 m above and 1.7 m in front of the room origin, so its base stays just above a table with the origin marker on it. Pass `-- --scale 1.0` for real size; a later `--scale` overrides the launcher's.
 
 ## Data
 

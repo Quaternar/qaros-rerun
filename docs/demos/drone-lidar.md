@@ -17,7 +17,7 @@ Rerun's `drone_lidar` example: a drone flight through a basement with its indoor
 - The **white points** are the lidar scans of the last 5 s of flight, so the measured patch moves through the rooms with the drone.
 - The **orange trail** is the drone's path over the last minute.
 - The **dim blue to green backdrop** is the whole scan, one point in 60, coloured by height. The launcher adds it for the glasses; it is not part of the example.
-- The basement fits on the table, about 1.7 m by 1.1 m. Lean in to follow the trail through a doorway, or step back to see the floor plan.
+- The basement fits on the table, about 1.3 m by 0.85 m. Lean in to follow the trail through a doorway, or step back to see the floor plan.
 
 ## What it shows about QAROS
 
@@ -39,7 +39,7 @@ The demo has no 2D views. With `--panels` you get the timeline panel: drag to fl
 
 ## Placement
 
-The middle of the scanned basement (`--center -33.5,-4.1,1.4`) at 0.024 m per meter of basement (`--scale 0.024`), 0.25 m above and 1.7 m in front of the room origin, lower than the other demos so you look down onto the floor plan.
+The middle of the scanned basement (`--center -33.5,-4.1,1.4`) at 0.018 m per meter of basement (`--scale 0.018`), 0.25 m above and 1.7 m in front of the room origin, lower than the other demos so you look down onto the floor plan.
 
 ## Tuning
 

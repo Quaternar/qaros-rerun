@@ -68,8 +68,8 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                app scale (the user's zoom) and hands near and far back in app
                                units (room meters / app scale); room uses the poses as they
                                come, near and far in room meters
-    --volume-size W,L,H        size of the app volume in meters (default 2,2,2); auto-fit
-                               sizes the data to it
+    --volume-size W,L,H        size of the app volume in meters (default 1.5,1.5,1.5);
+                               auto-fit sizes the data to it
     --volume-name NAME         the app volume's name (default rerun); viewers running at once
                                need different names, or QAROS gives them one volume and stream
     --reset-placement          start the app volume at the place --origin and --yaw ask for, at
@@ -319,6 +319,10 @@ pub const UNANSWERED_PEERS_FILE_NAME: &str = "qaros-rerun.unanswered-peers.txt";
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 pub const VOLUME_PLACEMENT_FILE_NAME: &str = "qaros-rerun.volume-placements.json";
 
+/// Each side of the default app volume: small enough for a headset's field of view at a step or two
+/// away (ADR-0094).
+pub const DEFAULT_VOLUME_SIDE_METERS: f32 = 1.5;
+
 /// On Windows QAROS writes no launch invite to a launched app's stdin: the app joins as a
 /// local app and the Hub recognises the process it started.
 const LAUNCHED_APP_JOINS_AS_LOCAL_APP: bool = cfg!(windows);
@@ -446,7 +450,7 @@ impl Default for QarosOptions {
             onboarding_id_file_flag: None,
             library_path: None,
             pose_space: PoseSpaceKind::App,
-            volume_size: Vec3::splat(2.0),
+            volume_size: Vec3::splat(DEFAULT_VOLUME_SIDE_METERS),
             volume_name: "rerun".to_owned(),
             display_name: "Rerun".to_owned(),
             color_format: ColorFormatKind::Bgra,
@@ -1727,7 +1731,7 @@ mod tests {
                     scale: 1.0,
                 }),
                 auto_fit: false,
-                volume_size: Vec3::splat(2.0),
+                volume_size: Vec3::splat(DEFAULT_VOLUME_SIDE_METERS),
             }
         );
         for bad in [&["--auto-fit", "maybe"][..], &["--scale", "0"][..]] {

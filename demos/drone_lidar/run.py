@@ -101,10 +101,10 @@ DEMO = Demo(
     example_files=["examples/python/drone_lidar/drone_lidar.py"],
     example_arguments=["drone_lidar.py"],
     # The middle of the scanned basement (1st to 99th percentile of the lidar points): 71 m by 47 m,
-    # 1.7 m by 1.1 m here. Stray returns farther out fall outside the app volume.
+    # 1.3 m by 0.85 m here. Stray returns farther out fall outside the app volume.
     # Lower than the other demos (0.25 m above the origin): the basement is a flat floor plan,
     # 12 cm high here, and reads from above, not edge-on at eye level.
-    placement=Placement(center=(-33.5, -4.1, 1.4), origin=(0.0, 0.25, -1.7), scale=0.024),
+    placement=Placement(center=(-33.5, -4.1, 1.4), origin=(0.0, 0.25, -1.7), scale=0.018),
     blueprint=blueprint,
     presentation=present_in_the_glasses,
 )

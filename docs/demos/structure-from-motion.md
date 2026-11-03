@@ -17,7 +17,7 @@ Rerun's `structure_from_motion` example on the `colmap_fiat` dataset: a COLMAP r
 - Each photo adds a camera frustum to the 3D view, and the features it shares with earlier photos become 3D points. The point cloud accumulates over all past photos, so the car builds up as the camera moves around it.
 - The **camera panel** shows the current photo with its detected keypoints.
 - The **reprojection error panel** plots the average error per photo.
-- The car is about 1 m long, standing in front of you at the table. Walk around it: the model stays in place, and each eye sees it from its own position.
+- The car is about 0.75 m long, standing in front of you at the table. Walk around it: the model stays in place, and each eye sees it from its own position.
 
 | Camera panel | Reprojection error panel |
 | --- | --- |
@@ -44,7 +44,7 @@ The first start downloads the dataset (80 MB) and records it once, which takes a
 
 ## Placement
 
-The point cloud is centered on the median of the reconstructed points (`--center -0.7,1.3,1.5`), at 0.18 of its reconstructed size (`--scale 0.18`), 0.5 m above and 1.7 m in front of the room origin. Point radius 0.012.
+The point cloud is centered on the median of the reconstructed points (`--center -0.7,1.3,1.5`), at 0.135 of its reconstructed size (`--scale 0.135`), 0.5 m above and 1.7 m in front of the room origin. Point radius 0.012.
 
 ## If something looks wrong
 

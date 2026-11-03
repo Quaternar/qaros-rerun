@@ -2590,6 +2590,52 @@ fn a_taken_over_app_scale_that_is_no_user_zoom_is_set_to_the_requested_zoom() {
     fixture.assert_clean_teardown(fourth);
 }
 
+/// A volume taken over gets the size this run asks for (ADR-0094), while its place and the
+/// user's zoom stay as QAROS holds them; the same size again makes no call.
+#[test]
+fn a_taken_over_volume_gets_the_requested_size_and_keeps_its_place_and_zoom() {
+    let fixture = Fixture::new();
+    let first = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    change_volume(&first, dragged_volume(1.5));
+    fixture.assert_clean_teardown(first);
+
+    let smaller = ConnectOptions {
+        volume_size: [1.5, 1.5, 1.2],
+        ..connect_options(&fixture.scratch, None)
+    };
+    let second = connect(&smaller, wake_counter().1).map(Rc::new).unwrap();
+    let size = second
+        .session()
+        .app_volumes()
+        .latest_size(second.volume())
+        .unwrap();
+    assert_eq!(
+        size,
+        qaros::AppVolumeSize {
+            width: 1.5,
+            length: 1.5,
+            height: 1.2,
+        }
+    );
+    assert_eq!(
+        second.volume_transform(),
+        dragged_volume(1.5),
+        "the place and the zoom are kept"
+    );
+    fixture.assert_clean_teardown(second);
+
+    let calls_before_third_start = fixture.calls().len();
+    let third = connect(&smaller, wake_counter().1).map(Rc::new).unwrap();
+    let start_calls = fixture.calls().split_off(calls_before_third_start);
+    assert!(
+        !start_calls
+            .iter()
+            .any(|call| call == "app_volumes_change_size"),
+        "no resize at the requested size: {start_calls:?}"
+    );
+    fixture.assert_clean_teardown(third);
+}
+
 /// The stub has no used-by peers (`app_volume_get_used_by_peers_count` answers
 /// `QAR_STATUS_NOT_IMPLEMENTED`), so a run that served no headset does not know who uses its
 /// volume. Stop then removes nothing, lists nothing and closes nothing: the volume stays open as

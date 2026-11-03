@@ -195,10 +195,10 @@ The URL is the one `log-test-scene` and the demo launcher use. From another mach
 
 ### Place your data in the app volume
 
-QAROS cuts every stream to its app volume's box ([the mixer][MIXER]). By default that box is 2 m on each side. The viewer fits each recording into it by itself: once the 3D view's scene bounds settle (unchanged within 5 % for half a second, or 3 s after they first hold something while data keeps streaming in), the recording is centred on the volume with its largest extent at 0.7 of the volume's smallest side. Outliers are left out the way Rerun frames its own camera. Each recording is fitted once, keeps its fit as data streams in, and gets it back when shown again; a recording opened later with File > Open gets a fit of its own. The log names every fit (ADR-0092):
+QAROS cuts every stream to its app volume's box ([the mixer][MIXER]). By default that box is 1.5 m on each side. The viewer fits each recording into it by itself: once the 3D view's scene bounds settle (unchanged within 5 % for half a second, or 3 s after they first hold something while data keeps streaming in), the recording is centred on the volume with its largest extent at 0.7 of the volume's smallest side. Outliers are left out the way Rerun frames its own camera. Each recording is fitted once, keeps its fit as data streams in, and gets it back when shown again; a recording opened later with File > Open gets a fit of its own. The log names every fit (ADR-0092):
 
 ```text
-headset: recording my_app/<recording id> placed with auto-fit to the scene bounds: center [0, 0, 5], data scale 1.75e-2 m per unit, from scene bounds [-40, -30, 0] to [40, 30, 10]
+headset: recording my_app/<recording id> placed with auto-fit to the scene bounds: center [0, 0, 5], data scale 1.3125e-2 m per unit, from scene bounds [-40, -30, 0] to [40, 30, 10]
 ```
 
 To place the recording you start with by hand, give `--center` and `--scale`; they place the first recording that shows content, and the others are still fitted unless `--auto-fit off` is given, which places every recording with the flags:
@@ -213,15 +213,15 @@ For example, a recording in `RFU` coordinates (Z up) logged this line:
 headset: frame FrameKey { user: UserId(1), frame_id: 0 }, scene bounds Vec3(-40.0, -30.0, 0.0) to Vec3(40.0, 30.0, 10.0) in RFU
 ```
 
-The middle is `0,0,5`. The extents are 80 (right), 60 (forward) and 10 (up). With the default 2 m volume the scale is the smallest of 2/80, 2/60 and 2/10, which is 0.025:
+The middle is `0,0,5`. The extents are 80 (right), 60 (forward) and 10 (up). With the default 1.5 m volume the scale is the smallest of 1.5/80, 1.5/60 and 1.5/10, which is 0.01875:
 
 ```powershell
-.\target\release\qaros-rerun.exe --sink qaros --local-app --panels --center 0,0,5 --scale 0.025
+.\target\release\qaros-rerun.exe --sink qaros --local-app --panels --center 0,0,5 --scale 0.01875
 ```
 
-The data then fills 2 m by 1.5 m by 0.25 m of the room. For a larger model, grow the volume and the scale together, for example `--volume-size 4,3,1 --scale 0.05` (4 m by 3 m by 0.5 m); the room must have that space.
+The data then fills 1.5 m by 1.125 m by 0.19 m of the room. For a larger model, grow the volume and the scale together, for example `--volume-size 4,3,1 --scale 0.05` (4 m by 3 m by 0.5 m); the room must have that space.
 
-The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.99962366, 0.99962366, 1.4) in RFU`. Its middle is `0,0,0.7`: with `--center 0,0,0` and `--auto-fit off` the top 0.4 m of its up axis lies above the volume.
+The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.99962366, 0.99962366, 1.4) in RFU`. Its middle is `0,0,0.7`: with `--center 0,0,0` and `--auto-fit off` the default volume cuts it, the top 0.65 m of its up axis above the volume and 0.25 m of each side beyond it.
 
 `--origin X,Y,Z` moves the volume, and the data with it, in the room (meters, OpenXR axes: Y up, -Z forward; default `0,0.5,-1.6`). `--yaw DEGREES` turns the data about the room's up axis.
 
@@ -380,7 +380,7 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--qaros-library PATH` | `QAROS_DLL`, else the default lookup | The `qar-streaming-c` library |
 | `--qaros-graphics cpu\|vulkan` | `vulkan` on Windows, `cpu` elsewhere | How frames reach QAROS ([Choose the path](#choose-the-path-vulkan-or-cpu)) |
 | `--pose-space app\|room` | `app` | Space of the stream's eye poses: `app` maps them into the room with the volume's pose, app pose and app scale (the user's zoom) and reports near and far in app units; `room` takes them as they come |
-| `--volume-size W,L,H` | `2,2,2` | App volume size in meters: width (room X), length (room Z), height (room Y); the auto-fit sizes the data to it |
+| `--volume-size W,L,H` | `1.5,1.5,1.5` | App volume size in meters: width (room X), length (room Z), height (room Y); the auto-fit sizes the data to it |
 | `--volume-name NAME` | `rerun` | The app volume's name; viewers running at once need different names |
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |

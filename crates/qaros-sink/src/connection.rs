@@ -553,7 +553,8 @@ fn watch_used_by(
 }
 
 /// A taken-over volume keeps the place QAROS holds and the user's zoom, unless
-/// `--reset-placement` asks for the flags' placement (ADR-0089, ADR-0092).
+/// `--reset-placement` asks for the flags' placement (ADR-0089, ADR-0092), and gets the
+/// requested size (ADR-0094).
 fn settle_taken_over_volume(
     session: &Session,
     volume: AppVolumeId,
@@ -572,6 +573,7 @@ fn settle_taken_over_volume(
             options.placement.data_fit.scale,
         );
     }
+    size_taken_over_volume(session, volume, common_name, requested_volume_size(options));
 }
 
 /// `get_or_create` ignores the init for a volume that is open, typically one an earlier run hid
@@ -624,6 +626,61 @@ fn reset_taken_over_volume(
             );
         }
     }
+}
+
+/// Within a millimetre a taken-over volume already has the requested size.
+const VOLUME_SIZE_TOLERANCE_METERS: f32 = 0.001;
+
+/// A taken-over volume gets this run's `--volume-size` (ADR-0094): `get_or_create` hands an open
+/// volume over with the size an earlier run asked for, while this run fits its data to the size
+/// it requests. Its place and the user's zoom stay as QAROS holds them. A volume this start
+/// created already has the size, so no call is made for it.
+fn size_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    requested: AppVolumeSize,
+) {
+    let live = match session.app_volumes().latest_size(volume) {
+        Ok(live) => live,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s size at start ({error}); it is kept as QAROS holds it"
+            );
+            return;
+        }
+    };
+    if same_volume_size(live, requested) {
+        return;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} at {}; resized to the requested {}",
+        describe_volume_size(live),
+        describe_volume_size(requested)
+    );
+    if let Err(error) = session.app_volumes().set_size(volume, requested) {
+        log::warn!(
+            "qaros: cannot resize app volume {common_name:?} at start: {error}; it stays at {}",
+            describe_volume_size(live)
+        );
+    }
+}
+
+fn same_volume_size(left: AppVolumeSize, right: AppVolumeSize) -> bool {
+    [
+        left.width - right.width,
+        left.length - right.length,
+        left.height - right.height,
+    ]
+    .iter()
+    .all(|difference| difference.abs() <= VOLUME_SIZE_TOLERANCE_METERS)
+}
+
+fn describe_volume_size(size: AppVolumeSize) -> String {
+    format!(
+        "{:.2}x{:.2}x{:.2} m (width, length, height)",
+        size.width, size.length, size.height
+    )
 }
 
 /// A taken-over volume keeps its app scale, the user's zoom (ADR-0092), unless it cannot be one
@@ -854,16 +911,20 @@ fn read_onboarding_id(library: &Library, path: &Path) -> Result<Option<Onboardin
     Ok(Some(OnboardingId(bytes)))
 }
 
-fn volume_config(options: &ConnectOptions, startup_transform: VolumeTransform) -> AppVolumeConfig {
+fn requested_volume_size(options: &ConnectOptions) -> AppVolumeSize {
     let [width, length, height] = options.volume_size;
+    AppVolumeSize {
+        width,
+        length,
+        height,
+    }
+}
+
+fn volume_config(options: &ConnectOptions, startup_transform: VolumeTransform) -> AppVolumeConfig {
     AppVolumeConfig {
         display_name: Some(options.volume_display_name.clone()),
         pose: to_qaros_pose(startup_transform.volume_pose),
-        size: AppVolumeSize {
-            width,
-            length,
-            height,
-        },
+        size: requested_volume_size(options),
         app_pose: to_qaros_pose(startup_transform.app_pose),
         app_scale: startup_transform.app_scale,
         ..AppVolumeConfig::new(options.volume_name.clone())

@@ -32,7 +32,7 @@ from launcher import Demo, Placement, demo_blueprint, demo_time_panel, run
 TRAIL_SECONDS = float(os.environ.get("AIR_TRAFFIC_TRAIL_SECONDS", "60"))
 MAP_ZOOM_LEVEL = 7.0
 # The example draws altitudes 10 times higher; at tabletop scale that still leaves cruising
-# aircraft 2 cm above the map, so the demo raises them 20 times instead (about 0.4 m).
+# aircraft about a centimetre above the map, so the demo raises them 20 times instead (about 0.25 m).
 ALTITUDE_EXAGGERATION = 20.0
 # Aircraft as dots a few UI points wide, so each one-minute trail reads as a line in the glasses.
 AIRCRAFT_RADIUS_UI_POINTS = 2.5
@@ -102,9 +102,9 @@ DEMO = Demo(
     example_directory="examples/python/air_traffic_data",
     example_files=["examples/python/air_traffic_data/air_traffic_data.py"],
     example_arguments=["air_traffic_data.py", "--dataset", "10min"],
-    # Centered on the traffic rather than on the region outlines; the outlines reach about 1.1 m
-    # north of it, inside the 2.4 m volume.
-    placement=Placement(center=(900_000.0, 5_520_000.0, 120_000.0), scale=1.8e-6, volume_size=(2.4, 2.4, 2.4)),
+    # Centered on the traffic rather than on the region outlines; the outlines reach about 0.7 m
+    # north of it, inside the default 1.5 m volume.
+    placement=Placement(center=(900_000.0, 5_520_000.0, 120_000.0), scale=1.125e-6),
     blueprint=blueprint,
     presentation=present_in_the_glasses,
 )

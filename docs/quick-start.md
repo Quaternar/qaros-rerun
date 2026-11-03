@@ -55,7 +55,7 @@ Send a blueprint with a single 3D view and the 2D views you want as panels. A vi
 
 ## 5. Fit it to the table
 
-The app volume is 2 m on each side by default; data outside it is cut.
+The app volume is 1.5 m on each side by default; data outside it is cut.
 
 Without flags, every recording fits itself: once its scene bounds settle (half a second for a file, up to 3 s for a stream), it is centred in the volume with its largest extent at 0.7 of the volume's side. A recording opened later with File > Open gets its own fit. The log names each one: `headset: recording ... placed with auto-fit to the scene bounds: center [...], data scale ...`.
 

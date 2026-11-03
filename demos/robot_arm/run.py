@@ -54,9 +54,9 @@ DEMO = Demo(
         *(f"{URDF_DATA}/assets/{part}.stl" for part in URDF_PARTS),
     ],
     example_arguments=["animated_urdf.py"],
-    # The middle of the space the arm sweeps; at twice its size the sweep is about 1.4 m wide.
-    # 0.65 m above the origin, so the base (0.6 m below the sweep's middle) stays above the table.
-    placement=Placement(center=(0.0, -0.03, 0.23), origin=(0.0, 0.65, -1.7), scale=2.0),
+    # The middle of the space the arm sweeps; at 1.5 times its size the sweep is about 1.05 m wide.
+    # 0.65 m above the origin, so the base (0.45 m below the sweep's middle) stays above the table.
+    placement=Placement(center=(0.0, -0.03, 0.23), origin=(0.0, 0.65, -1.7), scale=1.5),
     blueprint=blueprint,
 )
 

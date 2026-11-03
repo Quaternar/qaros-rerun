@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use glam::Vec3;
 use xr_math::{DataFit, bounds_are_meaningful};
 
+use crate::options::DEFAULT_VOLUME_SIDE_METERS;
+
 /// Bounds that moved by no more than this share of their largest extent count as unchanged.
 const SETTLE_TOLERANCE: f32 = 0.05;
 
@@ -44,7 +46,7 @@ impl Default for FitSettings {
         Self {
             flag_fit: None,
             auto_fit: true,
-            volume_size: Vec3::splat(2.0),
+            volume_size: Vec3::splat(DEFAULT_VOLUME_SIDE_METERS),
         }
     }
 }
@@ -319,7 +321,10 @@ mod tests {
                 .abs_diff_eq(Vec3::new(900_000.0, 5_520_000.0, 120_000.0), 1.0),
             "{fitted:?}"
         );
-        assert!((fitted.scale - 1.4e-6).abs() < 1e-9, "{fitted:?}");
+        assert!(
+            (fitted.scale - 0.7 * DEFAULT_VOLUME_SIDE_METERS / 1.0e6).abs() < 1e-9,
+            "{fitted:?}"
+        );
     }
 
     #[test]
@@ -337,7 +342,7 @@ mod tests {
         );
         let robot_arm = show_for(&mut fits, "robot_arm", robot_bounds, start, SETTLE_TIME);
         assert!(
-            (robot_arm.scale - 0.7 * 2.0 / 0.8).abs() < 1e-5,
+            (robot_arm.scale - 0.7 * DEFAULT_VOLUME_SIDE_METERS / 0.8).abs() < 1e-5,
             "{robot_arm:?}"
         );
         assert!(
@@ -374,7 +379,7 @@ mod tests {
         }
         let at_deadline = fits.fit_for("live", growing(30), start + SETTLE_DEADLINE);
         assert!(
-            (at_deadline.scale - 0.7 * 2.0 / 16.0).abs() < 1e-6,
+            (at_deadline.scale - 0.7 * DEFAULT_VOLUME_SIDE_METERS / 16.0).abs() < 1e-6,
             "fitted with the bounds at the deadline: {at_deadline:?}"
         );
         let much_larger = SceneBounds {
@@ -460,6 +465,9 @@ mod tests {
             Instant::now(),
             SETTLE_TIME,
         );
-        assert!((fitted.scale - 1.75).abs() < 1e-5, "{fitted:?}");
+        assert!(
+            (fitted.scale - 0.7 * DEFAULT_VOLUME_SIDE_METERS / 0.8).abs() < 1e-5,
+            "{fitted:?}"
+        );
     }
 }
