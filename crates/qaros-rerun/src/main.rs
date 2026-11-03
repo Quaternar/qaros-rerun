@@ -30,6 +30,7 @@ mod timeline_requests;
 #[cfg_attr(not(feature = "qaros"), allow(dead_code))]
 mod timeline_scrub;
 mod viewer_app;
+mod window_persistence;
 mod window_resize;
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -58,6 +59,7 @@ use crate::timeline_scrub::TimelineScrub;
 use crate::viewer_app::{
     FrameHook, Headset, HeadsetViewerApp, SharedHeadset, StopRequest, end_process_after_teardown,
 };
+use crate::window_persistence::WindowPersistence;
 
 #[global_allocator]
 static GLOBAL: re_memory::AccountingAllocator<mimalloc::MiMalloc> =
@@ -540,6 +542,7 @@ async fn run_viewer(
             memory_budget_log: log_wgpu_device(creation_context),
             hidden_window: None,
             minimised_layout: MinimisedLayout::default(),
+            window_persistence: WindowPersistence::default(),
         }
     };
 

@@ -83,6 +83,14 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **Seen on.** 0.9.0-dev.3177, 0.9.0-dev.3184.
 - **Status.** Open in QAROS.
 
+## A minimised viewer window freezes its 2D view panels
+
+- **Symptom.** While the desktop viewer window is minimised, the 2D view panels in the glasses keep their last image; they update again on the restore. The 3D content and the timeline panel stay live, and a window covered by another one keeps every panel live.
+- **Cause.** The view panels are crops of a window screenshot (`crates/qaros-rerun/src/panel_capture.rs`), and Windows gives a minimised window no surface to paint, so no screenshot arrives. The timeline panel is drawn off-screen with its own context (`panel_render.rs`) and is not affected ([ADR-0099](decisions/ADR-0099%20A%20Minimised%20Viewer%20Window%20Lays%20Out%20At%20Its%20Last%20Shown%20Size.md)).
+- **Workaround.** Cover the viewer window instead of minimising it.
+- **Seen on.** Build 1103b, METALENSE 2 on Legion, 2026-11-03.
+- **Status.** Open in the viewer; the fix draws the desktop UI off-screen with eframe's own renderer while minimised.
+
 ## A panel's show right after its new stream is refused as stale
 
 - **Symptom.** After a Stop and a Start in the same Hub session, the timeline panel came back, but the two view panels stayed out of sight until the owner showed them in the Hub, although the viewer logged each one "shown again after the earlier run hid it" and streamed its first frame.

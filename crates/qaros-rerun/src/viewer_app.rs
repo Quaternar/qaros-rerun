@@ -12,6 +12,7 @@ use crate::panel_capture::PanelCapture;
 #[cfg(feature = "qaros")]
 use crate::timeline_panel::TimelinePanel;
 use crate::timeline_scrub::{TimelineScrub, TimelineSource};
+use crate::window_persistence::WindowPersistence;
 
 #[cfg(all(feature = "qaros", not(test)))]
 pub(crate) use qaros_sink::end_process_after_teardown;
@@ -120,6 +121,9 @@ pub struct HeadsetViewerApp<Viewer = re_viewer::App> {
     /// A minimised window lays out at its last shown size, so the views keep drawing for the
     /// headset (ADR-0099).
     pub minimised_layout: MinimisedLayout,
+    /// A minimised window's geometry is never saved, and a window restored too small to use
+    /// opens at Rerun's size (ADR-0103).
+    pub window_persistence: WindowPersistence,
 }
 
 impl<Viewer> HeadsetViewerApp<Viewer> {
@@ -242,9 +246,11 @@ impl<Viewer: eframe::App + TimelineSource> eframe::App for HeadsetViewerApp<View
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.inner.save(storage);
+        self.window_persistence.keep_shown_window_settings(storage);
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.window_persistence.observe_pass(ctx, raw_input);
         self.minimised_layout
             .lay_out_minimised_at_last_shown_size(raw_input);
         self.inner.raw_input_hook(ctx, raw_input);
@@ -462,6 +468,7 @@ mod tests {
             memory_budget_log: None,
             hidden_window: None,
             minimised_layout: MinimisedLayout::default(),
+            window_persistence: WindowPersistence::default(),
         };
         TestApp {
             app,
