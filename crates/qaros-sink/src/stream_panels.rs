@@ -34,6 +34,14 @@ pub const SENDER_RETIRE_LIMIT: Duration = Duration::from_secs(10);
 /// The least time between two replacements of one panel's sender.
 const REPLACEMENT_SPACING: Duration = Duration::from_secs(2);
 
+/// How long a sender just put in place holds back the next claim or replacement, until its
+/// first frame is shown (ADR-0096). Once the mixer connects a panel's new stream, its graphics
+/// queue waits for that stream's first frame, and a wait past Windows' two-second GPU timeout
+/// resets the mixer's device; a claim blocks this thread for about 2 s, so it must not start
+/// before the first frame is out. A sender with no ready begin by then (no mixer connected
+/// it) stops holding the others back.
+pub const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
+
 /// How often per run a failed sender is replaced before the panel is left as it is.
 const FAILURE_REPLACEMENT_LIMIT: u32 = 3;
 
@@ -242,6 +250,8 @@ pub(crate) struct PanelStream<Sender, Subscription, StateWatch> {
     subscribe_failure_logged: bool,
     shown_sequence: Option<u64>,
     last_show: Option<Instant>,
+    /// When `sender` was put in place, while it has not shown its first frame.
+    first_frame_due_since: Option<Instant>,
     health: SenderHealth,
     failure_replacements: u32,
     last_replacement: Option<Instant>,
@@ -414,6 +424,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             subscribe_failure_logged: false,
             shown_sequence: None,
             last_show: None,
+            first_frame_due_since: Some(Instant::now()),
             health: SenderHealth::Healthy,
             failure_replacements: 0,
             last_replacement: None,
@@ -587,6 +598,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
                 }
                 stream.shown_sequence = Some(image.sequence);
                 stream.last_show = Some(now);
+                stream.first_frame_due_since = None;
                 if !stream.sender_proven {
                     stream.sender_proven = true;
                     retire_all_senders(stream, "its successor had its first ready begin");
@@ -605,10 +617,27 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         }
     }
 
+    /// Whether a sender put in place within [`FIRST_FRAME_WAIT`] before `now` has not shown
+    /// its first frame yet. Until it has, no claim may block this thread (ADR-0096).
+    pub(crate) fn awaits_a_first_frame(&self, now: Instant) -> bool {
+        self.first_frame_awaited_besides(None, now)
+    }
+
+    fn first_frame_awaited_besides(&self, except: Option<usize>, now: Instant) -> bool {
+        self.streams.iter().enumerate().any(|(index, stream)| {
+            Some(index) != except
+                && stream.health == SenderHealth::Healthy
+                && stream
+                    .first_frame_due_since
+                    .is_some_and(|since| now.saturating_duration_since(since) < FIRST_FRAME_WAIT)
+        })
+    }
+
     /// Once a sync: releases the panels closed by someone else, subscribes gestures that failed
     /// to subscribe, and replaces a sender that failed (at most [`FAILURE_REPLACEMENT_LIMIT`]
     /// times a run) or whose image has had a new size for two publishes in a row.
-    /// Replacements of one panel are at least [`REPLACEMENT_SPACING`] apart. `panel_size` gives
+    /// Replacements of one panel are at least [`REPLACEMENT_SPACING`] apart, and wait while
+    /// another panel's new sender has not shown its first frame (ADR-0096). `panel_size` gives
     /// the panel's size in metres for an image size.
     pub(crate) fn maintain(
         &mut self,
@@ -624,6 +653,9 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             else {
                 continue;
             };
+            if self.first_frame_awaited_besides(Some(index), now) {
+                continue;
+            }
             self.replace_sender(index, cause, (width, height), &panel_size, now);
         }
     }
@@ -749,6 +781,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         stream.sender_proven = false;
         stream.shown_sequence = None;
         stream.last_show = None;
+        stream.first_frame_due_since = Some(now);
         stream.health = SenderHealth::Healthy;
         stream.size_candidate = None;
     }
@@ -1877,11 +1910,8 @@ mod tests {
         let start = Instant::now();
         panels.maintain(&images, start, panel_size_by_aspect);
         images.publish_rgba8("camera", 2, 2, rgba(2, 2, 1)).unwrap();
-        panels.maintain(
-            &images,
-            start + Duration::from_secs(1),
-            panel_size_by_aspect,
-        );
+        // No mixer connects the timeline's sender, so it stops holding the replacement back.
+        panels.maintain(&images, start + FIRST_FRAME_WAIT, panel_size_by_aspect);
         let claimed_and_replaced = panels.backend().calls().len();
 
         panels.hide_all();
@@ -2668,5 +2698,95 @@ mod tests {
                 )
                 .unwrap();
         }
+    }
+
+    fn claim_unready_camera() -> StreamPanels<FakeBackend> {
+        let mut panels = StreamPanels::new(FakeBackend::default());
+        panels
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        panels
+    }
+
+    #[test]
+    fn a_claimed_sender_holds_back_claims_until_its_first_frame_shows() {
+        let mut panels = claim_unready_camera();
+        let images = PanelImages::default();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        let now = Instant::now();
+        panels.pump(&images, now);
+        assert_eq!(shows(&panels), Vec::<String>::new());
+        assert!(panels.awaits_a_first_frame(now));
+
+        *panels.backend().ready.borrow_mut() = true;
+        panels.pump(&images, now);
+        assert_eq!(shows(&panels), ["show 1"]);
+        assert!(!panels.awaits_a_first_frame(now));
+    }
+
+    #[test]
+    fn a_sender_no_mixer_connects_stops_holding_back_claims_after_the_wait() {
+        let panels = claim_unready_camera();
+        let claimed = Instant::now();
+        assert!(panels.awaits_a_first_frame(claimed));
+        assert!(!panels.awaits_a_first_frame(claimed + FIRST_FRAME_WAIT));
+    }
+
+    #[test]
+    fn a_replacement_waits_for_another_panel_s_first_frame_then_holds_back_claims_itself() {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim(
+                "camera",
+                &config(CAMERA),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        let images = PanelImages::default();
+        let start = Instant::now();
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, start);
+        *panels.backend().ready.borrow_mut() = false;
+        panels
+            .claim(
+                "plot",
+                &config(PLOT),
+                &[],
+                (4, 2),
+                None,
+                &PanelPlace::AsHeld,
+            )
+            .unwrap();
+        images.publish_rgba8("camera", 8, 2, rgba(8, 2, 1)).unwrap();
+        panels.maintain(&images, start, panel_size_by_aspect);
+        images.publish_rgba8("camera", 8, 2, rgba(8, 2, 2)).unwrap();
+        panels.maintain(&images, start, panel_size_by_aspect);
+        let calls = panels.backend().calls();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("create sender 3")),
+            "no replacement while the plot's first frame is due: {calls:?}"
+        );
+
+        *panels.backend().ready.borrow_mut() = true;
+        images.publish_rgba8("plot", 4, 2, rgba(4, 2, 1)).unwrap();
+        panels.pump(&images, start);
+        assert_eq!(shows(&panels), ["show 1", "show 2"]);
+        let before_replacement = panels.backend().calls().len();
+        panels.maintain(&images, start, panel_size_by_aspect);
+        assert_eq!(
+            calls_from(&panels, before_replacement)[..2],
+            ["create sender 3 8x2", "set_stream 25 3"]
+        );
+        assert!(panels.awaits_a_first_frame(start));
     }
 }

@@ -67,6 +67,14 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **Seen on.** 0.9.0-dev.3177.
 - **Status.** Open in QAROS. `qar_gui_panels_subscribe_updates` would report closed panels without a listing.
 
+## A panel stream's late first frame resets the mixer's GPU device
+
+- **Symptom.** About 20 s into a run that reattached its panels, the headset drops: the mixer logs `vkQueueSubmit lost the Vulkan device ... lastSubmitAt=BrowserControl.hpp:730` and closes every panel, the Windows System log has `nvlddmkm` event 153 (a GPU channel reset) once or twice, and the viewer's window logs `egui_wgpu: Dropped frame with error: Timeout` once a second meanwhile. The mixer's log stops right after `connecting GUI panel stream` for a panel's new stream and resumes only with the loss; the viewer's `first frame of <view> shown` for that stream comes at the same moment.
+- **Why.** Once the mixer connects a panel stream, its graphics queue waits for the stream's first frame; a wait past Windows' two-second GPU timeout resets the mixer's device. The viewer's next panel claim blocked the thread that sends that frame for about 2 s (the query issue above), so the wait sat right at the timeout: it crossed it in two of the twelve logged runs since 10-30 that reattached hidden panels, and once when two senders were replaced for a resize.
+- **What the viewer does.** No listing, claim or sender replacement while a sender it just put in place has not shown its first frame, for at most 3 s, and one claim per sync, so each first frame goes out within a few frames of its connect ([ADR-0096](decisions/ADR-0096%20No%20Claim%20Blocks%20A%20New%20Panel%20Stream's%20First%20Frame.md)).
+- **Seen on.** 0.9.0-dev.3184, 2026-11-02 12:55 and 17:06 UTC, 2026-11-03 12:50 UTC.
+- **Status.** To report to QAROS: the mixer should not hold its graphics queue, or its main thread, for a panel stream's first frame.
+
 ## A panel failure in one viewer's mixer closes the panel for everyone
 
 - **Symptom.** A GUI panel that fails in one viewer's mixer, such as a Display Receiver's, is closed for every viewer in the session, the headsets included. The panel list then shows it closed, exactly as if a user had closed it in the Hub Display ([Quaternar#344]).

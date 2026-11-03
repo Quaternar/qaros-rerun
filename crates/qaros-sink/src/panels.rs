@@ -446,7 +446,9 @@ impl QarosPanels {
                 && !self.failed.contains(panel.name())
                 && !self.waits_for_its_timeline_image(panel)
         });
-        if wanted.is_empty() {
+        // A claim (and a listing) blocks this thread for seconds, and with it the first frame
+        // of a sender just put in place, which the mixer's graphics queue waits for (ADR-0096).
+        if wanted.is_empty() || self.streams.awaits_a_first_frame(now) {
             return;
         }
         let Some(mut listed) = self.listing_for_claims(now) else {
@@ -495,6 +497,8 @@ impl QarosPanels {
                     }
                     self.panels.insert(name, id);
                     opened_any = true;
+                    // The next claim waits for this panel's first frame, at a later sync.
+                    break;
                 }
                 Err(error) => {
                     log::warn!("qaros: no panel for {name}: {error}");
