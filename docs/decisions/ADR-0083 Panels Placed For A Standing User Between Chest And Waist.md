@@ -11,6 +11,8 @@ repo: qaros-rerun
 > Amends ADR-0070 (the row of view panels) and ADR-0072 (the timeline panel's pose): their placement becomes the `--panel-posture sitting` preset. The anchor head (ADR-0070, ADR-0071), the pose convention and the rule that an existing panel keeps its place stand.
 >
 > Amended by ADR-0090: an existing panel keeps its place while its centre is between 0.2 and 1.5 m from the eyes of the head that places panels and its size is the run's; otherwise it is moved to where a new panel opens. `--reset-panels` closes the viewer's panels so they are created afresh.
+>
+> Amended by ADR-0100: a standing user's new panels open a step out, the timeline's centre 0.90 m and the views' 0.95 m from the eyes on the floor plane; the heights, tilt and order below stand.
 
 ## Context
 

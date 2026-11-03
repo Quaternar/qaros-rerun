@@ -43,16 +43,17 @@ const REACH_ROW_START_METERS: f32 = 0.25;
 /// line as if upright; tilting it toward the eyes lowers its top edge further.
 const STANDING_TOP_BELOW_EYES_METERS: f32 = 0.30;
 /// Standing: the timeline panel's centre, straight ahead along the gaze on the floor plane.
-/// Its slider is the control a user touches most, so it stands nearest, where a forearm
-/// reaches with the elbow at the side (ANSUR II forearm-hand length, women's mean 0.44 m).
-const STANDING_TIMELINE_DISTANCE_METERS: f32 = 0.40;
+/// Its slider is the control a user touches most, so it stands nearest. AR glasses see a
+/// narrow field of view, so new panels open a step out (ADR-0100), where they are seen at
+/// once; the user steps forward to touch them.
+const STANDING_TIMELINE_DISTANCE_METERS: f32 = 0.90;
 /// Standing: the timeline panel's centre below the eyes, just above elbow height (ANSUR II,
 /// elbow 0.52 m below the eyes for women and 0.57 m for men, on average).
 const STANDING_TIMELINE_CENTRE_BELOW_EYES_METERS: f32 = 0.50;
-/// Standing: the view panels' centres from the eyes on the floor plane, inside the reach of an
-/// outstretched arm (ANSUR II, 0.49 m from the eyes for the 5th percentile woman) and a little
-/// farther than the timeline: views take no touch, only the occasional grab of a title bar.
-const STANDING_VIEW_DISTANCE_METERS: f32 = 0.45;
+/// Standing: the view panels' centres from the eyes on the floor plane, a step out as the
+/// timeline (ADR-0100) and a little farther than it: views take no touch, only the occasional
+/// grab of a title bar.
+const STANDING_VIEW_DISTANCE_METERS: f32 = 0.95;
 /// Standing: the space between neighbouring panels, measured along the view panels' arc.
 const STANDING_PANEL_GAP_METERS: f32 = 0.05;
 /// A head farther than this from the app volume's centre, on the floor plane, does not anchor
@@ -96,16 +97,21 @@ const TIMELINE_FORWARD_METERS: f32 = 0.5;
 const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
 /// With `--move-far-panels`, a held panel whose centre is farther than this from the eyes of the
 /// head that places panels is moved to where this run places new panels (ADR-0090, ADR-0095);
-/// without it such a panel stays where it is held. It is one step (about 0.7 m)
-/// beyond the outstretched reach of an arm measured from the eyes (ANSUR II, 0.61 m for the
-/// average man, ADR-0083), and more than twice the 0.65 m at which ADR-0083 places a panel: a
-/// panel a user moved within the space they work in stays; one held in another part of the
-/// room, or placed in another tracking origin (another headset, or a headset started at another
-/// spot), is moved.
+/// without it such a panel stays where it is held. It is a little more than half a step
+/// beyond the about 1.05 m from the eyes at which a standing user's new panels open
+/// (ADR-0100): a panel a user moved a little within the space they work in stays; one held in
+/// another part of the room, or placed in another tracking origin (another headset, or a
+/// headset started at another spot), is moved.
 const HELD_PLACE_FARTHEST_METERS: f32 = 1.5;
 /// A held panel whose centre is nearer than this to the eyes is moved too: it sits at the head,
 /// in front of the eyes or behind them, and cannot be read or grabbed.
 const HELD_PLACE_NEAREST_METERS: f32 = 0.2;
+/// A held panel whose centre is lower than this below the eyes is moved too, with or without
+/// `--move-far-panels` (ADR-0101). The tracking origin's y = 0 is no floor (heads stream at
+/// y -0.51 to 0.99, ADR-0090), so the floor is told from the eyes: an average standing adult's
+/// eyes are 1.51 m (women) to 1.64 m (men) above it (ANSUR II, ADR-0083), so a centre this low
+/// is at the floor or under it, and under it for a seated user.
+const HELD_PLACE_LOWEST_BELOW_EYES_METERS: f32 = 1.5;
 /// A held panel whose width or height differs from this run's by more than this is moved and
 /// resized: its place was chosen for another frame (ADR-0087), and a standing view hangs from
 /// its top edge by its height (ADR-0083).
@@ -162,7 +168,8 @@ impl PanelPosture {
 /// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]). A new panel is created at its place within
 /// reach of that head. A panel an earlier run left is reattached by its common name and stays
 /// where the Hub holds it while that place is of use to the user: no nearer than
-/// [`HELD_PLACE_NEAREST_METERS`] to the eyes, at this run's size, and with
+/// [`HELD_PLACE_NEAREST_METERS`] to the eyes, no lower than
+/// [`HELD_PLACE_LOWEST_BELOW_EYES_METERS`] below them, at this run's size, and with
 /// [`QarosPanels::with_move_far_panels`] within [`HELD_PLACE_FARTHEST_METERS`] of them.
 /// Otherwise it is moved to where a new panel would open (ADR-0090, ADR-0095). A panel
 /// listed `Closed` is claimed again by its common name, never replaced under a new one
@@ -359,6 +366,12 @@ impl QarosPanels {
     /// thread.
     pub fn pump_streams(&mut self, now: Instant) {
         self.streams.pump(&self.images, now);
+    }
+
+    /// Whether a sender put in place has its first frame due at `now`, which holds back every
+    /// claim (ADR-0096); the caller syncs again as soon as it is not (ADR-0101).
+    pub fn awaits_a_first_frame(&self, now: Instant) -> bool {
+        self.streams.awaits_a_first_frame(now)
     }
 
     /// Also opens one timeline panel, whether or not any view is published, showing the image
@@ -1029,8 +1042,8 @@ fn place_for_claim(
 /// Why a panel held at `held_pose` (its top edge's midpoint) and `held_size` is no use to the
 /// user whose eyes are at `eyes`, or `None` when it is: its centre nearer to the eyes than
 /// [`HELD_PLACE_NEAREST_METERS`], with `move_far_panels` farther than
-/// [`HELD_PLACE_FARTHEST_METERS`], or its width or height more than
-/// [`HELD_SIZE_TOLERANCE_METERS`] off `wanted_size`.
+/// [`HELD_PLACE_FARTHEST_METERS`], lower than [`HELD_PLACE_LOWEST_BELOW_EYES_METERS`] below
+/// them, or its width or height more than [`HELD_SIZE_TOLERANCE_METERS`] off `wanted_size`.
 fn unusable_held_place(
     held_pose: Pose,
     held_size: GuiPanelSize,
@@ -1050,6 +1063,13 @@ fn unusable_held_place(
         return Some(format!(
             "{held_place}, nearer than {HELD_PLACE_NEAREST_METERS} m to the eyes of the head that \
              places panels"
+        ));
+    }
+    let centre_below_eyes = eyes.y - panel_centre(held_pose, held_size.height).y;
+    if centre_below_eyes > HELD_PLACE_LOWEST_BELOW_EYES_METERS {
+        return Some(format!(
+            "{held_place}, its centre {centre_below_eyes:.2} m below the eyes, lower than \
+             {HELD_PLACE_LOWEST_BELOW_EYES_METERS} m: at the floor or under it"
         ));
     }
     let size_differs = (held_size.width - wanted_size.width).abs() > HELD_SIZE_TOLERANCE_METERS
@@ -1605,7 +1625,7 @@ mod tests {
             placed.centre_below_eyes
         );
         assert!(
-            (0.40 - EPSILON..=0.45 + EPSILON).contains(&placed.distance_on_the_floor),
+            (0.90 - EPSILON..=0.95 + EPSILON).contains(&placed.distance_on_the_floor),
             "{} m from the eyes on the floor plane",
             placed.distance_on_the_floor
         );
@@ -1628,18 +1648,18 @@ mod tests {
         assert!(
             timeline
                 .centre
-                .abs_diff_eq(Vec3::new(0.0, 1.1, -0.4), EPSILON),
+                .abs_diff_eq(Vec3::new(0.0, 1.1, -0.9), EPSILON),
             "centre {}",
             timeline.centre
         );
-        // Tilted back by atan(0.5 / 0.4), about 51 degrees, the top edge rises
-        // 0.102 * cos(51.3) m above the centre: 0.436 m below the eyes.
+        // Tilted back by atan(0.5 / 0.9), about 29 degrees, the top edge rises
+        // 0.102 * cos(29.1) m above the centre: 0.411 m below the eyes.
         assert!(
-            (timeline.top_below_eyes - 0.436).abs() < 1e-3,
+            (timeline.top_below_eyes - 0.411).abs() < 1e-3,
             "{}",
             timeline.top_below_eyes
         );
-        assert!((timeline.front_elevation_degrees - 51.34).abs() < 0.01);
+        assert!((timeline.front_elevation_degrees - 29.05).abs() < 0.01);
     }
 
     #[test]
@@ -1657,10 +1677,10 @@ mod tests {
             "{}",
             view.centre_below_eyes
         );
-        assert!((view.distance_on_the_floor - 0.45).abs() < EPSILON);
-        // Clear of the timeline: atan(0.225 / 0.4) + 0.05 / 0.45 + atan(0.225 / 0.45), 62 degrees.
+        assert!((view.distance_on_the_floor - 0.95).abs() < EPSILON);
+        // Clear of the timeline: atan(0.225 / 0.9) + 0.05 / 0.95 + atan(0.225 / 0.95), 30 degrees.
         assert!(
-            (view.degrees_right_of_gaze - 62.3).abs() < 0.1,
+            (view.degrees_right_of_gaze - 30.4).abs() < 0.1,
             "{}",
             view.degrees_right_of_gaze
         );
@@ -1741,11 +1761,11 @@ mod tests {
             TIMELINE_HEIGHT_METERS,
         );
         assert_standing_ergonomics(&timeline);
-        // The head looks along room -X: the centre 0.4 m that way and 0.5 m below the eyes.
+        // The head looks along room -X: the centre 0.9 m that way and 0.5 m below the eyes.
         assert!(
             timeline
                 .centre
-                .abs_diff_eq(Vec3::new(0.6, 1.2, -2.0), EPSILON),
+                .abs_diff_eq(Vec3::new(0.1, 1.2, -2.0), EPSILON),
             "centre {}",
             timeline.centre
         );
@@ -1894,7 +1914,7 @@ mod tests {
         );
         let moved_by_the_user = Pose::new(
             placed_for_this_head.orientation,
-            placed_for_this_head.position + Vec3::new(0.6, 0.3, -0.5),
+            placed_for_this_head.position + Vec3::new(0.3, 0.1, 0.2),
         );
         let distance = panel_centre(moved_by_the_user, size.height).distance(head.position);
         assert!(
@@ -1949,6 +1969,67 @@ mod tests {
                 .expect("moved");
             assert!(near.contains("nearer than 0.2 m"), "{near}");
         }
+    }
+
+    /// The drone lidar run of 2026-11-03 at 19:56:07 UTC: the head that placed panels, and the
+    /// timeline panel an earlier run left 4.37 m away, under the floor.
+    fn drone_lidar_head() -> Vec3 {
+        Vec3::new(-0.084_732_41, 0.825_657_5, 2.262_562_8)
+    }
+
+    /// The timeline panel's size in that run's log, 0.450x0.204 m.
+    fn logged_timeline_size() -> GuiPanelSize {
+        GuiPanelSize {
+            width: 0.45,
+            height: 0.204,
+            content_scale: 1.0,
+        }
+    }
+
+    fn held_under_the_floor() -> Pose {
+        Pose::new(
+            Quat::IDENTITY,
+            Vec3::new(1.352_494_5, -0.975_105_3, -1.467_721_5),
+        )
+    }
+
+    #[test]
+    fn a_panel_held_under_the_floor_is_moved_with_or_without_move_far_panels() {
+        let size = logged_timeline_size();
+        let without_the_flag = unusable_held_place(
+            held_under_the_floor(),
+            size,
+            drone_lidar_head(),
+            size,
+            false,
+        )
+        .expect("moved");
+        assert!(
+            without_the_flag.contains("its centre 1.90 m below the eyes, lower than 1.5 m"),
+            "{without_the_flag}"
+        );
+        assert!(
+            without_the_flag.contains("at the floor or under it"),
+            "{without_the_flag}"
+        );
+        let with_the_flag =
+            unusable_held_place(held_under_the_floor(), size, drone_lidar_head(), size, true);
+        assert!(with_the_flag.is_some());
+    }
+
+    #[test]
+    fn a_panel_held_low_but_above_the_floor_stays() {
+        let size = logged_timeline_size();
+        let eyes = drone_lidar_head();
+        let centre_below_eyes = 1.45;
+        let top_edge = Vec3::new(
+            eyes.x,
+            eyes.y - centre_below_eyes + size.height * 0.5,
+            eyes.z - 0.8,
+        );
+        let low = Pose::new(Quat::IDENTITY, top_edge);
+        assert!((eyes.y - panel_centre(low, size.height).y - centre_below_eyes).abs() < EPSILON);
+        assert_eq!(unusable_held_place(low, size, eyes, size, false), None);
     }
 
     #[test]

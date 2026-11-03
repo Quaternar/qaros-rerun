@@ -384,6 +384,9 @@ struct PanelHook {
     /// `published_at`.
     images: PanelImages,
     last_sync: Option<Instant>,
+    /// The last sync ended with a new panel's first frame due; the next one runs as soon as it
+    /// is shown rather than a sync interval later (ADR-0101).
+    sync_once_shown: bool,
     activity: HashMap<String, ViewActivity>,
 }
 
@@ -393,9 +396,24 @@ impl PanelHook {
             panels,
             images,
             last_sync: None,
+            sync_once_shown: false,
             activity: HashMap::new(),
         }
     }
+}
+
+/// Whether a panel sync is due at `now`: [`PANEL_SYNC_INTERVAL`] after `last_sync`, or as soon
+/// as the first frame the last sync left due is out (`sync_once_shown` and no
+/// `first_frame_due`), so the next claim follows it without a wait of its own (ADR-0101).
+fn sync_due(
+    last_sync: Option<Instant>,
+    sync_once_shown: bool,
+    first_frame_due: bool,
+    now: Instant,
+) -> bool {
+    let interval_passed =
+        last_sync.is_none_or(|last| now.saturating_duration_since(last) >= PANEL_SYNC_INTERVAL);
+    interval_passed || (sync_once_shown && !first_frame_due)
 }
 
 /// The settled views among those published in `images`, and the names of all published views,
@@ -413,7 +431,7 @@ fn observe_views(
         let observed = images.latest(&name).map(|image| {
             let activity = activity
                 .entry(name.clone())
-                .or_insert_with(|| ViewActivity::new(now));
+                .or_insert_with(|| ViewActivity::new(image.first_published_at.min(now), now));
             activity.observe_published_at(image.published_at);
             (*activity, image.width, image.height)
         });
@@ -431,18 +449,20 @@ fn observe_views(
     (settled, published_view_names)
 }
 
-/// When a published view was first seen and when it was last published, as seen by the
-/// once-a-second sync.
+/// Since when a published view has been published and when it was last published, as seen by
+/// the sync.
 #[derive(Clone, Copy, Debug)]
 struct ViewActivity {
+    /// The view's first publish, not the sync that first saw it: a claim blocks the syncs for
+    /// seconds while the capture keeps publishing (ADR-0101).
     first_seen: Instant,
     last_published: Instant,
 }
 
 impl ViewActivity {
-    fn new(now: Instant) -> Self {
+    fn new(first_published_at: Instant, now: Instant) -> Self {
         Self {
-            first_seen: now,
+            first_seen: first_published_at,
             last_published: now,
         }
     }
@@ -471,15 +491,14 @@ impl FrameHook for PanelHook {
         for head in &headset.heads {
             self.panels.consider_head(head.user, head.pose, now);
         }
-        if self
-            .last_sync
-            .is_some_and(|last| now.saturating_duration_since(last) < PANEL_SYNC_INTERVAL)
-        {
+        let first_frame_due = self.panels.awaits_a_first_frame(now);
+        if !sync_due(self.last_sync, self.sync_once_shown, first_frame_due, now) {
             return;
         }
         self.last_sync = Some(now);
         let (views, published_view_names) = observe_views(&self.images, &mut self.activity, now);
         self.panels.sync(&views, &published_view_names);
+        self.sync_once_shown = self.panels.awaits_a_first_frame(Instant::now());
     }
 }
 
@@ -637,7 +656,7 @@ mod tests {
     /// which the view is settled.
     fn settled_syncs(published_until_seconds: u64, last_sync_seconds: u64) -> Vec<u64> {
         let start = Instant::now();
-        let mut activity = ViewActivity::new(start);
+        let mut activity = ViewActivity::new(start, start);
         let mut settled = Vec::new();
         for second in 1..=last_sync_seconds {
             let now = start + Duration::from_secs(second);
@@ -649,6 +668,55 @@ mod tests {
             }
         }
         settled
+    }
+
+    #[test]
+    fn a_view_settles_from_its_first_publish_not_from_the_sync_that_first_sees_it() {
+        let images = PanelImages::default();
+        let mut activity = HashMap::new();
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let first_published_at = images.latest("camera").unwrap().first_published_at;
+        let after_a_blocking_claim = first_published_at + PANEL_SETTLE;
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let (settled, _) = observe_views(&images, &mut activity, after_a_blocking_claim);
+        assert_eq!(
+            settled
+                .into_iter()
+                .map(|view| view.name)
+                .collect::<Vec<_>>(),
+            ["camera"],
+            "first seen by this sync, published since {PANEL_SETTLE:?} before it"
+        );
+    }
+
+    #[test]
+    fn the_sync_after_a_claim_runs_once_its_first_frame_is_out() {
+        // Run 2 of 2026-11-03: the camera's claim returned at 44.545 s, the sync right after
+        // it found the first frame due, and the frame was out at 44.593 s.
+        let gated_sync = Instant::now();
+        let first_frame_shown = gated_sync + Duration::from_millis(48);
+        assert!(
+            !sync_due(Some(gated_sync), true, true, first_frame_shown),
+            "still due"
+        );
+        assert!(
+            sync_due(Some(gated_sync), true, false, first_frame_shown),
+            "out 48 ms after the gated sync: no wait for the 1 s tick"
+        );
+        assert!(
+            !sync_due(Some(gated_sync), false, false, first_frame_shown),
+            "no first frame was due at the last sync: the 1 s tick holds"
+        );
+        assert!(
+            sync_due(
+                Some(gated_sync),
+                false,
+                true,
+                gated_sync + PANEL_SYNC_INTERVAL
+            ),
+            "the tick still runs, the claim itself waits for the frame"
+        );
+        assert!(sync_due(None, false, false, gated_sync), "the first sync");
     }
 
     #[test]

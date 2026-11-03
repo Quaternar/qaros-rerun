@@ -16,6 +16,9 @@ pub struct PanelImage {
     pub sequence: u64,
     /// Set on every publish; drives settling, so a view that never changes still settles.
     pub published_at: Instant,
+    /// The first publish under this key since it was last withdrawn; a view has been
+    /// published since then, whenever the sink first looks at it.
+    pub first_published_at: Instant,
     pub width: u32,
     pub height: u32,
     /// BGRA, alpha 255, rows packed.
@@ -67,11 +70,15 @@ impl PanelImages {
             return Ok(stored.sequence);
         }
         let sequence = images.get(key).map_or(0, |stored| stored.sequence + 1);
+        let first_published_at = images
+            .get(key)
+            .map_or(published_at, |stored| stored.first_published_at);
         images.insert(
             key.to_owned(),
             PanelImage {
                 sequence,
                 published_at,
+                first_published_at,
                 width,
                 height,
                 bgra8: Arc::new(bgra8),
@@ -134,6 +141,35 @@ mod tests {
         let second = images.latest("camera").unwrap();
         assert_eq!(second.sequence, 0);
         assert!(second.published_at > first.published_at);
+    }
+
+    #[test]
+    fn the_first_publish_time_holds_until_the_view_is_withdrawn() {
+        let images = PanelImages::default();
+        images
+            .publish_rgba8("camera", 2, 1, two_pixels(10))
+            .unwrap();
+        let first = images.latest("camera").unwrap();
+        assert_eq!(first.first_published_at, first.published_at);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        images
+            .publish_rgba8("camera", 2, 1, two_pixels(10))
+            .unwrap();
+        images
+            .publish_rgba8("camera", 2, 1, two_pixels(11))
+            .unwrap();
+        let changed = images.latest("camera").unwrap();
+        assert_eq!(changed.sequence, 1);
+        assert_eq!(changed.first_published_at, first.published_at);
+        assert!(changed.published_at > first.published_at);
+
+        images.retain_views(&[]);
+        images
+            .publish_rgba8("camera", 2, 1, two_pixels(11))
+            .unwrap();
+        let returned = images.latest("camera").unwrap();
+        assert!(returned.first_published_at > first.published_at);
+        assert_eq!(returned.first_published_at, returned.published_at);
     }
 
     #[test]
