@@ -9,6 +9,8 @@ repo: qaros-rerun
 # ADR-0072: A timeline panel in front of the user drives the viewer's time cursor through the panel server
 
 > The web page, the panel server and the image-load protocol are superseded by ADR-0078 (a timeline drawn by the viewer, driven by panel gestures); the web route and the panel server were removed. The panel's pose, the seek and Play rules and the thumb's hold stand.
+>
+> The pose is amended by ADR-0083: standing, the default, the centre stands 0.40 m ahead and 0.50 m below the eyes; the pose here is the `--panel-posture sitting` preset.
 
 ## Context
 

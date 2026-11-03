@@ -88,6 +88,22 @@ impl PanelImages {
             .cloned()
     }
 
+    /// Withdraws every view not named in `on_screen`, so the sink sees a view that left the
+    /// layout (another recording became active, its blueprint dropped or hid the view) as no
+    /// longer published. The timeline is no view and stays. Returns the withdrawn views.
+    pub fn retain_views(&self, on_screen: &[String]) -> Vec<String> {
+        let mut images = self.images.lock().unwrap_or_else(PoisonError::into_inner);
+        let withdrawn: Vec<String> = images
+            .keys()
+            .filter(|key| key.as_str() != TIMELINE_IMAGE_KEY && !on_screen.contains(key))
+            .cloned()
+            .collect();
+        for name in &withdrawn {
+            images.remove(name);
+        }
+        withdrawn
+    }
+
     /// The published views, without the timeline.
     pub fn view_names(&self) -> Vec<String> {
         self.images
@@ -159,5 +175,23 @@ mod tests {
             .publish_rgba8(TIMELINE_IMAGE_KEY, 2, 1, two_pixels(10))
             .unwrap();
         assert_eq!(images.view_names(), ["camera"]);
+    }
+
+    #[test]
+    fn views_that_left_the_layout_are_withdrawn_and_the_timeline_stays() {
+        let images = PanelImages::default();
+        for key in ["camera", "plot", TIMELINE_IMAGE_KEY] {
+            images.publish_rgba8(key, 2, 1, two_pixels(10)).unwrap();
+        }
+
+        let withdrawn = images.retain_views(&["plot".to_owned(), "map".to_owned()]);
+
+        assert_eq!(withdrawn, ["camera"]);
+        assert_eq!(images.view_names(), ["plot"]);
+        assert!(images.latest("camera").is_none());
+        assert!(images.latest(TIMELINE_IMAGE_KEY).is_some());
+        assert_eq!(images.retain_views(&[]), ["plot"]);
+        assert!(images.view_names().is_empty());
+        assert!(images.latest(TIMELINE_IMAGE_KEY).is_some());
     }
 }

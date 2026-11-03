@@ -13,7 +13,7 @@ use qaros::{GuiPanelConfig, GuiPanelId, GuiPanelSize, GuiPanelState, StreamId};
 
 use crate::connection::QarosConnection;
 use crate::panel_gestures::{PanelGestureSubscription, PanelGestures};
-use crate::panel_images::{PanelImage, PanelImages};
+use crate::panel_images::{PanelImage, PanelImages, TIMELINE_IMAGE_KEY};
 use crate::panel_listing::{ListedPanel, PanelContent};
 use crate::stream_panel_calls;
 use crate::video_sender::VideoSender;
@@ -202,6 +202,9 @@ pub(crate) struct PanelStream<Sender, Subscription> {
     last_replacement: Option<Instant>,
     size_candidate: Option<SizeCandidate>,
     absent_listings: u32,
+    /// Hidden by [`StreamPanels::follow_published_views`] because its view left the layout;
+    /// shown again when the view is back.
+    hidden_with_its_view: bool,
 }
 
 pub(crate) struct StreamPanels<Backend: StreamBackend> {
@@ -326,6 +329,7 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             last_replacement: None,
             size_candidate: None,
             absent_listings: 0,
+            hidden_with_its_view: false,
         };
         subscribe_if_wanted(&self.backend, &mut claimed);
         self.streams.push(claimed);
@@ -546,6 +550,29 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         stream.size_candidate = None;
     }
 
+    /// Keeps the held view panels in step with the viewer's layout, once a sync. A view panel
+    /// whose view is not among `published` (the active recording changed, or its blueprint
+    /// dropped or hid the view) is hidden, never closed, and keeps its sender. It is shown
+    /// again once its view is among `settled` and the view's current image has been streamed to
+    /// it, so it does not come back with the image it showed before it left. The timeline
+    /// panel is no view and follows the active recording by itself.
+    pub(crate) fn follow_published_views(&mut self, published: &[String], settled: &[String]) {
+        for stream in &mut self.streams {
+            if stream.image_key == TIMELINE_IMAGE_KEY {
+                continue;
+            }
+            let is_published = published.contains(&stream.image_key);
+            if !stream.hidden_with_its_view && !is_published {
+                hide_with_its_view(&self.backend, stream);
+            } else if stream.hidden_with_its_view
+                && settled.contains(&stream.image_key)
+                && stream.shown_sequence.is_some()
+            {
+                show_with_its_view(&self.backend, stream);
+            }
+        }
+    }
+
     /// Checks the held panels against a listing. A panel listed `Closed`, or missing from
     /// [`ABSENT_LISTINGS_BEFORE_GONE`] listings in a row, is released: its subscription
     /// cancelled and its senders destroyed, and it gets no further call this run. A close by a
@@ -595,9 +622,14 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
         released
     }
 
-    /// The first half of Stop: every held panel hidden for the next run.
+    /// The first half of Stop: every held panel hidden for the next run. A panel already hidden
+    /// with its view gets no second call.
     pub(crate) fn hide_all(&self) {
-        for stream in &self.streams {
+        for stream in self
+            .streams
+            .iter()
+            .filter(|stream| !stream.hidden_with_its_view)
+        {
             match self.backend.set_state(stream.panel, GuiPanelState::Hidden) {
                 Ok(()) => log::info!(
                     "qaros: stream panel {} for {} hidden until the next run",
@@ -627,6 +659,53 @@ impl<Backend: StreamBackend> StreamPanels<Backend> {
             cancelled.as_micros(),
             started.elapsed().saturating_sub(cancelled).as_micros()
         );
+    }
+}
+
+/// Hides the panel of a view that left the layout. Its sender stays, and its shown image is
+/// forgotten: the view's image starts a new sequence when it comes back, and that image has to
+/// be streamed before the panel is shown again. A failed call is retried at the next sync.
+fn hide_with_its_view<Backend: StreamBackend>(
+    backend: &Backend,
+    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
+) {
+    match backend.set_state(stream.panel, GuiPanelState::Hidden) {
+        Ok(()) => {
+            stream.hidden_with_its_view = true;
+            stream.shown_sequence = None;
+            stream.last_show = None;
+            log::info!(
+                "qaros: {} left the viewer's layout; its panel {} is hidden until it is back",
+                stream.image_key,
+                stream.panel
+            );
+        }
+        Err(error) => log::warn!(
+            "qaros: hiding the panel of {}, which left the viewer's layout: {error}",
+            stream.image_key
+        ),
+    }
+}
+
+/// Shows the panel of a view that is back in the layout. A failed call is retried at the
+/// next sync.
+fn show_with_its_view<Backend: StreamBackend>(
+    backend: &Backend,
+    stream: &mut PanelStream<Backend::Sender, Backend::Subscription>,
+) {
+    match backend.set_state(stream.panel, GuiPanelState::Visible) {
+        Ok(()) => {
+            stream.hidden_with_its_view = false;
+            log::info!(
+                "qaros: {} is back in the viewer's layout; its panel {} is shown again",
+                stream.image_key,
+                stream.panel
+            );
+        }
+        Err(error) => log::warn!(
+            "qaros: showing the panel of {} again: {error}",
+            stream.image_key
+        ),
     }
 }
 
@@ -1424,6 +1503,100 @@ mod tests {
             calls_from(&panels, claimed).len(),
             3,
             "no call on a released panel"
+        );
+    }
+
+    /// The camera, the plot and the timeline claimed, each with its image streamed once.
+    fn camera_plot_and_timeline_streaming() -> (StreamPanels<FakeBackend>, PanelImages) {
+        let mut panels = StreamPanels::new(FakeBackend::ready());
+        panels
+            .claim("camera", &config(CAMERA), &[], (4, 2), None)
+            .unwrap();
+        panels
+            .claim("plot", &config(PLOT), &[], (4, 2), None)
+            .unwrap();
+        panels
+            .claim(
+                TIMELINE_IMAGE_KEY,
+                &config(TIMELINE),
+                &[],
+                (4, 2),
+                Some(PanelGestures::default()),
+            )
+            .unwrap();
+        let images = PanelImages::default();
+        for key in ["camera", "plot", TIMELINE_IMAGE_KEY] {
+            images.publish_rgba8(key, 4, 2, rgba(4, 2, 1)).unwrap();
+        }
+        for _ in 0..3 {
+            panels.pump(&images, Instant::now());
+        }
+        assert_eq!(shows(&panels), ["show 1", "show 2", "show 3"]);
+        (panels, images)
+    }
+
+    #[test]
+    fn after_a_recording_switch_only_the_panels_of_views_that_left_are_hidden() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        let before_switch = panels.backend().calls().len();
+
+        // The new recording's layout has a plot too, but no camera.
+        images.retain_views(&["plot".to_owned()]);
+        let published = images.view_names();
+        panels.follow_published_views(&published, &[]);
+        panels.follow_published_views(&published, &published);
+
+        assert_eq!(calls_from(&panels, before_switch), ["set_state 25 Hidden"]);
+        let after_hide = panels.backend().calls().len();
+        images.publish_rgba8("plot", 4, 2, rgba(4, 2, 2)).unwrap();
+        for _ in 0..3 {
+            panels.pump(&images, Instant::now());
+        }
+        assert_eq!(
+            calls_from(&panels, after_hide),
+            ["show 2"],
+            "the hidden camera panel gets nothing, the plot keeps streaming"
+        );
+    }
+
+    #[test]
+    fn a_view_back_in_the_layout_is_shown_again_once_settled_and_its_image_streamed() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        images.retain_views(&["plot".to_owned()]);
+        panels.follow_published_views(&images.view_names(), &[]);
+        let after_hide = panels.backend().calls().len();
+
+        images.publish_rgba8("camera", 4, 2, rgba(4, 2, 7)).unwrap();
+        let published = images.view_names();
+        panels.follow_published_views(&published, &["plot".to_owned()]);
+        panels.follow_published_views(&published, &published);
+        assert!(
+            calls_from(&panels, after_hide).is_empty(),
+            "settled but not streamed yet: still hidden"
+        );
+
+        panels.pump(&images, Instant::now());
+        panels.follow_published_views(&published, &published);
+        panels.follow_published_views(&published, &published);
+        assert_eq!(
+            calls_from(&panels, after_hide),
+            ["show 1", "set_state 25 Visible"]
+        );
+    }
+
+    #[test]
+    fn stop_hides_only_the_panels_not_already_hidden_with_their_views() {
+        let (mut panels, images) = camera_plot_and_timeline_streaming();
+        images.retain_views(&[]);
+        panels.follow_published_views(&images.view_names(), &[]);
+        let after_hide = panels.backend().calls().len();
+
+        panels.hide_all();
+
+        assert_eq!(
+            calls_from(&panels, after_hide),
+            ["set_state 33 Hidden"],
+            "the camera and plot panels are hidden already; the timeline stays until Stop"
         );
     }
 }

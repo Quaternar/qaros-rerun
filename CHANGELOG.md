@@ -6,6 +6,7 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Added
 
+- New panels are placed for a standing user: every top edge at least 0.30 m below the eyes, centres between chest and waist, each panel tilted to face the eyes. The timeline stands straight ahead, nearest and lowest (0.40 m ahead, 0.50 m below the eyes); the views stand 0.45 m away beside it, alternately right and left. `--panel-posture sitting` keeps the earlier desk placement. Panels that exist keep their place; close them in the Hub Display once to have them placed anew (ADR-0083, amends ADR-0070 and ADR-0072).
 - `docs/quick-start.md`: a Rerun project in a QAROS headset in five steps, from the build to fitting the data on the table, with a symptom table.
 - A one-hand grab moves the scene and a two-hand spread scales it, through QAROS's default gesture rules on the app volume. The viewer follows the volume's live pose, app pose and app scale: read at connect, on every volume update, every frame while a gesture runs and at least every 100 ms, and carried with each frame on both frame paths, so depth and the near plane stay in room metres at any scale. Every gesture on the volume is logged (ADR-0066, ADR-0080). In the glasses on 0.9.0-dev.3184 the grab works; the spread ends within 80 ms and barely scales ([Known issues](docs/known-issues.md)).
 - Stream panels: each 2D view's GUI panel shows a CPU video stream the viewer owns (`QarVideoSender` with `QarGuiPanelStreamIdExt`), so the mixer samples the viewer's pixels as they are and no port is opened. Views are capped at 1280 px a side, padded to a width that is a multiple of 64 and a height that is a multiple of 8 (a test for Quaternar#343), and shown when they change, and once a second otherwise. Panels take names of their own (`<view>.stream.<volume>.rerun`) and are pointed at each run's streams with `qar_gui_panels_set_stream` on reattach (ADR-0076, ADR-0077).
@@ -34,6 +35,7 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Fixed
 
+- Panels follow the active recording: when another recording is opened (for example from the command palette) or the blueprint drops or hides a 2D view, the panels of views no longer in the layout are hidden instead of staying open with their last image, and shown again when their views return. The new recording's 2D views get panels as before, and the timeline panel follows the active recording's time (ADR-0082).
 - Both render senders declare premultiplied alpha (`ColorAlphaMode::Premultiplied`), so the mixer blends the stream by its coverage; an undeclared stream is drawn opaque, uncovered pixels included.
 
 ## [0.1.0]

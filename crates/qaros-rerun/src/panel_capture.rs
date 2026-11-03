@@ -171,6 +171,16 @@ impl PanelCapture {
         match self.outlet {}
     }
 
+    #[cfg(feature = "qaros")]
+    fn withdraw_views_not_on_screen(&self, on_screen_names: &[String]) -> Vec<String> {
+        self.outlet.images.retain_views(on_screen_names)
+    }
+
+    #[cfg(not(feature = "qaros"))]
+    fn withdraw_views_not_on_screen(&self, _: &[String]) -> Vec<String> {
+        match self.outlet {}
+    }
+
     pub fn on_frame(&mut self, egui_ctx: &egui::Context) {
         let screenshots = std::mem::take(
             &mut *self
@@ -245,7 +255,28 @@ impl PanelCapture {
                     .map(|view_info| (view_id, view_info))
             })
             .collect();
+        self.publish_on_screen_views(on_screen_views, screenshot, pixels_per_point);
+    }
+
+    /// Publishes the views on screen in this capture, and withdraws those that were published
+    /// before and are not on screen now, so their panels follow the layout when another
+    /// recording becomes active or the blueprint drops a view. A capture that never happens,
+    /// such as while the window is minimised, withdraws nothing.
+    fn publish_on_screen_views(
+        &mut self,
+        on_screen_views: Vec<(ViewId, PublishedViewInfo)>,
+        screenshot: &egui::ColorImage,
+        pixels_per_point: f32,
+    ) {
         self.panel_names.assign(&on_screen_views);
+        let on_screen_names: Vec<String> = on_screen_views
+            .iter()
+            .filter_map(|(view_id, _)| self.panel_names.name_of(*view_id).map(str::to_owned))
+            .collect();
+        for withdrawn in self.withdraw_views_not_on_screen(&on_screen_names) {
+            self.announced_views.remove(&withdrawn);
+            re_log::info!("panels: {withdrawn} left the layout and is no longer published");
+        }
         for (view_id, view_info) in on_screen_views {
             let Some(panel_name) = self.panel_names.name_of(view_id).map(str::to_owned) else {
                 continue;
@@ -547,6 +578,58 @@ mod tests {
             "{until_due:?}"
         );
         assert!(!capture.take_due());
+    }
+
+    #[cfg(feature = "qaros")]
+    fn capture_into(images: &PanelImages) -> PanelCapture {
+        let outlet = PanelOutlet {
+            images: images.clone(),
+            gestures: PanelGestures::default(),
+        };
+        PanelCapture::new(
+            outlet,
+            Duration::from_secs(1),
+            SharedViewDirectory::default(),
+        )
+    }
+
+    #[cfg(feature = "qaros")]
+    #[test]
+    fn a_recording_switch_withdraws_the_views_that_left_and_publishes_the_new_ones() {
+        let images = PanelImages::default();
+        let mut capture = capture_into(&images);
+        images
+            .publish_rgba8(qaros_sink::TIMELINE_IMAGE_KEY, 1, 1, vec![0; 4])
+            .unwrap();
+        let screenshot = egui::ColorImage::filled([400, 400], egui::Color32::BLACK);
+        let demo_layout = vec![view_at("Camera", 0.0, 0.0), view_at("Plot", 200.0, 0.0)];
+        capture.publish_on_screen_views(demo_layout, &screenshot, 1.0);
+        assert_eq!(images.view_names(), ["camera", "plot"]);
+
+        // The opened recording's blueprint: new view ids, a plot of the same name, no camera.
+        let opened_layout = vec![view_at("Plot", 0.0, 0.0), view_at("Image", 200.0, 0.0)];
+        capture.publish_on_screen_views(opened_layout, &screenshot, 1.0);
+
+        assert_eq!(images.view_names(), ["image", "plot"]);
+        assert!(images.latest("camera").is_none());
+        assert!(
+            images.latest(qaros_sink::TIMELINE_IMAGE_KEY).is_some(),
+            "the timeline is no view and stays"
+        );
+    }
+
+    #[cfg(feature = "qaros")]
+    #[test]
+    fn a_capture_with_no_view_on_screen_withdraws_every_view() {
+        let images = PanelImages::default();
+        let mut capture = capture_into(&images);
+        let screenshot = egui::ColorImage::filled([400, 400], egui::Color32::BLACK);
+        capture.publish_on_screen_views(vec![view_at("Camera", 0.0, 0.0)], &screenshot, 1.0);
+        assert_eq!(images.view_names(), ["camera"]);
+
+        capture.publish_on_screen_views(Vec::new(), &screenshot, 1.0);
+
+        assert!(images.view_names().is_empty());
     }
 
     #[test]

@@ -160,6 +160,7 @@ fn panel_hook(
     re_log::info!("qaros: 2D views and the timeline open as GUI panels, each a video stream");
     let panels = QarosPanels::new(connection, images.clone())
         .with_panels_at_stop(panels_at_stop(options))
+        .with_panel_posture(panel_posture(options))
         .with_timeline_panel(gestures);
     Some(Box::new(PanelHook::new(panels, images)))
 }
@@ -193,6 +194,13 @@ fn panels_at_stop(options: &Options) -> qaros_sink::PanelsAtStop {
     match options.qaros.panels_at_stop {
         crate::options::PanelsAtStopKind::Hide => qaros_sink::PanelsAtStop::Hide,
         crate::options::PanelsAtStopKind::Keep => qaros_sink::PanelsAtStop::Keep,
+    }
+}
+
+fn panel_posture(options: &Options) -> qaros_sink::PanelPosture {
+    match options.qaros.panel_posture {
+        crate::options::PanelPostureKind::Standing => qaros_sink::PanelPosture::Standing,
+        crate::options::PanelPostureKind::Sitting => qaros_sink::PanelPosture::Sitting,
     }
 }
 
@@ -343,33 +351,39 @@ impl PanelHook {
             activity: HashMap::new(),
         }
     }
+}
 
-    /// Each published view's size and when it was last published, as the sync sees it now.
-    fn observe_views(&mut self, now: Instant) -> (Vec<PanelView>, Vec<String>) {
-        let mut settled = Vec::new();
-        let published_view_names = self.images.view_names();
-        for name in published_view_names.iter().cloned() {
-            let observed = self.images.latest(&name).map(|image| {
-                let activity = self
-                    .activity
-                    .entry(name.clone())
-                    .or_insert_with(|| ViewActivity::new(now));
-                activity.observe_published_at(image.published_at);
-                (*activity, image.width, image.height)
+/// The settled views among those published in `images`, and the names of all published views,
+/// as the sync sees them at `now`; `activity` tracks each published view between syncs.
+fn observe_views(
+    images: &PanelImages,
+    activity: &mut HashMap<String, ViewActivity>,
+    now: Instant,
+) -> (Vec<PanelView>, Vec<String>) {
+    let mut settled = Vec::new();
+    let published_view_names = images.view_names();
+    // A view that left the layout settles afresh when it returns, like a new one.
+    activity.retain(|name, _| published_view_names.contains(name));
+    for name in published_view_names.iter().cloned() {
+        let observed = images.latest(&name).map(|image| {
+            let activity = activity
+                .entry(name.clone())
+                .or_insert_with(|| ViewActivity::new(now));
+            activity.observe_published_at(image.published_at);
+            (*activity, image.width, image.height)
+        });
+        let Some((activity, width_in_pixel, height_in_pixel)) = observed else {
+            continue;
+        };
+        if activity.is_settled(now) {
+            settled.push(PanelView {
+                name,
+                width_in_pixel,
+                height_in_pixel,
             });
-            let Some((activity, width_in_pixel, height_in_pixel)) = observed else {
-                continue;
-            };
-            if activity.is_settled(now) {
-                settled.push(PanelView {
-                    name,
-                    width_in_pixel,
-                    height_in_pixel,
-                });
-            }
         }
-        (settled, published_view_names)
     }
+    (settled, published_view_names)
 }
 
 /// When a published view was first seen and when it was last published, as seen by the
@@ -419,7 +433,7 @@ impl FrameHook for PanelHook {
             return;
         }
         self.last_sync = Some(now);
-        let (views, published_view_names) = self.observe_views(now);
+        let (views, published_view_names) = observe_views(&self.images, &mut self.activity, now);
         self.panels.sync(&views, &published_view_names);
     }
 }
@@ -538,6 +552,37 @@ mod tests {
     #[test]
     fn a_view_published_only_while_a_recording_loads_never_gets_a_panel() {
         assert_eq!(settled_syncs(1, 10), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_view_that_left_the_layout_settles_afresh_when_it_returns() {
+        let now = Instant::now();
+        let long_ago = now.checked_sub(Duration::from_secs(20)).expect("an uptime");
+        let images = PanelImages::default();
+        let mut activity = HashMap::new();
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        images.publish_rgba8("plot", 1, 1, vec![0; 4]).unwrap();
+        observe_views(&images, &mut activity, long_ago);
+        let settled_names = |views: Vec<PanelView>| -> Vec<String> {
+            views.into_iter().map(|view| view.name).collect()
+        };
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(settled_names(settled), ["camera", "plot"]);
+        assert_eq!(published, ["camera", "plot"]);
+
+        images.retain_views(&["plot".to_owned()]);
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(settled_names(settled), ["plot"]);
+        assert_eq!(published, ["plot"]);
+
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(
+            settled_names(settled),
+            ["plot"],
+            "the returning camera waits the settle time again"
+        );
+        assert_eq!(published, ["camera", "plot"]);
     }
 
     #[test]

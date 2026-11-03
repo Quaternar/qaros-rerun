@@ -114,6 +114,13 @@ Depth reported to the sink (the QAROS sink converts near and far to the poses' u
     --panels                   open each non-3D view and a timeline as GUI panels within reach
                                of the headset user, each a video stream of this viewer; the
                                timeline takes taps and drags on its track and Play button
+    --panel-posture standing|sitting   who new panels are placed for (default standing):
+                               standing puts them between chest and waist, tilted toward the
+                               eyes, the timeline straight ahead and nearest, the views beside
+                               it; sitting puts the views 0.8 m away right of the gaze, just
+                               below the eyes, and the timeline 0.5 m ahead. Panels that exist
+                               keep their place; close them in the Hub Display to place them
+                               anew
     --panel-interval-ms MS     capture interval (default 250)
 
 Viewer:
@@ -166,6 +173,13 @@ pub enum PoseSpaceKind {
 pub enum PanelsAtStopKind {
     Hide,
     Keep,
+}
+
+/// Who new GUI panels are placed for; see `qaros_sink::PanelPosture`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelPostureKind {
+    Standing,
+    Sitting,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +241,7 @@ pub struct QarosOptions {
     pub display_name: String,
     pub color_format: ColorFormatKind,
     pub panels_at_stop: PanelsAtStopKind,
+    pub panel_posture: PanelPostureKind,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -330,6 +345,13 @@ impl QarosOptions {
                     other => return Err(invalid(flag, other)),
                 }
             }
+            "--panel-posture" => {
+                self.panel_posture = match value.as_str() {
+                    "standing" => PanelPostureKind::Standing,
+                    "sitting" => PanelPostureKind::Sitting,
+                    other => return Err(invalid(flag, other)),
+                }
+            }
             "--gpu-priority" => {
                 self.raise_gpu_priority = match value.as_str() {
                     "high" => true,
@@ -362,6 +384,7 @@ impl Default for QarosOptions {
             display_name: "Rerun".to_owned(),
             color_format: ColorFormatKind::Bgra,
             panels_at_stop: PanelsAtStopKind::Hide,
+            panel_posture: PanelPostureKind::Standing,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -638,6 +661,7 @@ impl Options {
                 | "--color-format"
                 | "--begin-frame"
                 | "--panels-at-stop"
+                | "--panel-posture"
                 | "--gpu-priority"
                 | "--qaros-graphics" => options.qaros.apply_flag(&flag, value()?)?,
                 "--launched-by-qaros" => options.qaros.launched_by_qaros = true,
@@ -1117,6 +1141,25 @@ mod tests {
         );
         assert!(matches!(
             parse(&["--panels-at-stop", "close"]),
+            Err(ParseOutcome::Error(_))
+        ));
+    }
+
+    #[test]
+    fn panels_are_placed_for_a_standing_user_unless_sitting() {
+        assert_eq!(
+            parse(&[]).unwrap().qaros.panel_posture,
+            PanelPostureKind::Standing
+        );
+        assert_eq!(
+            parse(&["--panel-posture", "sitting"])
+                .unwrap()
+                .qaros
+                .panel_posture,
+            PanelPostureKind::Sitting
+        );
+        assert!(matches!(
+            parse(&["--panel-posture", "lying"]),
             Err(ParseOutcome::Error(_))
         ));
     }

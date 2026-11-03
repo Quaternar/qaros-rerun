@@ -76,7 +76,7 @@ pub use panel_gestures::{
 };
 pub use panel_images::{PanelImage, PanelImages, TIMELINE_IMAGE_KEY};
 pub use panel_listing::{ListedPanel, PanelContent, list_panels};
-pub use panels::{HEADSET_WAIT, PanelView, PanelsAtStop, QarosPanels};
+pub use panels::{HEADSET_WAIT, PanelPosture, PanelView, PanelsAtStop, QarosPanels};
 pub use peer_devices::PeerDevice;
 pub use process_exit::{
     BOUNDED_FLUSH_WAIT, end_process_after_bounded_flush, end_process_after_teardown,

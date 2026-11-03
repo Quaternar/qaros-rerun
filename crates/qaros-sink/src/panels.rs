@@ -29,13 +29,31 @@ pub struct PanelView {
 /// 0.45 m reads well at arm's length and keeps a second panel well in front of the user.
 const PANEL_WIDTH_METERS: f32 = 0.45;
 const PANEL_GAP_METERS: f32 = 0.1;
-/// Within reach: how far from the user's head the panels stand, measured on the floor plane.
+/// Seated: how far from the user's head the view panels stand, measured on the floor plane.
 const REACH_DISTANCE_METERS: f32 = 0.8;
-/// How far below the user's eyes the panels' top edges sit.
+/// Seated: how far below the user's eyes the view panels' top edges sit.
 const REACH_TOP_BELOW_EYES_METERS: f32 = 0.1;
-/// Where the row starts, measured along the arc from the user's gaze to the first panel's
-/// left edge, so the panels stand beside what the user looks at rather than in front of it.
+/// Seated: where the row starts, measured along the arc from the user's gaze to the first
+/// panel's left edge, so the panels stand beside what the user looks at rather than in front
+/// of it.
 const REACH_ROW_START_METERS: f32 = 0.25;
+/// Standing: no panel's top edge sits higher than this below the eyes, so the hands work below
+/// the chest instead of raised in front of the face (ADR-0083). A view panel hangs from this
+/// line as if upright; tilting it toward the eyes lowers its top edge further.
+const STANDING_TOP_BELOW_EYES_METERS: f32 = 0.30;
+/// Standing: the timeline panel's centre, straight ahead along the gaze on the floor plane.
+/// Its slider is the control a user touches most, so it stands nearest, where a forearm
+/// reaches with the elbow at the side (ANSUR II forearm-hand length, women's mean 0.44 m).
+const STANDING_TIMELINE_DISTANCE_METERS: f32 = 0.40;
+/// Standing: the timeline panel's centre below the eyes, just above elbow height (ANSUR II,
+/// elbow 0.52 m below the eyes for women and 0.57 m for men, on average).
+const STANDING_TIMELINE_CENTRE_BELOW_EYES_METERS: f32 = 0.50;
+/// Standing: the view panels' centres from the eyes on the floor plane, inside the reach of an
+/// outstretched arm (ANSUR II, 0.49 m from the eyes for the 5th percentile woman) and a little
+/// farther than the timeline: views take no touch, only the occasional grab of a title bar.
+const STANDING_VIEW_DISTANCE_METERS: f32 = 0.45;
+/// Standing: the space between neighbouring panels, measured along the view panels' arc.
+const STANDING_PANEL_GAP_METERS: f32 = 0.05;
 /// A head farther than this from the app volume's centre, on the floor plane, does not anchor
 /// new panels: a desktop receiver's camera watching from across the room is nobody who could
 /// reach them, and a headset user stands near the content.
@@ -88,6 +106,29 @@ pub enum PanelsAtStop {
     Keep,
 }
 
+/// Who new panels are placed for (ADR-0083). Panels that exist keep their place either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelPosture {
+    /// The panels between chest and waist, tilted toward the eyes: the timeline straight ahead
+    /// and nearest, the views beside it, alternately right and left.
+    #[default]
+    Standing,
+    /// At a desk, where panels that low would stand in the desk: the views on an arc 0.8 m
+    /// away to the right of the gaze, top edges 0.1 m below the eyes, upright; the timeline
+    /// 0.5 m ahead, 0.2 m below the eyes (ADR-0070, ADR-0072).
+    Sitting,
+}
+
+impl PanelPosture {
+    /// For logs: "standing" or "seated".
+    fn user_description(self) -> &'static str {
+        match self {
+            Self::Standing => "standing",
+            Self::Sitting => "seated",
+        }
+    }
+}
+
 /// One QAROS GUI panel per published 2D view, each showing a CPU video sender of this viewer
 /// fed from the view's image, and with [`QarosPanels::with_timeline_panel`] one timeline panel
 /// for the run. Panels go by common names `<view>.stream.<volume>.rerun` and
@@ -116,6 +157,7 @@ pub struct QarosPanels {
     panels: BTreeMap<String, GuiPanelId>,
     failed: BTreeSet<String>,
     at_stop: PanelsAtStop,
+    posture: PanelPosture,
     /// The head that places new panels, gravity-level: they open within reach of it. Set once.
     reach_anchor: Option<Pose>,
     /// When a head near the app volume first streamed, which starts [`HEADSET_WAIT`].
@@ -169,6 +211,7 @@ impl QarosPanels {
             panels: BTreeMap::new(),
             failed: BTreeSet::new(),
             at_stop: PanelsAtStop::default(),
+            posture: PanelPosture::default(),
             reach_anchor: None,
             first_near_head: None,
             viewer_devices: BTreeMap::new(),
@@ -193,9 +236,8 @@ impl QarosPanels {
     /// Also opens one timeline panel, whether or not any view is published, showing the image
     /// published under [`TIMELINE_IMAGE_KEY`] once there is one, with its gestures going to
     /// `gestures`. A new one opens once a head places panels ([`QarosPanels::consider_head`]),
-    /// [`TIMELINE_FORWARD_METERS`] in front of that head and [`TIMELINE_BELOW_EYES_METERS`]
-    /// below its eyes, facing them; one an earlier run left is reattached, kept and hidden at
-    /// Stop like the views' panels.
+    /// straight ahead of that head and below its eyes, facing them, as [`PanelPosture`] says;
+    /// one an earlier run left is reattached, kept and hidden at Stop like the views' panels.
     #[must_use]
     pub fn with_timeline_panel(mut self, gestures: PanelGestures) -> Self {
         self.timeline_gestures = Some(gestures);
@@ -205,6 +247,12 @@ impl QarosPanels {
     #[must_use]
     pub fn with_panels_at_stop(mut self, at_stop: PanelsAtStop) -> Self {
         self.at_stop = at_stop;
+        self
+    }
+
+    #[must_use]
+    pub fn with_panel_posture(mut self, posture: PanelPosture) -> Self {
+        self.posture = posture;
         self
     }
 
@@ -229,9 +277,16 @@ impl QarosPanels {
     /// seconds on 3177. A panel
     /// closed while held stays closed until the next run (ADR-0075): it is still counted as
     /// held, so it is not claimed again.
+    ///
+    /// Held view panels follow the layout (ADR-0082): one whose view is no longer among
+    /// `published_view_names`, because another recording became active or the blueprint
+    /// dropped or hid the view, is hidden, and shown again once the view is back among `views`.
     pub fn sync(&mut self, views: &[PanelView], published_view_names: &[String]) {
         let now = Instant::now();
         self.streams.maintain(&self.images, now, stream_panel_size);
+        let settled_view_names: Vec<String> = views.iter().map(|view| view.name.clone()).collect();
+        self.streams
+            .follow_published_views(published_view_names, &settled_view_names);
         let mut wanted: Vec<WantedPanel<'_>> = views.iter().map(WantedPanel::View).collect();
         if self.timeline_gestures.is_some() {
             wanted.push(WantedPanel::Timeline);
@@ -401,14 +456,16 @@ impl QarosPanels {
         self.reach_anchor = Some(anchor);
         if device.is_some_and(PeerDevice::is_headset) {
             log::info!(
-                "qaros: new panels open within reach of {viewer}, at {}",
-                anchor.position
+                "qaros: new panels open within reach of {viewer}, at {}, placed for a {} user",
+                anchor.position,
+                self.posture.user_description()
             );
         } else {
             log::info!(
                 "qaros: no headset near the app volume for {HEADSET_WAIT:?}; new panels open \
-                 within reach of {viewer}, at {}",
-                anchor.position
+                 within reach of {viewer}, at {}, placed for a {} user",
+                anchor.position,
+                self.posture.user_description()
             );
         }
     }
@@ -441,18 +498,19 @@ impl QarosPanels {
     fn panel_config(&self, wanted: &WantedPanel<'_>, slot: usize) -> GuiPanelConfig {
         let common_name = self.common_name(wanted.name());
         let (pose, size) = match wanted {
-            WantedPanel::View(view) => (
-                self.panel_pose(slot),
-                stream_panel_size(view.width_in_pixel, view.height_in_pixel),
-            ),
-            WantedPanel::Timeline => (
-                self.timeline_panel_pose(),
-                self.images
+            WantedPanel::View(view) => {
+                let size = stream_panel_size(view.width_in_pixel, view.height_in_pixel);
+                (self.panel_pose(slot, size.height), size)
+            }
+            WantedPanel::Timeline => {
+                let size = self
+                    .images
                     .latest(TIMELINE_IMAGE_KEY)
                     .map_or_else(timeline_panel_size, |image| {
                         stream_panel_size(image.width, image.height)
-                    }),
-            ),
+                    });
+                (self.timeline_panel_pose(size.height), size)
+            }
         };
         GuiPanelConfig {
             display_name: Some(common_name.clone()),
@@ -539,9 +597,12 @@ impl QarosPanels {
         hidden
     }
 
-    fn panel_pose(&self, slot: usize) -> Pose {
+    fn panel_pose(&self, slot: usize, panel_height: f32) -> Pose {
         if let Some(anchor) = self.reach_anchor {
-            return panel_pose_within_reach(anchor, slot);
+            return match self.posture {
+                PanelPosture::Standing => standing_view_panel_pose(anchor, slot, panel_height),
+                PanelPosture::Sitting => panel_pose_within_reach(anchor, slot),
+            };
         }
         let volume = self.connection.volume_config();
         panel_pose_beside_volume(from_qaros_pose(volume.pose), volume.size, slot)
@@ -549,9 +610,14 @@ impl QarosPanels {
 
     /// Without a head a new panel does not open, and an existing panel keeps its place
     /// whatever pose it is given, so the fallback is never seen.
-    fn timeline_panel_pose(&self) -> Pose {
-        self.reach_anchor
-            .map_or_else(|| self.panel_pose(0), timeline_panel_pose_facing)
+    fn timeline_panel_pose(&self, panel_height: f32) -> Pose {
+        match (self.reach_anchor, self.posture) {
+            (Some(anchor), PanelPosture::Standing) => {
+                standing_timeline_panel_pose(anchor, panel_height)
+            }
+            (Some(anchor), PanelPosture::Sitting) => timeline_panel_pose_facing(anchor),
+            (None, _) => self.panel_pose(0, panel_height),
+        }
     }
 }
 
@@ -565,14 +631,60 @@ fn timeline_panel_pose_facing(head: Pose) -> Pose {
     let forward = head.transform_vector(Vec3::NEG_Z);
     let centre =
         head.position + forward * TIMELINE_FORWARD_METERS - Vec3::Y * TIMELINE_BELOW_EYES_METERS;
-    let away_from_head = centre - head.position;
-    let level_distance = Vec3::new(away_from_head.x, 0.0, away_from_head.z).length();
-    let yaw = away_from_head.x.atan2(away_from_head.z);
-    let tilt = (-away_from_head.y).atan2(level_distance);
+    pose_facing_the_eyes(head.position, centre, TIMELINE_PANEL_HEIGHT_METERS)
+}
+
+/// Room pose, by its top edge's midpoint, of a panel `panel_height` tall whose centre stands at
+/// `centre` and whose front faces `eyes`: it turns about +Y to the eyes and tilts back about
+/// its top edge's axis, so the top edge stays level. The mixer turns a panel to face the
+/// viewing head once the head leaves a 15 degree cone about its front, so a panel created
+/// facing the eyes keeps its pose instead of swinging at its first frame.
+fn pose_facing_the_eyes(eyes: Vec3, centre: Vec3, panel_height: f32) -> Pose {
+    let away_from_eyes = centre - eyes;
+    let level_distance = Vec3::new(away_from_eyes.x, 0.0, away_from_eyes.z).length();
+    let yaw = away_from_eyes.x.atan2(away_from_eyes.z);
+    let tilt = (-away_from_eyes.y).atan2(level_distance);
     // Panel +Z points away from the eyes, so its -Z front faces them.
     let orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(tilt);
-    let top_centre = centre + orientation * Vec3::Y * (TIMELINE_PANEL_HEIGHT_METERS * 0.5);
+    let top_centre = centre + orientation * Vec3::Y * (panel_height * 0.5);
     Pose::new(orientation, top_centre)
+}
+
+/// Standing: the timeline panel's room pose for `head` (gravity-level), its centre
+/// [`STANDING_TIMELINE_DISTANCE_METERS`] straight ahead and
+/// [`STANDING_TIMELINE_CENTRE_BELOW_EYES_METERS`] below the eyes, facing them.
+fn standing_timeline_panel_pose(head: Pose, panel_height: f32) -> Pose {
+    let forward = head.transform_vector(Vec3::NEG_Z);
+    let centre = head.position + forward * STANDING_TIMELINE_DISTANCE_METERS
+        - Vec3::Y * STANDING_TIMELINE_CENTRE_BELOW_EYES_METERS;
+    pose_facing_the_eyes(head.position, centre, panel_height)
+}
+
+/// Standing: the room pose of the view panel in `slot`, `panel_height` tall, for `head`
+/// (gravity-level). Its centre stands [`STANDING_VIEW_DISTANCE_METERS`] from the eyes on the
+/// floor plane and [`STANDING_TOP_BELOW_EYES_METERS`] plus half its height below them, and it
+/// faces the eyes. Even slots go right of the timeline and odd ones left, each pair one place
+/// farther out, [`STANDING_PANEL_GAP_METERS`] apart along the arc, so the panels a run opens
+/// first stand nearest the gaze.
+fn standing_view_panel_pose(head: Pose, slot: usize, panel_height: f32) -> Pose {
+    let half_width = PANEL_WIDTH_METERS * 0.5;
+    let timeline_half_angle = half_width.atan2(STANDING_TIMELINE_DISTANCE_METERS);
+    let view_half_angle = half_width.atan2(STANDING_VIEW_DISTANCE_METERS);
+    let gap_angle = STANDING_PANEL_GAP_METERS / STANDING_VIEW_DISTANCE_METERS;
+    #[allow(clippy::cast_precision_loss)]
+    let places_out = (slot / 2) as f32;
+    let angle_from_gaze = timeline_half_angle
+        + gap_angle
+        + view_half_angle
+        + places_out * (2.0 * view_half_angle + gap_angle);
+    let toward_the_right = if slot.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let angle_to_the_right = toward_the_right * angle_from_gaze;
+    let forward = head.transform_vector(Vec3::NEG_Z);
+    let right = head.transform_vector(Vec3::X);
+    let away_from_head = forward * angle_to_the_right.cos() + right * angle_to_the_right.sin();
+    let centre = head.position + away_from_head * STANDING_VIEW_DISTANCE_METERS
+        - Vec3::Y * (STANDING_TOP_BELOW_EYES_METERS + panel_height * 0.5);
+    pose_facing_the_eyes(head.position, centre, panel_height)
 }
 
 /// What a sync does with the visible panels of earlier runs in its listing.
@@ -1121,6 +1233,220 @@ mod tests {
             panel.transform_vector(Vec3::X).y.abs() < EPSILON,
             "the top edge level"
         );
+    }
+
+    /// ANSUR II (2012, U.S. Army), means below standing eye height: chest height 0.35 m for both
+    /// sexes, waist height at the navel 0.54 m for women and 0.59 m for men.
+    const CHEST_BELOW_EYES_METERS: f32 = 0.35;
+    const WAIST_BELOW_EYES_METERS: f32 = 0.56;
+    /// The 1016x665 view of the measured sessions, and the timeline's 960x256 image.
+    const VIEW_HEIGHT_METERS: f32 = 0.105 + 0.37 * 665.0 / 1016.0;
+    const TIMELINE_HEIGHT_METERS: f32 = 0.105 + 0.37 * 256.0 / 960.0;
+
+    struct PlacedPanel {
+        centre: Vec3,
+        top_below_eyes: f32,
+        centre_below_eyes: f32,
+        distance_on_the_floor: f32,
+        /// Angle of the panel's front above the horizon, at most 60 degrees in the mixer.
+        front_elevation_degrees: f32,
+        /// Positive right of the gaze.
+        degrees_right_of_gaze: f32,
+    }
+
+    fn measure(head: Pose, panel: Pose, panel_height: f32) -> PlacedPanel {
+        let centre = panel.position - panel.transform_vector(Vec3::Y) * (panel_height * 0.5);
+        let to_centre = centre - head.position;
+        let on_the_floor = Vec3::new(to_centre.x, 0.0, to_centre.z);
+        let front_normal = panel.transform_vector(Vec3::NEG_Z);
+        let to_the_eyes = (head.position - centre).normalize();
+        assert!(
+            front_normal.abs_diff_eq(to_the_eyes, EPSILON),
+            "front {front_normal} faces the eyes along {to_the_eyes}"
+        );
+        assert!(
+            panel.transform_vector(Vec3::X).y.abs() < EPSILON,
+            "the top edge level"
+        );
+        let forward = head.transform_vector(Vec3::NEG_Z);
+        let right = head.transform_vector(Vec3::X);
+        PlacedPanel {
+            centre,
+            top_below_eyes: head.position.y - panel.position.y,
+            centre_below_eyes: -to_centre.y,
+            distance_on_the_floor: on_the_floor.length(),
+            front_elevation_degrees: front_normal.y.asin().to_degrees(),
+            degrees_right_of_gaze: on_the_floor
+                .dot(right)
+                .atan2(on_the_floor.dot(forward))
+                .to_degrees(),
+        }
+    }
+
+    fn assert_standing_ergonomics(placed: &PlacedPanel) {
+        assert!(
+            placed.top_below_eyes >= STANDING_TOP_BELOW_EYES_METERS - EPSILON,
+            "top edge {} m below the eyes",
+            placed.top_below_eyes
+        );
+        assert!(
+            (CHEST_BELOW_EYES_METERS..=WAIST_BELOW_EYES_METERS).contains(&placed.centre_below_eyes),
+            "centre {} m below the eyes, outside chest to waist",
+            placed.centre_below_eyes
+        );
+        assert!(
+            (0.40 - EPSILON..=0.45 + EPSILON).contains(&placed.distance_on_the_floor),
+            "{} m from the eyes on the floor plane",
+            placed.distance_on_the_floor
+        );
+        assert!(
+            placed.front_elevation_degrees <= 60.0,
+            "front {} degrees above the horizon, past the mixer's tilt limit",
+            placed.front_elevation_degrees
+        );
+    }
+
+    #[test]
+    fn standing_the_timeline_stands_straight_ahead_just_above_elbow_height() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let timeline = measure(
+            head,
+            standing_timeline_panel_pose(head, TIMELINE_HEIGHT_METERS),
+            TIMELINE_HEIGHT_METERS,
+        );
+        assert_standing_ergonomics(&timeline);
+        assert!(
+            timeline
+                .centre
+                .abs_diff_eq(Vec3::new(0.0, 1.1, -0.4), EPSILON),
+            "centre {}",
+            timeline.centre
+        );
+        // Tilted back by atan(0.5 / 0.4), about 51 degrees, the top edge rises
+        // 0.102 * cos(51.3) m above the centre: 0.436 m below the eyes.
+        assert!(
+            (timeline.top_below_eyes - 0.436).abs() < 1e-3,
+            "{}",
+            timeline.top_below_eyes
+        );
+        assert!((timeline.front_elevation_degrees - 51.34).abs() < 0.01);
+    }
+
+    #[test]
+    fn standing_one_view_hangs_from_thirty_centimetres_below_the_eyes_right_of_the_timeline() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let view = measure(
+            head,
+            standing_view_panel_pose(head, 0, VIEW_HEIGHT_METERS),
+            VIEW_HEIGHT_METERS,
+        );
+        assert_standing_ergonomics(&view);
+        // 0.30 m plus half of a 0.347 m panel.
+        assert!(
+            (view.centre_below_eyes - 0.474).abs() < 1e-3,
+            "{}",
+            view.centre_below_eyes
+        );
+        assert!((view.distance_on_the_floor - 0.45).abs() < EPSILON);
+        // Clear of the timeline: atan(0.225 / 0.4) + 0.05 / 0.45 + atan(0.225 / 0.45), 62 degrees.
+        assert!(
+            (view.degrees_right_of_gaze - 62.3).abs() < 0.1,
+            "{}",
+            view.degrees_right_of_gaze
+        );
+    }
+
+    #[test]
+    fn standing_several_views_alternate_right_and_left_of_the_timeline_without_touching() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let timeline_pose = standing_timeline_panel_pose(head, TIMELINE_HEIGHT_METERS);
+        let timeline = measure(head, timeline_pose, TIMELINE_HEIGHT_METERS);
+        assert_standing_ergonomics(&timeline);
+        let view_poses: Vec<Pose> = (0..4)
+            .map(|slot| standing_view_panel_pose(head, slot, VIEW_HEIGHT_METERS))
+            .collect();
+        let views: Vec<PlacedPanel> = view_poses
+            .iter()
+            .map(|pose| measure(head, *pose, VIEW_HEIGHT_METERS))
+            .collect();
+        for view in &views {
+            assert_standing_ergonomics(view);
+        }
+        let sides: Vec<bool> = views
+            .iter()
+            .map(|view| view.degrees_right_of_gaze > 0.0)
+            .collect();
+        assert_eq!(
+            sides,
+            [true, false, true, false],
+            "right, left, right, left"
+        );
+        assert!(
+            (views[0].degrees_right_of_gaze + views[1].degrees_right_of_gaze).abs() < 0.01,
+            "the first two mirror each other"
+        );
+        assert!(views[2].degrees_right_of_gaze > views[0].degrees_right_of_gaze);
+        // Neighbours stand the gap apart at their nearest edges: the timeline's ends against
+        // the first two views', and each view's outer end against the next one out. Panel +X
+        // runs along the top edge to the viewer's left.
+        let half_width = PANEL_WIDTH_METERS * 0.5;
+        let end = |pose: Pose, toward_viewer_left: f32| {
+            pose.position + pose.transform_vector(Vec3::X) * (half_width * toward_viewer_left)
+        };
+        let nearest_ends = [
+            (end(timeline_pose, -1.0), end(view_poses[0], 1.0)),
+            (end(timeline_pose, 1.0), end(view_poses[1], -1.0)),
+            (end(view_poses[0], -1.0), end(view_poses[2], 1.0)),
+            (end(view_poses[1], 1.0), end(view_poses[3], -1.0)),
+        ];
+        for (inner, outer) in nearest_ends {
+            let apart = Vec3::new(outer.x - inner.x, 0.0, outer.z - inner.z).length();
+            assert!(apart >= STANDING_PANEL_GAP_METERS, "{apart} m apart");
+        }
+    }
+
+    #[test]
+    fn standing_a_square_view_still_centres_above_the_waist() {
+        let head = Pose::from_translation(Vec3::new(0.0, 1.6, 0.0));
+        let square_height = stream_panel_size(800, 800).height;
+        let view = measure(
+            head,
+            standing_view_panel_pose(head, 1, square_height),
+            square_height,
+        );
+        assert_standing_ergonomics(&view);
+    }
+
+    #[test]
+    fn standing_panels_follow_a_turned_tilted_moved_head_by_its_heading() {
+        let quarter_turn_left = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let looking_down = Pose::new(
+            quarter_turn_left * Quat::from_rotation_x(-0.6),
+            Vec3::new(1.0, 1.7, -2.0),
+        );
+        let head = gravity_level(looking_down);
+        let timeline = measure(
+            head,
+            standing_timeline_panel_pose(head, TIMELINE_HEIGHT_METERS),
+            TIMELINE_HEIGHT_METERS,
+        );
+        assert_standing_ergonomics(&timeline);
+        // The head looks along room -X: the centre 0.4 m that way and 0.5 m below the eyes.
+        assert!(
+            timeline
+                .centre
+                .abs_diff_eq(Vec3::new(0.6, 1.2, -2.0), EPSILON),
+            "centre {}",
+            timeline.centre
+        );
+        let view = measure(
+            head,
+            standing_view_panel_pose(head, 0, VIEW_HEIGHT_METERS),
+            VIEW_HEIGHT_METERS,
+        );
+        assert_standing_ergonomics(&view);
+        assert!(view.centre.x < head.position.x, "in front of the head");
+        assert!(view.centre.z < head.position.z, "to the head's right");
     }
 
     #[test]

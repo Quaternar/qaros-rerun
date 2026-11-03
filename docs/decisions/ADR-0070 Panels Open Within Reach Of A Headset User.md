@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0070: New panels open within reach of a headset user's head; existing panels stay where the Hub keeps them
 
+> The row's numbers are amended by ADR-0083: new panels are placed for a standing user by default, and this row is the `--panel-posture sitting` preset. The anchor, the waiting and the rule that an existing panel keeps its place stand.
+
 ## Context
 
 A GUI panel's pose is the midpoint of its top edge, with panel -Z as the front normal toward the viewer ([HDR] L781-800, [CS] "GUI panels"). ADR-0049 posed panels in a row right of the app volume, facing a viewer assumed on the volume's +Z side. With the default 2 m volume that row starts more than 1 m right of the volume's centre, at its centre depth, beyond the reach of a user standing at the content, and GUI panels are operated by touch in the headset.
