@@ -18,7 +18,10 @@ mod projection;
 pub use coordinates::{AxisDirection, CoordinatesError, ViewCoordinates};
 pub use depth::{DepthEncoding, DepthRange, INFINITE_FAR_PLANE_MARKER};
 pub use eye::{EyeCamera, EyeCameraError};
-pub use placement::{AppPlacement, VolumeTransform};
+pub use placement::{
+    AUTO_FIT_FILL, AppPlacement, DataFit, MEANINGFUL_EXTENT_RELATIVE, VolumeTransform,
+    bounds_are_meaningful,
+};
 pub use pose::{Fov, NearFar, Pose};
 pub use projection::{
     RectF32, SymmetricDecomposition, off_axis_infinite_reverse_z, principal_point_in_pixels,

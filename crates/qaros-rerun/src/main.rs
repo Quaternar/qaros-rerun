@@ -20,6 +20,7 @@ mod panel_capture;
 mod panel_render;
 #[cfg(feature = "qaros")]
 mod qaros_setup;
+mod recording_fit;
 mod render_loop;
 #[cfg(feature = "qaros")]
 mod timeline_panel;
@@ -204,6 +205,7 @@ fn headset_settings(options: &Options, memory_knobs: &MemoryKnobs) -> HeadsetSet
     HeadsetSettings {
         placement: options.placement(),
         world_coordinates_override: options.world_coordinates_override,
+        fit: options.fit_settings(),
         transparent_background: !options.opaque_background,
         frame_stamp: options.frame_stamp,
         reuse_eye_resources: memory_knobs.reuse_eye_resources,

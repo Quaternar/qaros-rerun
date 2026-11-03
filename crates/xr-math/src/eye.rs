@@ -56,7 +56,7 @@ impl EyeCamera {
             fov,
             view_from_world: world_from_eye.inverse(),
             decomposition: SymmetricDecomposition::from_fov(fov),
-            near_plane_in_world_units: depth_range.near() / placement.app_scale,
+            near_plane_in_world_units: depth_range.near() / placement.room_meters_per_world_unit(),
         })
     }
 
@@ -147,18 +147,23 @@ mod tests {
     #[test]
     fn depth_reports_room_distance_regardless_of_scale() {
         let room_from_eye = Pose::from_translation(Vec3::new(0.0, 0.0, 3.0));
-        for app_scale in [0.01, 0.5, 1.0, 10.0] {
+        for (app_scale, data_scale) in [(0.01, 1.0), (0.5, 1.0), (1.0, 1.8e-6), (10.0, 0.18)] {
+            let data_center = Vec3::new(0.16, 1.0, 0.0) / data_scale;
             let placement = AppPlacement {
                 app_scale,
+                data_fit: crate::DataFit {
+                    center: data_center,
+                    scale: data_scale,
+                },
                 ..AppPlacement::default()
             };
             let camera =
                 EyeCamera::new(room_from_eye, headset_fov(), placement, depth_range()).unwrap();
-            let reverse_depth = camera.project_world_point(Vec3::ZERO).z;
+            let reverse_depth = camera.project_world_point(data_center).z;
             let room_distance = depth_range().distance_from_reverse_z(reverse_depth);
             assert!(
                 (room_distance - 3.0).abs() < 1e-3,
-                "{app_scale}: {room_distance}"
+                "{app_scale} x {data_scale}: {room_distance}"
             );
         }
     }

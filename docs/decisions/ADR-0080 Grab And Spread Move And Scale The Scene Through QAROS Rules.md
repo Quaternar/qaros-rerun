@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0080: Grab and spread move and scale the scene through QAROS's own rules; the viewer follows
 
+> Amended by ADR-0092: the app scale a spread changes starts at 1 and is only the user's zoom, so a spread scales the fitted scene around its own size at any data scale.
+
 ## Context
 
 In the glasses, Rerun's camera controls become moves of the content: a one-hand grab moves the scene and a two-hand spread scales it (D5, tool 2 of the proof of concept). The viewer creates its app volume without a gesture configuration, so QAROS applies its default rules: one-hand 6DoF to the app pose (translation only) and the two-hand distance to the app scale, folded into the volume's transform by the runtime itself ([HDR] L1437-1523, L5112-5197). ADR-0066 already maps every frame with the transform QAROS holds, but reads it again only on a volume update or every 100 ms, which would move the content in steps during a grab. The `qaros` crate does not wrap app volume gestures.

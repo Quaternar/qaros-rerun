@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use glam::Vec3;
 use vulkan_device::PhysicalDeviceSelector;
-use xr_math::{AppPlacement, DepthEncoding, DepthRange, Pose, ViewCoordinates};
+use xr_math::{AppPlacement, DataFit, DepthEncoding, DepthRange, Pose, ViewCoordinates};
+
+use crate::recording_fit::FitSettings;
 
 pub const USAGE: &str = "\
 qaros-rerun: the Rerun viewer with a headset renderer
@@ -62,14 +64,17 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
     --qaros-library PATH       qar-streaming-c library, overriding QAROS_DLL
     --pose-space app|room      space of the stream's eye poses (default app, the volume's app
                                content space in app units, as QAROS documents it): app maps
-                               the poses into the room with --origin, --yaw and --scale and
-                               hands near and far back in app units (room meters / --scale);
-                               room uses the poses as they come, near and far in room meters
-    --volume-size W,L,H        size of the app volume in meters (default 2,2,2)
+                               the poses into the room with the volume's pose, app pose and
+                               app scale (the user's zoom) and hands near and far back in app
+                               units (room meters / app scale); room uses the poses as they
+                               come, near and far in room meters
+    --volume-size W,L,H        size of the app volume in meters (default 2,2,2); auto-fit
+                               sizes the data to it
     --volume-name NAME         the app volume's name (default rerun); viewers running at once
                                need different names, or QAROS gives them one volume and stream
-    --reset-placement          start the app volume at the place --origin and --yaw ask for and
-                               forget where it was last moved to (see Placement below)
+    --reset-placement          start the app volume at the place --origin and --yaw ask for, at
+                               zoom 1, and forget where it was last moved to (see Placement
+                               below)
     --display-name NAME        the app volume's label for people (default Rerun); the viewer
                                shows in the peer list as 'NAME viewer'
     --color-format bgra|rgba   color format requested from the sender (default bgra)
@@ -103,15 +108,21 @@ QAROS sink (the library is QAROS_DLL, else the installed QAROS by the default lo
                                viewer frame old
 
 Placement of Rerun's world in the room (OpenXR: Y up, -Z forward, meters; with --sink qaros
-also the app volume's center, app pose and app scale). With --sink qaros a volume an earlier run
-hid at Stop is taken over where it stands, with its app scale. A volume QAROS creates afresh
-starts where it was last moved to under the same --volume-name, as long as --origin and --yaw
-are the ones it was moved from, with the app scale at --scale. The place is kept in
-qaros-rerun.volume-placements.json next to the onboarding id file; --reset-placement forgets it
-and sets either volume to the place the flags ask for:
-    --origin X,Y,Z             room position of the world center (default 0,0.5,-1.6)
-    --center X,Y,Z             Rerun-world point placed at --origin, the walk circles it (default 0,0,0)
-    --scale S                  room meters per Rerun unit (default 1)
+also the app volume's center and app pose). Each recording the 3D view shows gets a data fit
+once, its center and scale in the volume: the recording the viewer was started for (the first
+with content) takes --center and --scale when either is given, every other recording is fitted
+to its scene bounds once they settle (centered, its largest extent 0.7 of the volume's smallest
+side). The app scale QAROS holds starts at 1 and is the user's zoom (a two-hand spread). With
+--sink qaros a volume an earlier run hid at Stop is taken over where it stands, with its zoom. A
+volume QAROS creates afresh starts where it was last moved to and zoomed under the same
+--volume-name, as long as --origin and --yaw are the ones it was moved from. The place is kept
+in qaros-rerun.volume-placements.json next to the onboarding id file; --reset-placement forgets
+it and sets either volume to the place the flags ask for, at zoom 1:
+    --origin X,Y,Z             room position of the data's center (default 0,0.5,-1.6)
+    --center X,Y,Z             Rerun-world point placed at --origin (default: auto-fit)
+    --scale S                  room meters per Rerun unit at zoom 1 (default: auto-fit)
+    --auto-fit on|off          fit recordings to their scene bounds (default on); off places
+                               every recording with --center and --scale (default 0,0,0 and 1)
     --yaw DEGREES              turn the world about the room's up axis (default 0)
     --up CODE                  override the view coordinates, e.g. RFU (default: from the view)
 
@@ -483,8 +494,12 @@ pub struct Options {
     pub quit_when_done: bool,
     pub opaque_background: bool,
     pub world_origin: Vec3,
-    pub world_center: Vec3,
-    pub world_scale: f32,
+    /// `--center`; absent leaves the center to the recording's fit.
+    pub world_center: Option<Vec3>,
+    /// `--scale`; absent leaves the data scale to the recording's fit.
+    pub world_scale: Option<f32>,
+    /// `--auto-fit`: recordings other than the start one are fitted to their scene bounds.
+    pub auto_fit: bool,
     pub world_yaw_degrees: f32,
     pub world_coordinates_override: Option<ViewCoordinates>,
     pub depth_range: DepthRange,
@@ -525,8 +540,9 @@ impl Default for Options {
             quit_when_done: false,
             opaque_background: false,
             world_origin: Vec3::new(0.0, 0.5, -1.6),
-            world_center: Vec3::ZERO,
-            world_scale: 1.0,
+            world_center: None,
+            world_scale: None,
+            auto_fit: true,
             world_yaw_degrees: 0.0,
             world_coordinates_override: None,
             depth_range: DepthRange {
@@ -557,14 +573,34 @@ pub enum ParseOutcome {
 }
 
 impl Options {
+    /// The volume at `--origin` turned by `--yaw`, at zoom 1, with the flags' data fit (or
+    /// Rerun's origin at one meter per unit) until a recording gets its own.
     pub fn placement(&self) -> AppPlacement {
         AppPlacement {
             volume_pose: Pose::from_translation(self.world_origin),
-            app_scale: self.world_scale,
-            world_center: self.world_center,
+            data_fit: self.flag_fit().unwrap_or_default(),
             ..AppPlacement::default()
         }
         .with_up_axis_rotation(self.world_yaw_degrees.to_radians())
+    }
+
+    /// The fit `--center` and `--scale` ask for, when either is given.
+    pub fn flag_fit(&self) -> Option<DataFit> {
+        if self.world_center.is_none() && self.world_scale.is_none() {
+            return None;
+        }
+        Some(DataFit {
+            center: self.world_center.unwrap_or(Vec3::ZERO),
+            scale: self.world_scale.unwrap_or(1.0),
+        })
+    }
+
+    pub fn fit_settings(&self) -> FitSettings {
+        FitSettings {
+            flag_fit: self.flag_fit(),
+            auto_fit: self.auto_fit,
+            volume_size: self.qaros.volume_size,
+        }
     }
 
     fn apply_graphics_flag(&mut self, flag: &str, value: String) -> Result<(), ParseOutcome> {
@@ -779,8 +815,15 @@ impl Options {
                 "--raw-depth" => options.write_raw_depth = true,
                 "--depth-scale-down" => options.depth_scale_down = parse_number(&flag, &value()?)?,
                 "--origin" => options.world_origin = parse_vector(&flag, &value()?)?,
-                "--center" => options.world_center = parse_vector(&flag, &value()?)?,
-                "--scale" => options.world_scale = parse_number(&flag, &value()?)?,
+                "--center" => options.world_center = Some(parse_vector(&flag, &value()?)?),
+                "--scale" => options.world_scale = Some(parse_number(&flag, &value()?)?),
+                "--auto-fit" => {
+                    options.auto_fit = match value()?.as_str() {
+                        "on" => true,
+                        "off" => false,
+                        other => return Err(invalid(&flag, other)),
+                    }
+                }
                 "--yaw" => options.world_yaw_degrees = parse_number(&flag, &value()?)?,
                 "--up" => {
                     let code = value()?;
@@ -826,7 +869,10 @@ impl Options {
                 "need 0 < near < far, both finite; got {near} and {far}"
             ))
         })?;
-        if !(options.world_scale.is_finite() && options.world_scale > 0.0) {
+        if options
+            .world_scale
+            .is_some_and(|scale| !(scale.is_finite() && scale > 0.0))
+        {
             return Err(ParseOutcome::Error("--scale must be positive".to_owned()));
         }
         options.check_qaros_flags()?;
@@ -1100,8 +1146,13 @@ mod tests {
         assert!(options.quit_when_done);
         assert!(options.opaque_background);
         assert_eq!(options.world_origin, Vec3::new(1.0, 2.0, -3.0));
-        assert_eq!(options.world_center, Vec3::new(10.0, -20.0, 3.0));
-        assert!((options.world_scale - 0.25).abs() < f32::EPSILON);
+        assert_eq!(
+            options.flag_fit(),
+            Some(DataFit {
+                center: Vec3::new(10.0, -20.0, 3.0),
+                scale: 0.25,
+            })
+        );
         assert_eq!(
             options.world_coordinates_override,
             Some(ViewCoordinates::RIGHT_UP_BACK)
@@ -1642,6 +1693,45 @@ mod tests {
                 matches!(parse(arguments), Err(ParseOutcome::Error(_))),
                 "{arguments:?}"
             );
+        }
+    }
+
+    /// `--scale` is the data's fit; QAROS's app scale starts at 1, the user's zoom (ADR-0092).
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the defaults are exact")]
+    fn the_flags_make_the_data_fit_and_the_app_scale_starts_at_one() {
+        let defaults = parse(&[]).unwrap();
+        assert_eq!(defaults.flag_fit(), None);
+        assert!(defaults.auto_fit);
+        assert_eq!(defaults.placement().app_scale, 1.0);
+        assert_eq!(defaults.placement().data_fit, DataFit::default());
+
+        let scale_only = parse(&["--scale", "1.8e-6"]).unwrap();
+        assert_eq!(
+            scale_only.flag_fit(),
+            Some(DataFit {
+                center: Vec3::ZERO,
+                scale: 1.8e-6,
+            })
+        );
+        assert_eq!(scale_only.placement().app_scale, 1.0);
+        assert_eq!(scale_only.placement().volume_transform().app_scale, 1.0);
+        assert_eq!(scale_only.placement().data_fit.scale, 1.8e-6);
+
+        let center_only = parse(&["--center", "1,2,3", "--auto-fit", "off"]).unwrap();
+        assert_eq!(
+            center_only.fit_settings(),
+            FitSettings {
+                flag_fit: Some(DataFit {
+                    center: Vec3::new(1.0, 2.0, 3.0),
+                    scale: 1.0,
+                }),
+                auto_fit: false,
+                volume_size: Vec3::splat(2.0),
+            }
+        );
+        for bad in [&["--auto-fit", "maybe"][..], &["--scale", "0"][..]] {
+            assert!(matches!(parse(bad), Err(ParseOutcome::Error(_))), "{bad:?}");
         }
     }
 

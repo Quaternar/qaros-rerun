@@ -408,6 +408,7 @@ impl SpatialView3D {
             query,
             view_coordinates,
             scene_bounding_box: state.bounding_boxes.current,
+            scene_region_of_interest: state.bounding_boxes.region_of_interest_current,
             world_from_desktop_view: eye.world_from_rub_view,
             draw_data: &draw_data,
         });

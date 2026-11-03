@@ -59,7 +59,7 @@ The [quick start](docs/quick-start.md) takes your Rerun project to the headset i
 .\target\release\log-test-scene.exe 600    # second terminal: a 1 m cube, points, axes
 ```
 
-`--origin`, `--yaw`, `--scale` and `--volume-size` place your data in the room; the mixer clips content outside the app volume. Instead of `--local-app`, `--pairing-code <PAIRING-CODE>` joins with the Hub's pairing code, and `--launched-by-qaros` lets the visualizer's Source Applications panel start the viewer. The Vulkan path is the default; `--qaros-graphics cpu` selects the CPU path. `qaros-rerun.exe --help` lists every option. The [integration guide](docs/integration-guide.md) covers the QAROS runtime, the firewall, placement, and what to try when frames look wrong (`--depth`, `--pose-space`, `--color-format`).
+Each recording is fitted into the app volume by itself; `--origin`, `--yaw` and `--volume-size` place the volume in the room, and `--center` and `--scale` place the start recording by hand. The mixer clips content outside the app volume. Instead of `--local-app`, `--pairing-code <PAIRING-CODE>` joins with the Hub's pairing code, and `--launched-by-qaros` lets the visualizer's Source Applications panel start the viewer. The Vulkan path is the default; `--qaros-graphics cpu` selects the CPU path. `qaros-rerun.exe --help` lists every option. The [integration guide](docs/integration-guide.md) covers the QAROS runtime, the firewall, placement, and what to try when frames look wrong (`--depth`, `--pose-space`, `--color-format`).
 
 ## How it works
 

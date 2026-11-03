@@ -195,7 +195,13 @@ The URL is the one `log-test-scene` and the demo launcher use. From another mach
 
 ### Place your data in the app volume
 
-QAROS cuts every stream to its app volume's box ([the mixer][MIXER]). By default that box is 2 m on each side, and the point `--center` of your data (in Rerun units) sits in its middle. Data that is meters to hundreds of meters across is therefore mostly outside the box: with the defaults, only a 2 m cube around Rerun's origin can show. Fit the data with `--center` and `--scale`:
+QAROS cuts every stream to its app volume's box ([the mixer][MIXER]). By default that box is 2 m on each side. The viewer fits each recording into it by itself: once the 3D view's scene bounds settle (unchanged within 5 % for half a second, or 3 s after they first hold something while data keeps streaming in), the recording is centred on the volume with its largest extent at 0.7 of the volume's smallest side. Outliers are left out the way Rerun frames its own camera. Each recording is fitted once, keeps its fit as data streams in, and gets it back when shown again; a recording opened later with File > Open gets a fit of its own. The log names every fit (ADR-0092):
+
+```text
+headset: recording my_app/<recording id> placed with auto-fit to the scene bounds: center [0, 0, 5], data scale 1.75e-2 m per unit, from scene bounds [-40, -30, 0] to [40, 30, 10]
+```
+
+To place the recording you start with by hand, give `--center` and `--scale`; they place the first recording that shows content, and the others are still fitted unless `--auto-fit off` is given, which places every recording with the flags:
 
 1. Run the viewer with `RUST_LOG=qaros_rerun=debug`. Every headset frame logs the scene's bounding box in Rerun units and in the view's coordinates. The image sink logs it too, so you can do this before QAROS is involved.
 2. `--center` is the middle of the box: for each axis, (min + max) / 2.
@@ -215,11 +221,13 @@ The middle is `0,0,5`. The extents are 80 (right), 60 (forward) and 10 (up). Wit
 
 The data then fills 2 m by 1.5 m by 0.25 m of the room. For a larger model, grow the volume and the scale together, for example `--volume-size 4,3,1 --scale 0.05` (4 m by 3 m by 0.5 m); the room must have that space.
 
-The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.99962366, 0.99962366, 1.4) in RFU`. Its middle is `0,0,0.7`: with the default `--center 0,0,0` the top 0.4 m of its up axis lies above the volume.
+The test scene logs `scene bounds Vec3(-0.99962366, -0.99962366, 0.0) to Vec3(0.99962366, 0.99962366, 1.4) in RFU`. Its middle is `0,0,0.7`: with `--center 0,0,0` and `--auto-fit off` the top 0.4 m of its up axis lies above the volume.
 
 `--origin X,Y,Z` moves the volume, and the data with it, in the room (meters, OpenXR axes: Y up, -Z forward; default `0,0.5,-1.6`). `--yaw DEGREES` turns the data about the room's up axis.
 
-A volume a user grabbed and moved starts where it was left at the next run under the same `--volume-name`. The viewer hides the volume at Stop instead of closing it, so QAROS keeps it, with its pose, app pose and app scale, and the next run takes it over and shows it again (ADR-0089). When QAROS creates the volume afresh (the first run, or one closed in the Hub; the viewer never closes it), it starts at the last pose and app pose the viewer keeps in `qaros-rerun.volume-placements.json` next to the onboarding id file, as long as `--origin` and `--yaw` are the ones it was moved from, with the app scale at `--scale`; other `--origin` or `--yaw` values start at the new place (ADR-0085). `--reset-placement` starts at the flags' place either way and forgets the kept one.
+The data fit stays in the viewer: QAROS's app scale starts at 1 and is the user's zoom. A two-hand spread scales the fitted scene around its own size, whatever the data's units.
+
+A volume a user grabbed, moved or zoomed starts where it was left at the next run under the same `--volume-name`. The viewer hides the volume at Stop instead of closing it, so QAROS keeps it, with its pose, app pose and zoom, and the next run takes it over and shows it again (ADR-0089). A taken-over app scale outside 0.1 to 10, or equal to `--scale` as builds before ADR-0092 set it, is no zoom and starts at 1 again. When QAROS creates the volume afresh (the first run, or one closed in the Hub; the viewer never closes it), it starts at the last pose, app pose and zoom the viewer keeps in `qaros-rerun.volume-placements.json` next to the onboarding id file, as long as `--origin` and `--yaw` are the ones it was moved from; other `--origin` or `--yaw` values start at the new place (ADR-0085). `--reset-placement` starts at the flags' place and zoom 1 either way and forgets the kept one.
 
 ### What the headset shows
 
@@ -371,8 +379,8 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | `--launched-by-qaros` | off | Join as QAROS expects of an app it launches (as a local app on Windows; elsewhere with the first line of stdin, the launch invite or a code typed by hand) and stop when stdin closes; runs headless at 1280x720 unless `--window` or `--headless` is given |
 | `--qaros-library PATH` | `QAROS_DLL`, else the default lookup | The `qar-streaming-c` library |
 | `--qaros-graphics cpu\|vulkan` | `vulkan` on Windows, `cpu` elsewhere | How frames reach QAROS ([Choose the path](#choose-the-path-vulkan-or-cpu)) |
-| `--pose-space app\|room` | `app` | Space of the stream's eye poses: `app` maps them into the room with `--origin`, `--yaw` and `--scale` and reports near and far in app units; `room` takes them as they come |
-| `--volume-size W,L,H` | `2,2,2` | App volume size in meters: width (room X), length (room Z), height (room Y) |
+| `--pose-space app\|room` | `app` | Space of the stream's eye poses: `app` maps them into the room with the volume's pose, app pose and app scale (the user's zoom) and reports near and far in app units; `room` takes them as they come |
+| `--volume-size W,L,H` | `2,2,2` | App volume size in meters: width (room X), length (room Z), height (room Y); the auto-fit sizes the data to it |
 | `--volume-name NAME` | `rerun` | The app volume's name; viewers running at once need different names |
 | `--display-name NAME` | `Rerun` | The volume's label for people; the viewer's peer is "NAME viewer" |
 | `--color-format bgra\|rgba` | `bgra` | Color format requested from the sender |
@@ -384,10 +392,11 @@ For a log with more detail, set `RUST_LOG`, for example `RUST_LOG=info,qaros_rer
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--origin X,Y,Z` | `0,0.5,-1.6` | Room position of the data's center (OpenXR: Y up, -Z forward, meters); also the app volume's center |
-| `--center X,Y,Z` | `0,0,0` | Point of the data (Rerun units) placed at `--origin` |
-| `--scale S` | 1 | Room meters per Rerun unit; must be positive |
+| `--center X,Y,Z` | auto-fit | Point of the start recording's data (Rerun units) placed at `--origin`; `0,0,0` when only `--scale` is given |
+| `--scale S` | auto-fit | Room meters per Rerun unit at zoom 1 for the start recording; must be positive; 1 when only `--center` is given |
+| `--auto-fit on\|off` | `on` | Fit every recording other than the start one to its scene bounds; `off` places every recording with `--center` and `--scale` (`0,0,0` and 1 when absent) |
 | `--yaw DEGREES` | 0 | Turn the data about the room's up axis |
-| `--reset-placement` | off | Start the app volume at `--origin`, `--yaw` and `--scale`, also one an earlier run hid and this run takes over, and forget where it was last moved to |
+| `--reset-placement` | off | Start the app volume at `--origin` and `--yaw` at zoom 1, also one an earlier run hid and this run takes over, and forget where it was last moved to |
 | `--up CODE` | the view's own | Override the view coordinates, for example `RFU` |
 | `--near METERS` | 0.05 | Near plane in room meters |
 | `--far METERS` | 20 | Finite far plane in room meters |

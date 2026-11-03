@@ -57,24 +57,27 @@ Send a blueprint with a single 3D view and the 2D views you want as panels. A vi
 
 The app volume is 2 m on each side by default; data outside it is cut.
 
-1. Run once with `RUST_LOG=qaros_rerun=debug`; the log prints the scene bounds.
-2. `--center` is the middle of those bounds.
-3. `--scale` is room metres per unit of your data: the volume size divided by the data's largest extent.
+Without flags, every recording fits itself: once its scene bounds settle (half a second for a file, up to 3 s for a stream), it is centred in the volume with its largest extent at 0.7 of the volume's side. A recording opened later with File > Open gets its own fit. The log names each one: `headset: recording ... placed with auto-fit to the scene bounds: center [...], data scale ...`.
+
+To place the recording you start with by hand, as the demos do, give `--center` and `--scale` (either one is enough; the other stays at 0 or 1):
+
+1. `--center` is the middle of the data, from the fit line in the log or your own bounds.
+2. `--scale` is room metres per unit of your data: the volume size divided by the data's largest extent.
 
 ```powershell
 .\target\release\qaros-rerun.exe --sink qaros --local-app --panels --center 0,0,5 --scale 0.025
 ```
 
-`--origin` moves the volume in the room, `--yaw` turns the data. [Place your data](integration-guide.md#place-your-data-in-the-app-volume) has a worked example.
+The flags place the first recording that shows content; later recordings are still fitted to their bounds unless `--auto-fit off` is given. `--origin` moves the volume in the room, `--yaw` turns the data. [Place your data](integration-guide.md#place-your-data-in-the-app-volume) has a worked example.
 
-A volume grabbed and moved in the glasses starts where it was left at the next run, as long as `--origin` and `--yaw` stay the same; `--reset-placement` puts it back at `--origin`.
+In the glasses, a one-hand grab moves the scene and a two-hand spread zooms it, starting from 1. A volume grabbed, moved or zoomed starts where it was left at the next run, as long as `--origin` and `--yaw` stay the same; `--reset-placement` puts it back at `--origin` at zoom 1.
 
 ## If something is missing
 
 | Symptom | Check |
 | --- | --- |
 | Nothing in the headset | The viewer's log shows `rendering for user-...`; the headset's player app is running and joined to this Hub |
-| Only part of the data | `--center` and `--scale` (step 5) |
+| Only part of the data | The `placed with` line in the log; `--center` and `--scale` (step 5) |
 | No panels | `--panels` is on; the 2D views are visible in the layout (not in a hidden tab); QAROS is 3177 or later |
 | A view is not streamed | Left-handed view coordinates: set `--up` |
 | Slow with large point clouds | Shorten time windows in the blueprint; compact recordings with `rerun rrd optimize` |

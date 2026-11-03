@@ -26,9 +26,9 @@ use crate::NearFar;
 /// The `near_plane` reported with [`DepthEncoding::ReverseInfinite`], in room meters.
 ///
 /// QAROS reads a reverse-Z `near_plane` above 1e20 as an infinite far plane. The QAROS sink
-/// multiplies the planes by `1 / app_scale` on the way to app units, so the marker stays far
-/// enough below `f32::MAX` to remain finite there: no shader or log downstream meets an
-/// infinity.
+/// multiplies the planes by `1 / app_scale` on the way to app units; the app scale is the
+/// user's zoom (0.1 to 10 in practice, ADR-0092), so the marker stays above 1e20 and far enough
+/// below `f32::MAX` to remain finite there: no shader or log downstream meets an infinity.
 pub const INFINITE_FAR_PLANE_MARKER: f32 = 1.0e30;
 
 /// How depth values are written into the QAROS frame.

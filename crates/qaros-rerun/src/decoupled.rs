@@ -29,8 +29,9 @@ use xr_math::AppPlacement;
 use crate::draw_data_copy::copy_all;
 use crate::headset::{
     BegunFrames, FrameCount, HeadsetRenderer, HeadsetSettings, HeadsetSink, HeadsetStatistics,
-    SceneSource, claim_streaming_view, placement_for_view,
+    SceneSource, claim_streaming_view, fit_for_view, placement_for_view,
 };
+use crate::recording_fit::RecordingFits;
 use crate::viewer_app::{FrameHook, HeadsetFrame};
 
 /// While streaming with nothing to begin and nothing in flight, the render thread waits this
@@ -292,9 +293,21 @@ pub struct SceneCapture {
     captured: Option<RetainedScene>,
     next_sequence: u64,
     status: Arc<RenderStatus>,
+    recording_fits: RecordingFits,
 }
 
 impl SceneCapture {
+    fn new(settings: HeadsetSettings, status: Arc<RenderStatus>) -> Self {
+        Self {
+            settings,
+            streaming_view: None,
+            captured: None,
+            next_sequence: 0,
+            status,
+            recording_fits: RecordingFits::new(settings.fit),
+        }
+    }
+
     pub fn on_view_3d_frame(&mut self, frame: &View3DFrame<'_, '_>) {
         let viewer_frame = frame.viewer_ctx.egui_ctx().cumulative_pass_nr();
         if !claim_streaming_view(&mut self.streaming_view, frame.query.view_id, viewer_frame) {
@@ -303,7 +316,8 @@ impl SceneCapture {
         if self.status.is_streaming() {
             frame.viewer_ctx.egui_ctx().request_repaint();
         }
-        let placement = match placement_for_view(&self.settings, frame) {
+        let data_fit = fit_for_view(&mut self.recording_fits, frame);
+        let placement = match placement_for_view(&self.settings, data_fit, frame) {
             Ok(placement) => placement,
             Err(error) => {
                 re_log::warn_once!("headset: not streaming this view: {error}");
@@ -395,13 +409,7 @@ impl DecoupledHeadset {
                 return Err(error);
             }
         };
-        let capture = Arc::new(Mutex::new(SceneCapture {
-            settings,
-            streaming_view: None,
-            captured: None,
-            next_sequence: 0,
-            status: Arc::clone(&status),
-        }));
+        let capture = Arc::new(Mutex::new(SceneCapture::new(settings, Arc::clone(&status))));
         Ok((
             Self {
                 capture,
@@ -514,13 +522,10 @@ impl DecoupledHeadset {
         let status = Arc::new(RenderStatus::default());
         status.mark_failed();
         Self {
-            capture: Arc::new(Mutex::new(SceneCapture {
-                settings: HeadsetSettings::default(),
-                streaming_view: None,
-                captured: None,
-                next_sequence: 0,
-                status: Arc::clone(&status),
-            })),
+            capture: Arc::new(Mutex::new(SceneCapture::new(
+                HeadsetSettings::default(),
+                Arc::clone(&status),
+            ))),
             handoff: Arc::default(),
             status,
             device_sender: None,

@@ -9,6 +9,8 @@ repo: qaros-rerun
 # ADR-0066: Poses are mapped with the app volume transform QAROS holds, followed while the viewer runs
 
 > Amended by ADR-0085: the transform asked for at start, and used when the live one cannot be read, is the volume's remembered place when there is one.
+>
+> Amended by ADR-0092: the app scale QAROS holds is the user's zoom and starts at 1; `--scale` and `--center` are the viewer's data fit per recording, which QAROS never sees. Room from world is volume pose x app pose x app scale x view coordinates x data fit.
 
 ## Context
 

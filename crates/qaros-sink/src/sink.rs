@@ -707,6 +707,37 @@ mod tests {
         assert!((scaled.far - 200.0).abs() < 1e-3, "{}", scaled.far);
     }
 
+    /// The app scale is the user's zoom, starting at 1 (ADR-0092): over the zooms a spread
+    /// reaches, the marker stays finite and above QAROS's 1e20 threshold, and the far plane
+    /// (the room near plane in app units) stays positive and below it.
+    #[test]
+    fn reverse_infinite_depth_stays_valid_for_any_user_zoom() {
+        let range = DepthRange::new(0.05, 20.0, DepthEncoding::ReverseInfinite).unwrap();
+        let show = ShowInfo::from_depth_range(range);
+        for user_zoom in [0.1, 0.5, 1.0, 2.0, 10.0] {
+            let zoomed = PoseMapping {
+                app_scale: user_zoom,
+                ..pose_mapping(PoseSpace::App)
+            };
+            let declared = zoomed.show_params(show, false);
+            assert!(
+                declared.near.is_finite() && declared.near > 1.0e20,
+                "zoom {user_zoom}: near {}",
+                declared.near
+            );
+            assert!(
+                (declared.far - 0.05 / user_zoom).abs() < 1e-6,
+                "zoom {user_zoom}: far {}",
+                declared.far
+            );
+            assert!(
+                declared.near > declared.far,
+                "reverse-Z at zoom {user_zoom}"
+            );
+            assert!((declared.depth_scale - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
     fn layout_view(kind: ViewKind, eye: Eye, corners: [u32; 4]) -> VideoFrameView {
         let [start_x, start_y, end_x, end_y] = corners;
         VideoFrameView {

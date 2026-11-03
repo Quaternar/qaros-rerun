@@ -3,6 +3,7 @@
 //! turn and scale the volume in the Hub while the viewer runs. The sinks map every frame's
 //! poses, and the renderer places Rerun's world, with the transform followed here (ADR-0066).
 
+use std::ops::RangeInclusive;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -126,8 +127,8 @@ impl LiveVolume {
         }
     }
 
-    /// Reads the latest transform once more and stores it for the next run; at Stop, before
-    /// the volume is hidden or closed.
+    /// Reads the latest transform once more and stores it for the next run; at Stop, after
+    /// the volume is hidden, which it never closes (ADR-0093).
     pub(crate) fn remember_before_close(&mut self, session: &Session, volume: AppVolumeId) {
         let last = self.refresh(session, volume, true);
         if let Some(memory) = &mut self.placement_memory {
@@ -185,6 +186,25 @@ pub(crate) fn read_latest(
         app_pose: from_qaros_pose(volumes.latest_app_pose(volume)?),
         app_scale: volumes.latest_app_scale(volume)?,
     })
+}
+
+/// The app scales a person sets as a zoom (ADR-0092): the viewer asks for 1, and a two-hand
+/// spread or the Hub changes it from there. A taken-over or remembered app scale outside this
+/// range is not a zoom worth keeping: the Hub clamps at 0.001, and builds before ADR-0092 set
+/// the data scale (1.8e-6 for air traffic) as the app scale.
+pub(crate) const USER_ZOOM_RANGE: RangeInclusive<f32> = 0.1..=10.0;
+
+/// Whether `app_scale`, held by a volume this run takes over, is a zoom a person set. Not when
+/// it lies outside [`USER_ZOOM_RANGE`], or when it is exactly `--scale` (other than 1): builds
+/// before ADR-0092 handed `--scale` to QAROS as the app scale, and a spread never lands on it
+/// to the bit.
+#[allow(
+    clippy::float_cmp,
+    reason = "an app scale set from the flag is the flag's value to the bit"
+)]
+pub(crate) fn is_user_zoom(app_scale: f32, flag_data_scale: f32) -> bool {
+    let set_from_the_flag = flag_data_scale != 1.0 && app_scale == flag_data_scale;
+    USER_ZOOM_RANGE.contains(&app_scale) && !set_from_the_flag
 }
 
 /// The parts of a taken-over volume's transform to set so it stands at the startup transform:
@@ -313,5 +333,21 @@ mod tests {
                 app_scale: Some(1.0),
             }
         );
+    }
+
+    #[test]
+    fn only_an_app_scale_a_person_can_have_set_counts_as_the_user_zoom() {
+        for zoom in [0.1, 0.5, 1.0, 2.0, 10.0] {
+            assert!(is_user_zoom(zoom, 1.0), "{zoom}");
+        }
+        for not_a_zoom in [0.001, 1.8e-6, 0.09, 10.5] {
+            assert!(!is_user_zoom(not_a_zoom, 1.0), "{not_a_zoom}");
+        }
+        assert!(
+            !is_user_zoom(0.18, 0.18),
+            "--scale set as the app scale by an older build"
+        );
+        assert!(is_user_zoom(0.18, 0.024));
+        assert!(is_user_zoom(1.0, 1.0), "the scale this viewer asks for");
     }
 }

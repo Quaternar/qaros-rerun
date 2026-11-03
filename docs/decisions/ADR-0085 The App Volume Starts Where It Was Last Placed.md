@@ -11,6 +11,8 @@ repo: qaros-rerun
 > Amends ADR-0066: the transform the viewer asks for at start, and falls back to when the live one cannot be read, is the remembered place when there is one, not always the flags' placement. Following the live transform during the run is unchanged. The Stop order (ADR-0079) gains a read of the volume's transform before the volume closes.
 >
 > Amended by ADR-0089: the viewer hides its volume at Stop instead of closing it, so the next run takes it over with the place QAROS holds; the remembered place decides where a volume starts only when QAROS creates it afresh, and `--reset-placement` also sets a taken-over volume to the flags' placement.
+>
+> Amended by ADR-0092: the app scale is the user's zoom, no longer `--scale`, so it is remembered with the poses (`user_zoom`, only between 0.1 and 10) and restored with them; an entry without it starts at zoom 1. Nothing is remembered per recording.
 
 ## Context
 

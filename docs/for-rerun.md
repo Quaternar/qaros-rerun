@@ -14,12 +14,12 @@ All of it stays opt-in: with no observer registered and no new constructor calle
 
 ## Patch 1: a 3D view observer in `re_view_spatial`
 
-59 lines added, 1 removed, in 4 files.
+62 lines added, 1 removed, in 4 files.
 
 | File | Change |
 | --- | --- |
-| `src/view_3d_observer.rs` | new module, 44 lines: the observer type, `set_view_3d_observer`, `is_set`, `notify` |
-| `src/ui_3d.rs` | +10/-1: collect the draw data, notify the observer, then queue it as before |
+| `src/view_3d_observer.rs` | new module, 46 lines: the observer type, `set_view_3d_observer`, `is_set`, `notify` |
+| `src/ui_3d.rs` | +11/-1: collect the draw data, notify the observer, then queue it as before |
 | `src/eye.rs` | +4: while an observer is set, `ExtendedEyeFrustum::last_frame` returns `None` |
 | `src/lib.rs` | +1: `pub mod view_3d_observer` |
 
@@ -33,6 +33,7 @@ pub struct View3DFrame<'frame, 'viewer> {
     pub query: &'frame ViewQuery<'frame>,
     pub view_coordinates: ViewCoordinates,
     pub scene_bounding_box: re_math::BoundingBox,
+    pub scene_region_of_interest: re_math::BoundingBox,
     pub world_from_desktop_view: re_math::IsoTransform,
     pub draw_data: &'frame [QueueableDrawData],
 }

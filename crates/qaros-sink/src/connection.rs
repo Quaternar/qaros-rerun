@@ -20,7 +20,8 @@ use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
 use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
 use crate::volume_gestures::{RunningGestures, VolumeGestureSubscription, VolumeGestures};
 use crate::volume_transform::{
-    FollowedVolume, LiveVolume, StartupCorrection, describe, read_latest,
+    FollowedVolume, LiveVolume, StartupCorrection, USER_ZOOM_RANGE, describe, is_user_zoom,
+    read_latest,
 };
 use crate::volume_users::{ListedVolume, ReportedUsers, UsedByWatch, list_volume};
 use crate::volume_visibility::{SessionVolume, hide_at_stop, hide_left_over_at_start};
@@ -96,13 +97,15 @@ pub struct ConnectOptions {
     pub volume_display_name: String,
     /// Width, length, height in room meters.
     pub volume_size: [f32; 3],
-    /// Volume pose, app pose and app scale requested for the volume, and Rerun's world in it.
-    /// The frames are mapped with the volume's transform as QAROS holds it, which may differ
-    /// (`QarosConnection::volume_transform`).
+    /// Volume pose, app pose and app scale (the user's zoom, 1 from the viewer) requested for
+    /// the volume, and Rerun's world in it. The frames are mapped with the volume's transform as
+    /// QAROS holds it, which may differ (`QarosConnection::volume_transform`). Only the data
+    /// fit's scale is read here: an app scale equal to it is the `--scale` an earlier build set
+    /// (ADR-0092).
     pub placement: AppPlacement,
-    /// Remembers, per volume name, the pose and app pose the volume was last followed at, and
-    /// asks for the volume there at the next start while `placement` is the one it was moved
-    /// from (ADR-0085); `None` always asks for `placement`.
+    /// Remembers, per volume name, the pose, app pose and user zoom the volume was last followed
+    /// at, and asks for the volume there at the next start while `placement` is the one it was
+    /// moved from (ADR-0085, ADR-0092); `None` always asks for `placement`.
     pub volume_placement_file: Option<PathBuf>,
     /// Ask for `placement`, set a volume taken over to it, and forget the remembered place
     /// (`--reset-placement`).
@@ -350,14 +353,13 @@ pub fn connect(
     let reported_users = ReportedUsers::default();
     let listed_volume = list_and_warn_if_closed(&session, volume, &volume_config.common_name);
     let left_over_peers = seed_reported_users(listed_volume, &reported_users);
-    if options.reset_placement {
-        reset_taken_over_volume(
-            &session,
-            volume,
-            &volume_config.common_name,
-            startup_transform,
-        );
-    }
+    settle_taken_over_volume(
+        &session,
+        volume,
+        &volume_config.common_name,
+        startup_transform,
+        options,
+    );
     // Subscribed before the first read, so no change falls between the two.
     let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
         session.app_volumes().subscribe(forward)
@@ -550,6 +552,28 @@ fn watch_used_by(
         .ok()
 }
 
+/// A taken-over volume keeps the place QAROS holds and the user's zoom, unless
+/// `--reset-placement` asks for the flags' placement (ADR-0089, ADR-0092).
+fn settle_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_transform: VolumeTransform,
+    options: &ConnectOptions,
+) {
+    if options.reset_placement {
+        reset_taken_over_volume(session, volume, common_name, startup_transform);
+    } else {
+        keep_only_a_user_zoom(
+            session,
+            volume,
+            common_name,
+            startup_transform.app_scale,
+            options.placement.data_fit.scale,
+        );
+    }
+}
+
 /// `get_or_create` ignores the init for a volume that is open, typically one an earlier run hid
 /// at Stop, and hands it over with the transform QAROS holds, which the run keeps, as a
 /// reattached panel keeps its place (ADR-0089). `--reset-placement` is the exception: it asks
@@ -599,6 +623,43 @@ fn reset_taken_over_volume(
                 "qaros: cannot set app volume {common_name:?}'s {part} at start: {error}; frames map with the transform QAROS holds"
             );
         }
+    }
+}
+
+/// A taken-over volume keeps its app scale, the user's zoom (ADR-0092), unless it cannot be one
+/// (`is_user_zoom`): then it is set to `startup_app_scale`, the zoom this start asks for. A
+/// volume this start created already holds that, so no call is made for it.
+fn keep_only_a_user_zoom(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_app_scale: f32,
+    flag_data_scale: f32,
+) {
+    let live_app_scale = match session.app_volumes().latest_app_scale(volume) {
+        Ok(app_scale) => app_scale,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s app scale at start ({error}); it is kept as QAROS holds it"
+            );
+            return;
+        }
+    };
+    if is_user_zoom(live_app_scale, flag_data_scale) {
+        return;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} with app scale {live_app_scale}, which is no user zoom (outside {}..={}, or the --scale an earlier build set); the zoom starts at {startup_app_scale}",
+        USER_ZOOM_RANGE.start(),
+        USER_ZOOM_RANGE.end()
+    );
+    if let Err(error) = session
+        .app_volumes()
+        .set_app_scale(volume, startup_app_scale)
+    {
+        log::warn!(
+            "qaros: cannot set app volume {common_name:?}'s app scale at start: {error}; frames map with the app scale QAROS holds"
+        );
     }
 }
 

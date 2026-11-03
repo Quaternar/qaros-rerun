@@ -17,6 +17,8 @@ pub struct View3DFrame<'frame, 'viewer> {
     /// The view's up/forward convention, validated the same way the 3D view uses it.
     pub view_coordinates: ViewCoordinates,
     pub scene_bounding_box: re_math::BoundingBox,
+    /// The scene's bounds without outliers, as the view frames its own camera with them.
+    pub scene_region_of_interest: re_math::BoundingBox,
     /// The desktop camera of this view.
     pub world_from_desktop_view: re_math::IsoTransform,
     pub draw_data: &'frame [QueueableDrawData],

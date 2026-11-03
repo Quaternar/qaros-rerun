@@ -8,6 +8,8 @@ repo: qaros-rerun
 
 # ADR-0084: Rerun's reverse-Z depth goes to QAROS unchanged, declared with an infinite far plane
 
+> Amended by ADR-0092: the app scale the declaration is divided by is the user's zoom, starting at 1, not the data scale; at zoom 0.1 to 10 the marker is 1e31 to 1e29.
+
 ## Context
 
 ADR-0015 chose forward normalized depth with a finite far plane because QAROS's documentation did not say what a depth pixel holds or whether an infinite far plane is allowed. The header still says only that near > far declares reverse-Z ([HDR] L715-717). QAROS's source says more, and what it says makes our conversion redundant:

@@ -10,6 +10,8 @@ repo: qaros-rerun
 
 > Amends ADR-0079 (the Stop order: the volume is hidden, never closed) and ADR-0085 (the remembered place applies to a volume created afresh; a volume taken over keeps the place QAROS holds).
 >
+> Amended by ADR-0092: the app scale a taken-over volume keeps is the user's zoom, which is correct to keep; one outside 0.1 to 10, or equal to `--scale` as an earlier build set it, is set to the zoom the start asks for. The spread that left 0.001 no longer carries a data scale.
+>
 > Amended by ADR-0093: the used-by peers are followed during the run and Stop asks QAROS nothing; the peers are removed one at a time and the hide is confirmed by the Hub's bake within 180 ms; the volume is never closed, and a hide left unfinished is finished by the next start.
 
 ## Context

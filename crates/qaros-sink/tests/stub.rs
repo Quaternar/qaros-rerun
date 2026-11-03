@@ -34,7 +34,7 @@ use qaros_sink::{
     PeerDevice, PeerEvent, PoseSpace, QarosConnection, QarosSink, QarosSinkOptions, ReleaseCause,
     TargetPeers, UserEventSource, WakeViewer, connect,
 };
-use xr_math::{AppPlacement, Pose, VolumeTransform};
+use xr_math::{AppPlacement, DataFit, Pose, VolumeTransform};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -2494,10 +2494,10 @@ fn a_volume_held_with_another_transform_maps_eyes_with_the_live_one() {
 }
 
 /// A volume moved in one run is asked for at its last pose and app pose in the next, once
-/// QAROS creates the closed volume afresh (the stub's reset stands in for that); its app
-/// scale stays the requested one, and `--reset-placement` asks for the requested place.
+/// QAROS creates the closed volume afresh (the stub's reset stands in for that), with the
+/// user's zoom it had (ADR-0092), and `--reset-placement` asks for the requested place.
 #[test]
-#[allow(clippy::float_cmp, reason = "the app scale is copied from the request")]
+#[allow(clippy::float_cmp, reason = "the zoom is copied through the file")]
 fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
     let fixture = Fixture::new();
     let placement_file = fixture.scratch.join("qaros-rerun.volume-placements.json");
@@ -2511,7 +2511,7 @@ fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
         .map(Rc::new)
         .unwrap();
     assert_eq!(first.volume_transform(), requested);
-    let moved = dragged_volume(0.001);
+    let moved = dragged_volume(1.5);
     change_volume(&first, moved);
     fixture.assert_clean_teardown(first);
 
@@ -2521,15 +2521,11 @@ fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
     let second = connect(&remembering(false), wake_counter().1)
         .map(Rc::new)
         .unwrap();
-    let restored = VolumeTransform {
-        app_scale: requested.app_scale,
-        ..moved
-    };
     let config = second.volume_config();
     assert_eq!(config.pose, qaros_pose(moved.volume_pose));
     assert_eq!(config.app_pose, qaros_pose(moved.app_pose));
-    assert_eq!(config.app_scale, 2.0, "the app scale is the requested one");
-    assert_eq!(second.volume_transform(), restored);
+    assert_eq!(config.app_scale, 1.5, "the user's zoom");
+    assert_eq!(second.volume_transform(), moved);
     fixture.assert_clean_teardown(second);
 
     // SAFETY: no arguments.
@@ -2539,6 +2535,59 @@ fn a_moved_volume_is_created_where_it_was_last_in_the_next_run() {
         .unwrap();
     assert_eq!(after_reset.volume_transform(), requested);
     fixture.assert_clean_teardown(after_reset);
+}
+
+/// A volume taken over keeps the user's zoom, but not an app scale no person zooms to: the
+/// Hub's clamp at 0.001, or the `--scale` builds before ADR-0092 set as the app scale. That
+/// one is set to the zoom the start asks for.
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "the app scale is set to the requested one"
+)]
+fn a_taken_over_app_scale_that_is_no_user_zoom_is_set_to_the_requested_zoom() {
+    let fixture = Fixture::new();
+    let first = fixture.connect(Some("ABCD-EFGH")).unwrap();
+    change_volume(&first, dragged_volume(0.001));
+    fixture.assert_clean_teardown(first);
+
+    let second = fixture.connect(None).unwrap();
+    assert_eq!(
+        second.volume_transform(),
+        VolumeTransform {
+            app_scale: placement().app_scale,
+            ..dragged_volume(0.001)
+        },
+        "the place is kept, the scale set back"
+    );
+    change_volume(&second, dragged_volume(0.18));
+    fixture.assert_clean_teardown(second);
+
+    let legacy_flag = ConnectOptions {
+        placement: placement().with_data_fit(DataFit {
+            center: Vec3::ZERO,
+            scale: 0.18,
+        }),
+        ..connect_options(&fixture.scratch, None)
+    };
+    let third = connect(&legacy_flag, wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    assert_eq!(
+        third.volume_transform().app_scale,
+        placement().app_scale,
+        "--scale as the app scale is an earlier build's"
+    );
+    change_volume(&third, dragged_volume(4.0));
+    fixture.assert_clean_teardown(third);
+
+    let fourth = fixture.connect(None).unwrap();
+    assert_eq!(
+        fourth.volume_transform(),
+        dragged_volume(4.0),
+        "a zoom is kept"
+    );
+    fixture.assert_clean_teardown(fourth);
 }
 
 /// The stub has no used-by peers (`app_volume_get_used_by_peers_count` answers
@@ -2635,6 +2684,51 @@ fn reset_placement_sets_a_taken_over_volume_to_the_requested_placement() {
     ] {
         assert!(
             start_calls.iter().any(|call| call == setter),
+            "{setter} at start: {start_calls:?}"
+        );
+    }
+    fixture.assert_clean_teardown(second);
+}
+
+/// Stop hides the volume from the headset it served (ADR-0093) and stores its last place with
+/// the user's zoom (ADR-0092). The next start takes the hidden volume over with that zoom and
+/// sets nothing on it, so the place and zoom the Hub holds and the ones the file holds agree.
+#[test]
+#[allow(clippy::float_cmp, reason = "the zoom is copied through the file")]
+fn a_volume_hidden_at_stop_keeps_its_zoom_in_the_hub_and_in_the_placement_file() {
+    let fixture = Fixture::new();
+    let placement_file = fixture.scratch.join("qaros-rerun.volume-placements.json");
+    let remembering = |pairing_code: Option<&str>| ConnectOptions {
+        volume_placement_file: Some(placement_file.clone()),
+        ..connect_options(&fixture.scratch, pairing_code)
+    };
+    let zoomed = dragged_volume(1.5);
+    let first = connect(&remembering(Some("ABCD-EFGH")), wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    let mut sink = new_sink(&first, PoseSpace::Room);
+    single_request(&mut sink).expect("a sender exists");
+    change_volume(&first, zoomed);
+    drop(sink);
+    fixture.assert_clean_teardown(first);
+
+    assert_eq!(count_calls(&fixture, "app_volumes_update_used_by_peers"), 1);
+    let stored = std::fs::read_to_string(&placement_file).unwrap();
+    assert!(stored.contains("\"user_zoom\": 1.5"), "{stored}");
+    let calls_before_second_start = fixture.calls().len();
+
+    let second = connect(&remembering(None), wake_counter().1)
+        .map(Rc::new)
+        .unwrap();
+    assert_eq!(second.volume_transform(), zoomed, "taken over as hidden");
+    let start_calls = fixture.calls().split_off(calls_before_second_start);
+    for setter in [
+        "app_volumes_change_pose",
+        "app_volumes_change_app_pose",
+        "app_volumes_change_app_scale",
+    ] {
+        assert!(
+            !start_calls.iter().any(|call| call == setter),
             "{setter} at start: {start_calls:?}"
         );
     }

@@ -2,15 +2,17 @@
 //!
 //! A stopped viewer hides its app volume, and the next run takes it over with its place
 //! (ADR-0089). A volume closed in the Hub, which the viewer itself never does, is created afresh
-//! by QAROS from the request at the next start, so without this a
-//! volume a person moved in the glasses would be back at the requested place. The viewer keeps,
-//! per common name, the volume pose and app pose it last followed, and asks for the volume there
-//! at the next start while the startup placement is still the one the volume was moved from. A
-//! startup placement that differs (other `--origin` or `--yaw` flags) wins, and
-//! `--reset-placement` forgets the remembered place.
+//! by QAROS from the request at the next start, so without this a volume a person moved in the
+//! glasses would be back at the requested place. The viewer keeps, per common name, the volume
+//! pose, app pose and user zoom it last followed, stored at Stop after the hide (ADR-0093), and
+//! asks for the volume there at the next start while the startup placement is still the one the
+//! volume was moved from. A startup placement that differs (other `--origin` or `--yaw` flags)
+//! wins, and `--reset-placement` forgets the remembered place.
 //!
-//! The app scale is never remembered: it carries the data scale (`--scale`), and a two-hand
-//! spread can leave it at 0.001, which would shrink the next run's data out of sight.
+//! The app scale is the user's zoom (ADR-0092): the data scale lives in the viewer's data fit
+//! and never reaches QAROS. It is remembered with the poses while it lies in
+//! `USER_ZOOM_RANGE`, and a volume created afresh starts with it, as a volume taken over keeps
+//! it. Nothing is remembered per recording: each run fits every recording again (ADR-0092).
 //!
 //! The file is JSON, one entry per common name:
 //!
@@ -19,7 +21,8 @@
 //!     "volumes": {
 //!         "rerun-air_traffic": {
 //!             "requested": { "pose": <pose>, "app_pose": <pose> },
-//!             "last_known": { "pose": <pose>, "app_pose": <pose> }
+//!             "last_known": { "pose": <pose>, "app_pose": <pose> },
+//!             "user_zoom": 1.5
 //!         }
 //!     }
 //! }
@@ -27,7 +30,8 @@
 //!
 //! where a pose is `{ "position": [x, y, z], "orientation_xyzw": [x, y, z, w] }` in the same
 //! spaces as `QarAppVolumeInit`: the volume pose in the room, the app pose in unscaled volume
-//! meters.
+//! meters. `user_zoom` is absent for a zoom outside the range and in entries written before
+//! ADR-0092; the volume then starts at the requested app scale, 1.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -39,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use xr_math::{Pose, VolumeTransform};
 
 use crate::state_files::replace_file_contents;
-use crate::volume_transform::describe;
+use crate::volume_transform::{USER_ZOOM_RANGE, describe};
 
 /// How often a moving volume's place is written at most. The last place is also written at
 /// Stop, so a crash loses at most this much of a move.
@@ -114,11 +118,20 @@ fn poses_are_close(first: Pose, second: Pose) -> bool {
             .abs_diff_eq(second.position, SAME_REQUEST_TOLERANCE)
 }
 
-/// One volume's entry: the startup placement the volume was moved from, and where it was last.
+/// One volume's entry: the startup placement the volume was moved from, where it was last, and
+/// the user's zoom there when it lies in [`USER_ZOOM_RANGE`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 struct RememberedVolume {
     requested: StoredPlacement,
     last_known: StoredPlacement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_zoom: Option<f32>,
+}
+
+impl RememberedVolume {
+    fn zoom_to_restore(self) -> Option<f32> {
+        self.user_zoom.filter(|zoom| USER_ZOOM_RANGE.contains(zoom))
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -198,7 +211,11 @@ impl PlacementMemory {
             );
             return requested;
         }
-        let restored = remembered.last_known.applied_to(requested);
+        let restored_poses = remembered.last_known.applied_to(requested);
+        let restored = VolumeTransform {
+            app_scale: remembered.zoom_to_restore().unwrap_or(requested.app_scale),
+            ..restored_poses
+        };
         let orientations_are_unit = restored.volume_pose.orientation.is_normalized()
             && restored.app_pose.orientation.is_normalized();
         if !restored.is_valid() || !orientations_are_unit {
@@ -210,8 +227,8 @@ impl PlacementMemory {
             return requested;
         }
         log::info!(
-            "qaros: app volume {common_name:?} starts where it was last placed, from {}: {}; the \
-             app scale is the requested one, and --reset-placement starts at the requested place",
+            "qaros: app volume {common_name:?} starts where it was last placed and zoomed, from \
+             {}: {}; --reset-placement starts at the requested place and zoom",
             self.file.display(),
             describe(restored)
         );
@@ -272,6 +289,9 @@ impl PlacementMemory {
         current.is_valid().then(|| RememberedVolume {
             requested: self.requested,
             last_known: StoredPlacement::of_transform(current),
+            user_zoom: USER_ZOOM_RANGE
+                .contains(&current.app_scale)
+                .then_some(current.app_scale),
         })
     }
 
@@ -347,16 +367,24 @@ mod tests {
         VolumeTransform {
             volume_pose: Pose::from_translation(Vec3::new(0.0, 0.5, -1.7)),
             app_pose: Pose::new(Quat::from_rotation_y(0.3), Vec3::ZERO),
-            app_scale: 0.02,
+            app_scale: 1.0,
         }
     }
 
-    /// Where a person grabbed the volume to, with a spread that left the app scale tiny.
+    /// Where a person grabbed the volume to, with a spread that zoomed in by half.
     fn moved() -> VolumeTransform {
         VolumeTransform {
             volume_pose: Pose::new(Quat::from_rotation_y(0.8), Vec3::new(0.6, 0.9, -2.2)),
             app_pose: Pose::new(Quat::from_rotation_y(-0.4), Vec3::new(0.1, -0.2, 0.05)),
+            app_scale: 1.5,
+        }
+    }
+
+    /// Moved as [`moved`], with the app scale the Hub's clamp leaves, which is no zoom.
+    fn moved_to_the_hub_clamp() -> VolumeTransform {
+        VolumeTransform {
             app_scale: 0.001,
+            ..moved()
         }
     }
 
@@ -376,8 +404,8 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, reason = "the app scale is copied from the request")]
-    fn the_next_run_starts_at_the_moved_pose_and_app_pose_with_the_requested_app_scale() {
+    #[allow(clippy::float_cmp, reason = "the zoom is copied through the file")]
+    fn the_next_run_starts_at_the_moved_pose_app_pose_and_user_zoom() {
         let scratch = ScratchDirectory::new("restored");
         remember_moved_volume(&scratch.file(), "rerun-air_traffic");
 
@@ -385,14 +413,26 @@ mod tests {
             PlacementMemory::open(scratch.file(), "rerun-air_traffic", requested(), false);
         assert_poses_equal(startup.volume_pose, moved().volume_pose);
         assert_poses_equal(startup.app_pose, moved().app_pose);
-        assert_eq!(startup.app_scale, 0.02, "the app scale is never restored");
+        assert_eq!(startup.app_scale, 1.5, "the user's zoom is restored");
 
         let (_, other_volume) = PlacementMemory::open(scratch.file(), "rerun", requested(), false);
         assert_eq!(other_volume, requested(), "remembered per common name");
     }
 
     #[test]
-    fn the_file_holds_the_request_and_the_last_known_poses_without_the_app_scale() {
+    #[allow(clippy::float_cmp, reason = "the app scale is copied from the request")]
+    fn an_app_scale_outside_the_user_zoom_range_is_not_restored() {
+        let scratch = ScratchDirectory::new("clamped");
+        let (mut memory, _) = PlacementMemory::open(scratch.file(), "rerun", requested(), false);
+        memory.remember_now(moved_to_the_hub_clamp());
+
+        let (_, startup) = PlacementMemory::open(scratch.file(), "rerun", requested(), false);
+        assert_poses_equal(startup.volume_pose, moved().volume_pose);
+        assert_eq!(startup.app_scale, 1.0, "the requested zoom");
+    }
+
+    #[test]
+    fn the_file_holds_the_request_the_last_known_poses_and_the_user_zoom() {
         let scratch = ScratchDirectory::new("format");
         remember_moved_volume(&scratch.file(), "rerun");
         let text = std::fs::read_to_string(scratch.file()).unwrap();
@@ -401,13 +441,35 @@ mod tests {
             text.contains("\n    \"volumes\": {\n        \"rerun\": {"),
             "{text}"
         );
-        assert!(!text.contains("scale"), "{text}");
+        assert!(text.contains("\"user_zoom\": 1.5"), "{text}");
 
         let contents: PlacementFile = serde_json::from_str(&text).unwrap();
         let entry = contents.volumes["rerun"];
         assert_eq!(entry.requested, StoredPlacement::of_transform(requested()));
         assert_poses_equal(entry.last_known.pose.to_pose(), moved().volume_pose);
         assert_poses_equal(entry.last_known.app_pose.to_pose(), moved().app_pose);
+        assert_eq!(entry.user_zoom, Some(1.5));
+
+        let mut memory = PlacementMemory::open(scratch.file(), "rerun", requested(), false).0;
+        memory.remember_now(moved_to_the_hub_clamp());
+        let clamped_text = std::fs::read_to_string(scratch.file()).unwrap();
+        assert!(!clamped_text.contains("zoom"), "{clamped_text}");
+    }
+
+    /// Entries written before ADR-0092 hold no zoom; their poses still count.
+    #[test]
+    #[allow(clippy::float_cmp, reason = "the app scale is copied from the request")]
+    fn an_entry_without_a_zoom_restores_the_poses_at_the_requested_zoom() {
+        let scratch = ScratchDirectory::new("before-zoom");
+        remember_moved_volume(&scratch.file(), "rerun");
+        let text = std::fs::read_to_string(scratch.file()).unwrap();
+        let without_zoom = text.replace(",\n            \"user_zoom\": 1.5", "");
+        assert!(!without_zoom.contains("zoom"), "{without_zoom}");
+        std::fs::write(scratch.file(), without_zoom).unwrap();
+
+        let (_, startup) = PlacementMemory::open(scratch.file(), "rerun", requested(), false);
+        assert_poses_equal(startup.volume_pose, moved().volume_pose);
+        assert_eq!(startup.app_scale, 1.0);
     }
 
     #[test]

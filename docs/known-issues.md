@@ -85,7 +85,7 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 ## A two-hand spread ends before it scales the scene
 
 - **Symptom.** With hand tracking on METALENSE 2, a one-hand grab moves the scene smoothly, but a two-hand spread barely scales it. QAROS starts the spread and ends it 50 to 80 ms later; the one-hand grab then passes from one hand to the other every 60 to 100 ms while both hands pinch. In a two-minute run the app scale changed once, by about 3 %.
-- **What the viewer does.** Nothing to work around: QAROS's default rules apply both gestures, and the viewer only follows the volume's live transform. Scaling stays with `--scale` at start.
+- **What the viewer does.** Nothing to work around: QAROS's default rules apply both gestures, and the viewer only follows the volume's live transform. Each recording's size comes from its data fit, and the spread is a zoom on top of it, starting at 1 ([ADR-0092](decisions/ADR-0092%20Each%20Recording%20Is%20Fitted%20To%20The%20App%20Volume%20And%20The%20App%20Scale%20Is%20The%20User's%20Zoom.md)).
 - **Seen on.** 0.9.0-dev.3184, METALENSE 2.
 - **Status.** Under investigation in the QAROS gesture detector.
 

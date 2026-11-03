@@ -43,11 +43,13 @@ Demos with 2D views (structure from motion, air traffic) also open each view as 
 
 The Hub keeps every panel where it is, or where you moved it, across runs, as long as it stays within 1.5 m of your eyes; a panel left farther away, for example by another headset, opens in front of you again. Close the panels in the Hub Display, or add `-- --reset-panels`, to have the next run open them all in front of you again.
 
-The viewer keeps each demo's app volume where you grabbed it to, per demo, and starts it there at the next run. Add `-- --reset-placement` to start a demo at its default place again.
+The viewer keeps each demo's app volume where you grabbed and zoomed it to, per demo, and starts it there at the next run. A two-hand spread zooms the scene from its tabletop size. Add `-- --reset-placement` to start a demo at its default place and size again.
 
 ## Placement in the room
 
 Each demo puts the data's center 0.5 m above and 1.7 m in front of the room origin, scaled to between 1 m and 1.7 m across: a tabletop model you can walk around, readable from 1 to 2 m away, and inside the app volume so QAROS clips nothing that matters. The robot arm sits 0.65 m above the origin, so its base clears the table; the flat drone floor plan 0.25 m above, so it is seen from above.
+
+The demo's own placement (`--center` and `--scale`) applies to the demo's recording. Another recording opened in the same viewer, for example another demo's `demos/.cache/<demo>/recording.rrd` through File > Open, is fitted to its own bounds once they settle: centred in the volume, its largest extent 0.7 of the volume's side (ADR-0092). It lands at tabletop size, framed by its bounds rather than by the demo's hand-tuned center.
 
 The demos take the room origin to be a QR origin marker lying on a table, with the floor 1.0 m below it. The data then floats at about standing eye level. With the room origin on the floor, raise everything by 1.0 m with `--origin 0,1.5,-1.7` after `--` (`0,1.65,-1.7` for the robot arm, `0,1.25,-1.7` for the drone).
 

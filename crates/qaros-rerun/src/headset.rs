@@ -40,7 +40,7 @@ use re_renderer::{
 };
 use re_view_spatial::view_3d_observer::View3DFrame;
 use re_viewer_context::ViewId;
-use xr_math::{AppPlacement, DepthRange, EyeCamera, ViewCoordinates};
+use xr_math::{AppPlacement, DataFit, DepthRange, EyeCamera, ViewCoordinates};
 
 use crate::draw_data_copy::copy_all;
 use crate::eye_output::{
@@ -50,6 +50,7 @@ use crate::eye_render::{
     EyeReadbackIdentifiers, EyeReadbackTag, EyeViewSubmission, draw_and_submit,
     eye_view_builder_id, target_configuration,
 };
+use crate::recording_fit::{FitSettings, RecordingFits, SceneBounds};
 
 const EYE_NAMES: [&str; EYE_COUNT] = ["left", "right"];
 
@@ -59,9 +60,12 @@ const STAMP_DISTANCE_METERS: f32 = 1.0;
 #[derive(Clone, Copy, Debug)]
 pub struct HeadsetSettings {
     /// Where Rerun's world sits in the room; its `world_coordinates` are replaced by the view's
-    /// own coordinates unless `world_coordinates_override` is set.
+    /// own coordinates unless `world_coordinates_override` is set, and its `data_fit` by the
+    /// shown recording's fit (`fit`).
     pub placement: AppPlacement,
     pub world_coordinates_override: Option<ViewCoordinates>,
+    /// How each recording's data fit is chosen (ADR-0092).
+    pub fit: FitSettings,
     /// Viewer frames to wait for a readback before the frame is abandoned.
     pub readback_timeout_in_viewer_frames: u64,
     /// Clear empty pixels to transparent, so only Rerun's content reaches the room.
@@ -79,6 +83,7 @@ impl Default for HeadsetSettings {
         Self {
             placement: AppPlacement::default(),
             world_coordinates_override: None,
+            fit: FitSettings::default(),
             readback_timeout_in_viewer_frames: 30,
             transparent_background: true,
             frame_stamp: false,
@@ -404,10 +409,46 @@ pub fn claim_streaming_view(
     }
 }
 
-/// Fails for coordinates that cannot be placed in the room (left-handed), before any frame is
-/// requested from the sink.
+/// The recording the view shows, as `application/recording`, which tells recordings apart for
+/// their fits.
+fn shown_recording(frame: &View3DFrame<'_, '_>) -> String {
+    let store_id = frame.viewer_ctx.store_id();
+    format!(
+        "{}/{}",
+        store_id.application_id().as_str(),
+        store_id.recording_id().as_str()
+    )
+}
+
+/// The bounds a fit is made from: the scene without outliers, as the 3D view frames its own
+/// camera, or all of it where that region says nothing.
+fn scene_bounds_to_fit(frame: &View3DFrame<'_, '_>) -> SceneBounds {
+    let as_bounds = |bounding_box: re_math::BoundingBox| SceneBounds {
+        min: glam::Vec3::from_array(bounding_box.min.to_array()),
+        max: glam::Vec3::from_array(bounding_box.max.to_array()),
+    };
+    let region_of_interest = as_bounds(frame.scene_region_of_interest);
+    if region_of_interest.is_meaningful() {
+        region_of_interest
+    } else {
+        as_bounds(frame.scene_bounding_box)
+    }
+}
+
+/// The data fit of the recording the view shows (ADR-0092).
+pub fn fit_for_view(fits: &mut RecordingFits, frame: &View3DFrame<'_, '_>) -> DataFit {
+    fits.fit_for(
+        &shown_recording(frame),
+        scene_bounds_to_fit(frame),
+        Instant::now(),
+    )
+}
+
+/// The placement of the view's world with `data_fit`. Fails for coordinates that cannot be
+/// placed in the room (left-handed), before any frame is requested from the sink.
 pub fn placement_for_view(
     settings: &HeadsetSettings,
+    data_fit: DataFit,
     frame: &View3DFrame<'_, '_>,
 ) -> Result<AppPlacement, String> {
     let world_coordinates = settings.world_coordinates_override.unwrap_or_else(|| {
@@ -421,6 +462,7 @@ pub fn placement_for_view(
         .map_err(|error| format!("{error} ({world_coordinates:?})"))?;
     Ok(AppPlacement {
         world_coordinates,
+        data_fit,
         ..settings.placement
     })
 }
@@ -531,6 +573,7 @@ pub struct HeadsetRenderer {
     readback_time_limit: Option<Duration>,
     /// Each user's head in room space, from the last frame prepared for the user, and when.
     latest_heads: BTreeMap<UserId, (xr_math::Pose, Instant)>,
+    recording_fits: RecordingFits,
 }
 
 /// A head prepared longer ago than this belongs to a user who no longer streams.
@@ -569,6 +612,7 @@ impl HeadsetRenderer {
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
             latest_heads: BTreeMap::new(),
+            recording_fits: RecordingFits::new(settings.fit),
         }
     }
 
@@ -830,8 +874,9 @@ impl HeadsetRenderer {
         claim_streaming_view(&mut self.streaming_view, view_id, viewer_frame)
     }
 
-    fn placement_for(&self, frame: &View3DFrame<'_, '_>) -> Result<AppPlacement, String> {
-        placement_for_view(&self.settings, frame)
+    fn placement_for(&mut self, frame: &View3DFrame<'_, '_>) -> Result<AppPlacement, String> {
+        let data_fit = fit_for_view(&mut self.recording_fits, frame);
+        placement_for_view(&self.settings, data_fit, frame)
     }
 
     fn prepare_frame(
@@ -1272,6 +1317,7 @@ mod tests {
             statistics: HeadsetStatistics::default(),
             readback_time_limit: None,
             latest_heads: BTreeMap::new(),
+            recording_fits: RecordingFits::new(settings.fit),
         }
     }
 
@@ -1502,14 +1548,14 @@ mod tests {
             Some("not streaming this view: left-handed (RUF)")
         );
 
-        let world_center = glam::Vec3::new(1.0, 2.0, 3.0);
-        let placement = AppPlacement {
-            world_center,
-            ..AppPlacement::default()
+        let data_fit = DataFit {
+            center: glam::Vec3::new(1.0, 2.0, 3.0),
+            scale: 1.0,
         };
+        let placement = AppPlacement::default().with_data_fit(data_fit);
         let (begun_placement, pending) =
             begin_placeable_frames(Ok(placement), &mut sink).expect("placeable");
-        assert_eq!(begun_placement.world_center, world_center);
+        assert_eq!(begun_placement.data_fit, data_fit);
         let keys: Vec<FrameKey> = pending.iter().map(|request| request.request.key).collect();
         assert_eq!(
             keys,
@@ -1523,13 +1569,17 @@ mod tests {
     }
 
     /// Both paths place every frame through `prepare_frame`: the sink's live volume transform
-    /// replaces the volume part of the scene's placement for that frame, so a volume scaled to
-    /// 0.001 in the Hub puts the near plane 1000 times farther out in Rerun-world units.
+    /// replaces the volume part of the scene's placement for that frame and keeps the data fit,
+    /// so a volume zoomed to 0.001 in the Hub, with data at half a meter per unit, puts the near
+    /// plane 2000 times farther out in Rerun-world units.
     #[test]
     fn a_frame_is_placed_in_the_volume_transform_its_poses_were_mapped_with() {
         let scene_placement = AppPlacement {
             world_coordinates: ViewCoordinates::RIGHT_FORWARD_UP,
-            world_center: glam::Vec3::new(1.0, 2.0, 3.0),
+            data_fit: DataFit {
+                center: glam::Vec3::new(1.0, 2.0, 3.0),
+                scale: 0.5,
+            },
             ..AppPlacement::default()
         };
         let live = xr_math::VolumeTransform {
@@ -1556,13 +1606,13 @@ mod tests {
             placement.world_coordinates,
             scene_placement.world_coordinates
         );
-        assert_eq!(placement.world_center, scene_placement.world_center);
+        assert_eq!(placement.data_fit, scene_placement.data_fit);
 
         let depth_range =
             DepthRange::new(0.1, 100.0, xr_math::DepthEncoding::ForwardNormalized).unwrap();
         let camera = EyeCamera::new(view.pose, view.fov, placement, depth_range).unwrap();
         assert!(
-            (camera.near_plane_in_world_units - 100.0).abs() < 1e-3,
+            (camera.near_plane_in_world_units - 200.0).abs() < 1e-3,
             "{}",
             camera.near_plane_in_world_units
         );
