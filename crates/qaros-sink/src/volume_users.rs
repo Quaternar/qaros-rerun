@@ -1,10 +1,10 @@
 //! The app volume's used-by peers as QAROS reports them, kept current during the run so Stop
 //! never has to ask (ADR-0093).
 //!
-//! Asking is slow: `qar_query_app_volumes_count` and `qar_query_app_volumes` each run QAROS's
-//! reconciliation query, which waits out its full 2 s reply window before it returns
-//! ([QS] `SharedObjectClient.hpp` `Query`, `kSharedObjectReconcileQueryTimeoutMs`), so one
-//! listing blocks about 4 s. The volume subscription delivers each of the Hub's bakes of the
+//! Asking is slow: `qar_query_app_volumes` runs QAROS's reconciliation query, which waits out
+//! its full 2 s reply window before it returns ([QS] `SharedObjectClient.hpp` `Query`,
+//! `kSharedObjectReconcileQueryTimeoutMs`), so one listing blocks about 2 s with no count
+//! before it (ADR-0102). The volume subscription delivers each of the Hub's bakes of the
 //! volume, used-by peers included, without a round trip; its callback copies the peers into
 //! [`ReportedUsers`]. The one listing the viewer makes at connect, to see whether QAROS handed a
 //! closed volume back, seeds the same record.
@@ -20,6 +20,7 @@ use std::time::Instant;
 use qaros::qaros_sys::{QarApi, QarAppVolume, QarAppVolumeLifetimeStatus, defaults};
 use qaros::{AppVolumeId, CancelToken, PeerId, Session};
 
+use crate::handle_query::query_all_handles;
 use crate::raw_result::check;
 
 /// The used-by peers QAROS reported last for one volume, and how many reports came, written by
@@ -82,7 +83,7 @@ pub(crate) struct ListedVolume {
     pub(crate) used_by: Result<Vec<PeerId>, String>,
 }
 
-/// One listing (`qar_query_app_volumes`), about 4 s: whether `volume` is closed and which peers
+/// One listing (`qar_query_app_volumes`), about 2 s: whether `volume` is closed and which peers
 /// use it. `Ok(None)` when the session does not list it.
 pub(crate) fn list_volume(
     session: &Session,
@@ -102,34 +103,17 @@ pub(crate) fn list_volume(
 /// Every handle `qar_query_app_volumes` wrote; the caller destroys them.
 fn query_volume_handles(api: &QarApi, session: &Session) -> Result<Vec<*mut QarAppVolume>, String> {
     let raw_session = session.as_raw();
-    let mut count = 0_usize;
-    // SAFETY: the session is alive and used on this thread; the out-pointer is valid.
-    let counted = unsafe { (api.qar_impl_query_app_volumes_count)(raw_session, &raw mut count) };
-    check(api, "qar_query_app_volumes_count", counted)?;
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let mut handles: Vec<*mut QarAppVolume> = vec![std::ptr::null_mut(); count];
-    let mut written = 0_usize;
-    // SAFETY: as above; the buffer holds `handles.len()` handle slots.
-    let queried = unsafe {
-        (api.qar_impl_query_app_volumes)(
-            raw_session,
-            handles.as_mut_ptr(),
-            handles.len(),
-            &raw mut written,
-        )
-    };
-    handles.truncate(written.min(count));
-    handles.retain(|handle| !handle.is_null());
-    if let Err(error) = check(api, "qar_query_app_volumes", queried) {
-        for &handle in &handles {
-            // SAFETY: each written handle is destroyed once; none is used after a failed query.
-            unsafe { (api.qar_impl_app_volume_handle_destroy)(handle) };
-        }
-        return Err(error);
-    }
-    Ok(handles)
+    query_all_handles(
+        |buffer: *mut *mut QarAppVolume, capacity, written| {
+            // SAFETY: the session is alive and used on this thread; the buffer holds
+            // `capacity` handle slots and the out-pointer is valid.
+            let queried =
+                unsafe { (api.qar_impl_query_app_volumes)(raw_session, buffer, capacity, written) };
+            check(api, "qar_query_app_volumes", queried)
+        },
+        // SAFETY: each handle passed here is destroyed once and not used after.
+        |handle| unsafe { (api.qar_impl_app_volume_handle_destroy)(handle) },
+    )
 }
 
 fn find_volume(

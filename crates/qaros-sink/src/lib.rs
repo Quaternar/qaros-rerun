@@ -23,6 +23,7 @@ mod connection;
 // Only the Windows handler reads most of it; elsewhere its tests do.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod console_stop;
+mod handle_query;
 mod host_timing;
 // Panel gestures are reachable only through the raw table: the gesture subscription and the
 // gesture getters.

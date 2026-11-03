@@ -134,7 +134,7 @@ impl Fixture {
     fn listings_since(&self, start: usize) -> usize {
         self.calls()[start..]
             .iter()
-            .filter(|call| call.as_str() == "query_gui_panels_count")
+            .filter(|call| call.as_str() == "query_gui_panels")
             .count()
     }
 
@@ -432,7 +432,7 @@ fn a_failed_panel_listing_claims_nothing_and_is_retried_after_half_a_second() {
     let published = vec!["map".to_owned()];
     let calls_before = fixture.calls().len();
 
-    fixture.fail_next("query_gui_panels_count", UNCLASSIFIED);
+    fixture.fail_next("query_gui_panels", UNCLASSIFIED);
     panels.sync(&[view("map")], &published);
     assert!(
         fixture

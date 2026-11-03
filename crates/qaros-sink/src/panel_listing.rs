@@ -11,6 +11,7 @@ use qaros::qaros_sys::{
 use qaros::{GuiPanelId, GuiPanelSize, GuiPanelState, Pose, Quat, StreamId, Vec3};
 
 use crate::connection::QarosConnection;
+use crate::handle_query::query_all_handles;
 use crate::raw_result::check;
 
 /// The C API's string getters report neither the size they need nor truncation; the `qaros`
@@ -47,41 +48,30 @@ impl ListedPanel {
     }
 }
 
-/// `qar_query_gui_panels_count` and `qar_query_gui_panels`, then per handle the getters, with
-/// `qar_gui_panel_get_content_type` before the URI or the stream id. Every written handle is
-/// destroyed, whatever the reads returned.
+/// `qar_query_gui_panels` alone, one reconciliation query of about 2 s (ADR-0102), then per
+/// handle the getters, with `qar_gui_panel_get_content_type` before the URI or the stream id.
+/// Every written handle is destroyed, whatever the reads returned.
 pub fn list_panels(connection: &QarosConnection) -> Result<Vec<ListedPanel>, String> {
     let session = connection.session();
     let library = session.library();
     let api = library.raw_api();
     let raw_session = session.as_raw();
-    let mut count = 0_usize;
-    // SAFETY: the session is alive and used on this thread; the out-pointer is valid.
-    let counted = unsafe { (api.qar_impl_query_gui_panels_count)(raw_session, &raw mut count) };
-    check(api, "qar_query_gui_panels_count", counted)?;
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let mut handles: Vec<*mut QarGuiPanel> = vec![std::ptr::null_mut(); count];
-    let mut written = 0_usize;
-    // SAFETY: as above; the buffer holds `handles.len()` handle slots.
-    let queried = unsafe {
-        (api.qar_impl_query_gui_panels)(
-            raw_session,
-            handles.as_mut_ptr(),
-            handles.len(),
-            &raw mut written,
-        )
-    };
-    let written_handles = &handles[..written.min(handles.len())];
-    let listed = check(api, "qar_query_gui_panels", queried).and_then(|()| {
-        written_handles
-            .iter()
-            .filter(|handle| !handle.is_null())
-            .map(|&handle| read_listed_panel(api, handle))
-            .collect()
-    });
-    for &handle in written_handles.iter().filter(|handle| !handle.is_null()) {
+    let handles = query_all_handles(
+        |buffer: *mut *mut QarGuiPanel, capacity, written| {
+            // SAFETY: the session is alive and used on this thread; the buffer holds
+            // `capacity` handle slots and the out-pointer is valid.
+            let queried =
+                unsafe { (api.qar_impl_query_gui_panels)(raw_session, buffer, capacity, written) };
+            check(api, "qar_query_gui_panels", queried)
+        },
+        // SAFETY: each handle passed here is destroyed once and not used after.
+        |handle| unsafe { (api.qar_impl_gui_panel_handle_destroy)(handle) },
+    )?;
+    let listed = handles
+        .iter()
+        .map(|&handle| read_listed_panel(api, handle))
+        .collect();
+    for &handle in &handles {
         // SAFETY: each written handle is destroyed once, after its last use above.
         unsafe { (api.qar_impl_gui_panel_handle_destroy)(handle) };
     }

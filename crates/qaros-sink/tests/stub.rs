@@ -315,7 +315,7 @@ impl Fixture {
             last_of("session_handle_destroy").expect("the session is destroyed");
         let last_subscription =
             last_of("app_volumes_subscribe_updates").expect("the used-by peers are followed");
-        if let Some(last_listing) = last_of("query_app_volumes_count") {
+        if let Some(last_listing) = last_of("query_app_volumes") {
             assert!(
                 last_listing < last_subscription,
                 "a listing at call {last_listing}, after the connect's subscriptions"
@@ -2695,7 +2695,6 @@ fn a_volume_whose_peers_were_never_reported_is_left_open_at_stop_without_a_listi
 
     let stop_calls = fixture.calls().split_off(calls_before_stop);
     for absent in [
-        "query_app_volumes_count",
         "query_app_volumes",
         "app_volume_get_used_by_peers_count",
         "app_volumes_update_used_by_peers",
@@ -2732,7 +2731,7 @@ fn a_volume_no_peer_uses_stays_open_at_stop() {
 
     let stop_calls = fixture.calls().split_off(calls_before_stop);
     for absent in [
-        "query_app_volumes_count",
+        "query_app_volumes",
         "app_volume_get_used_by_peers_count",
         "app_volumes_update_used_by_peers",
         "app_volumes_close_volume",
