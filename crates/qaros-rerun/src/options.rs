@@ -145,11 +145,14 @@ Depth reported to the sink (the QAROS sink converts near and far to the poses' u
                                eyes, the timeline straight ahead and nearest, the views beside
                                it; sitting puts the views 0.8 m away right of the gaze, just
                                below the eyes, and the timeline 0.5 m ahead. A panel an earlier
-                               run left keeps its place while its centre is between 0.2 and
-                               1.5 m from the eyes and its size is this run's; otherwise it is
-                               moved there too. A panel closed in the Hub Display opens anew
+                               run left keeps its place while its centre is at least 0.2 m from
+                               the eyes and its size is this run's; otherwise it is moved there
+                               too. A panel closed in the Hub Display opens anew
     --reset-panels             close every panel this viewer claims, before its claim, so each
                                is created afresh where new panels open, at this run's size
+    --move-far-panels          also move a panel an earlier run left whose centre is farther
+                               than 1.5 m from the eyes to where new panels open; without it
+                               such a panel stays where it was left
     --panel-interval-ms MS     capture interval (default 250)
 
 Viewer:
@@ -299,6 +302,9 @@ pub struct QarosOptions {
     /// `--reset-panels`: close each panel an earlier run left before claiming it, so it is
     /// created afresh at this run's placement and size.
     pub reset_panels: bool,
+    /// `--move-far-panels`: move a panel an earlier run left farther than 1.5 m from the eyes
+    /// to where new panels open, instead of leaving it there.
+    pub move_far_panels: bool,
     /// `--qaros-graphics`; absent means [`QarosGraphics::PLATFORM_DEFAULT`].
     pub graphics_flag: Option<QarosGraphics>,
     pub launched_by_qaros: bool,
@@ -458,6 +464,7 @@ impl Default for QarosOptions {
             panel_posture: PanelPostureKind::Standing,
             reset_placement: false,
             reset_panels: false,
+            move_far_panels: false,
             graphics_flag: None,
             launched_by_qaros: false,
             local_app: false,
@@ -681,6 +688,11 @@ impl Options {
                 "--reset-panels needs --panels: it closes the viewer's GUI panels".to_owned(),
             ));
         }
+        if self.qaros.move_far_panels && !self.panels {
+            return Err(ParseOutcome::Error(
+                "--move-far-panels needs --panels: it moves the viewer's GUI panels".to_owned(),
+            ));
+        }
         if self.qaros.reset_placement && !is_qaros {
             return Err(ParseOutcome::Error(
                 "--reset-placement needs --sink qaros: it places the QAROS app volume".to_owned(),
@@ -779,6 +791,7 @@ impl Options {
                 "--local-app" => options.qaros.local_app = true,
                 "--reset-placement" => options.qaros.reset_placement = true,
                 "--reset-panels" => options.qaros.reset_panels = true,
+                "--move-far-panels" => options.qaros.move_far_panels = true,
                 "--users" => options.simulated_users = parse_positive(&flag, &value()?)?,
                 "--join-interval" => {
                     options.join_interval_in_viewer_frames = parse_number(&flag, &value()?)?;
@@ -1362,6 +1375,26 @@ mod tests {
         assert!(matches!(
             parse(&["--sink", "qaros", "--reset-panels"]),
             Err(ParseOutcome::Error(message)) if message.starts_with("--reset-panels needs --panels")
+        ));
+    }
+
+    #[test]
+    fn far_panels_are_moved_only_when_asked_and_only_with_panels() {
+        assert!(
+            !parse(&["--sink", "qaros", "--panels"])
+                .unwrap()
+                .qaros
+                .move_far_panels
+        );
+        assert!(
+            parse(&["--sink", "qaros", "--panels", "--move-far-panels"])
+                .unwrap()
+                .qaros
+                .move_far_panels
+        );
+        assert!(matches!(
+            parse(&["--sink", "qaros", "--move-far-panels"]),
+            Err(ParseOutcome::Error(message)) if message.starts_with("--move-far-panels needs --panels")
         ));
     }
 

@@ -94,8 +94,9 @@ const LISTING_REUSE: Duration = Duration::from_secs(30);
 const TIMELINE_FORWARD_METERS: f32 = 0.5;
 /// How far below the user's eyes the timeline panel's centre sits.
 const TIMELINE_BELOW_EYES_METERS: f32 = 0.2;
-/// A held panel whose centre is farther than this from the eyes of the head that places panels
-/// is moved to where this run places new panels (ADR-0090). It is one step (about 0.7 m)
+/// With `--move-far-panels`, a held panel whose centre is farther than this from the eyes of the
+/// head that places panels is moved to where this run places new panels (ADR-0090, ADR-0095);
+/// without it such a panel stays where it is held. It is one step (about 0.7 m)
 /// beyond the outstretched reach of an arm measured from the eyes (ANSUR II, 0.61 m for the
 /// average man, ADR-0083), and more than twice the 0.65 m at which ADR-0083 places a panel: a
 /// panel a user moved within the space they work in stays; one held in another part of the
@@ -160,9 +161,10 @@ impl PanelPosture {
 /// user whose head is near the app volume, or any viewer near it once none came for
 /// [`HEADSET_WAIT`] ([`QarosPanels::consider_head`]). A new panel is created at its place within
 /// reach of that head. A panel an earlier run left is reattached by its common name and stays
-/// where the Hub holds it while that place is of use to the user: within
-/// [`HELD_PLACE_FARTHEST_METERS`] of the eyes, no nearer than [`HELD_PLACE_NEAREST_METERS`], at
-/// this run's size. Otherwise it is moved to where a new panel would open (ADR-0090). A panel
+/// where the Hub holds it while that place is of use to the user: no nearer than
+/// [`HELD_PLACE_NEAREST_METERS`] to the eyes, at this run's size, and with
+/// [`QarosPanels::with_move_far_panels`] within [`HELD_PLACE_FARTHEST_METERS`] of them.
+/// Otherwise it is moved to where a new panel would open (ADR-0090, ADR-0095). A panel
 /// listed `Closed` is claimed again by its common name, never replaced under a new one
 /// (ADR-0075): QAROS creates it afresh, and the claim shows it at its held place by the same
 /// rule (ADR-0091). Nothing else in a run closes a panel: only with
@@ -206,6 +208,9 @@ pub struct QarosPanels {
     listings_made: u32,
     /// `Some` with `--reset-panels`.
     reset: Option<PanelReset>,
+    /// `--move-far-panels`: a held panel farther than [`HELD_PLACE_FARTHEST_METERS`] from the
+    /// eyes is moved too.
+    move_far_panels: bool,
 }
 
 /// What a claim does about `--reset-panels` for one panel.
@@ -345,6 +350,7 @@ impl QarosPanels {
             listing: None,
             listings_made: 0,
             reset: None,
+            move_far_panels: false,
         }
     }
 
@@ -386,6 +392,16 @@ impl QarosPanels {
     #[must_use]
     pub fn with_reset_panels(mut self, reset_panels: bool) -> Self {
         self.reset = reset_panels.then(PanelReset::default);
+        self
+    }
+
+    /// `--move-far-panels`: a panel an earlier run left whose centre is farther than
+    /// [`HELD_PLACE_FARTHEST_METERS`] from the eyes of the head that places panels is moved to
+    /// where new panels open, as one held at the head or at another frame's size is. Without it
+    /// such a panel stays where the Hub holds it, wherever the user stands (ADR-0095).
+    #[must_use]
+    pub fn with_move_far_panels(mut self, move_far_panels: bool) -> Self {
+        self.move_far_panels = move_far_panels;
         self
     }
 
@@ -463,7 +479,12 @@ impl QarosPanels {
                     "--reset-panels closed it to create it afresh where new panels open".to_owned(),
                 )
             } else {
-                place_for_claim(held.as_ref(), anchor.position, config.size)
+                place_for_claim(
+                    held.as_ref(),
+                    anchor.position,
+                    config.size,
+                    self.move_far_panels,
+                )
             };
             let takes_a_slot = matches!(panel, WantedPanel::View(_))
                 && (held.is_none() || matches!(place, PanelPlace::MovedBecause(_)));
@@ -979,13 +1000,18 @@ fn place_for_claim(
     held: Option<&ListedPanel>,
     eyes: Vec3,
     wanted_size: GuiPanelSize,
+    move_far_panels: bool,
 ) -> PanelPlace {
     let Some(held) = held else {
         return PanelPlace::AsHeld;
     };
-    if let Some(reason) =
-        unusable_held_place(from_qaros_pose(held.pose), held.size, eyes, wanted_size)
-    {
+    if let Some(reason) = unusable_held_place(
+        from_qaros_pose(held.pose),
+        held.size,
+        eyes,
+        wanted_size,
+        move_far_panels,
+    ) {
         return PanelPlace::MovedBecause(reason);
     }
     log::info!(
@@ -997,18 +1023,20 @@ fn place_for_claim(
 }
 
 /// Why a panel held at `held_pose` (its top edge's midpoint) and `held_size` is no use to the
-/// user whose eyes are at `eyes`, or `None` when it is: its centre farther from the eyes than
-/// [`HELD_PLACE_FARTHEST_METERS`] or nearer than [`HELD_PLACE_NEAREST_METERS`], or its width or
-/// height more than [`HELD_SIZE_TOLERANCE_METERS`] off `wanted_size`.
+/// user whose eyes are at `eyes`, or `None` when it is: its centre nearer to the eyes than
+/// [`HELD_PLACE_NEAREST_METERS`], with `move_far_panels` farther than
+/// [`HELD_PLACE_FARTHEST_METERS`], or its width or height more than
+/// [`HELD_SIZE_TOLERANCE_METERS`] off `wanted_size`.
 fn unusable_held_place(
     held_pose: Pose,
     held_size: GuiPanelSize,
     eyes: Vec3,
     wanted_size: GuiPanelSize,
+    move_far_panels: bool,
 ) -> Option<String> {
     let distance = panel_centre(held_pose, held_size.height).distance(eyes);
     let held_place = describe_held_place(held_pose, held_size, eyes);
-    if distance > HELD_PLACE_FARTHEST_METERS {
+    if move_far_panels && distance > HELD_PLACE_FARTHEST_METERS {
         return Some(format!(
             "{held_place}, farther than {HELD_PLACE_FARTHEST_METERS} m from the eyes of the head \
              that places panels"
@@ -1857,7 +1885,7 @@ mod tests {
         let size = camera_frame_size();
         let placed_for_this_head = standing_view_panel_pose(head, 0, size.height);
         assert_eq!(
-            unusable_held_place(placed_for_this_head, size, head.position, size),
+            unusable_held_place(placed_for_this_head, size, head.position, size, true),
             None
         );
         let moved_by_the_user = Pose::new(
@@ -1870,28 +1898,53 @@ mod tests {
             "{distance}"
         );
         assert_eq!(
-            unusable_held_place(moved_by_the_user, size, head.position, size),
+            unusable_held_place(moved_by_the_user, size, head.position, size, true),
+            None
+        );
+    }
+
+    /// Placed at 11:02 UTC on 2026-11-02 by a METALENSE head at (-1.77, 0.42, 0.33) in another
+    /// tracking origin: its centre 1.59 m from the eyes of [`metalense_head`].
+    fn placed_in_another_origin() -> Pose {
+        panel_pose_within_reach(
+            gravity_level(Pose::new(Quat::IDENTITY, Vec3::new(-1.774, 0.417, 0.334))),
+            0,
+        )
+    }
+
+    #[test]
+    fn with_move_far_panels_a_panel_held_beyond_a_step_and_a_reach_is_moved() {
+        let head = metalense_head();
+        let size = camera_frame_size();
+        let far = unusable_held_place(placed_in_another_origin(), size, head.position, size, true)
+            .expect("moved");
+        assert!(far.contains("farther than 1.5 m"), "{far}");
+        assert!(far.contains("its centre 1.59 m from the eyes"), "{far}");
+    }
+
+    #[test]
+    fn without_move_far_panels_a_panel_held_beyond_a_step_and_a_reach_stays() {
+        let head = metalense_head();
+        let size = camera_frame_size();
+        let distance =
+            panel_centre(placed_in_another_origin(), size.height).distance(head.position);
+        assert!(distance > HELD_PLACE_FARTHEST_METERS, "{distance}");
+        assert_eq!(
+            unusable_held_place(placed_in_another_origin(), size, head.position, size, false),
             None
         );
     }
 
     #[test]
-    fn a_panel_held_beyond_a_step_and_a_reach_or_at_the_head_is_moved() {
+    fn a_panel_held_at_the_head_is_moved_with_or_without_move_far_panels() {
         let head = metalense_head();
         let size = camera_frame_size();
-        // Placed at 11:02 UTC by a METALENSE head at (-1.77, 0.42, 0.33) in another tracking
-        // origin: 1.7 m from today's head.
-        let placed_in_another_origin = panel_pose_within_reach(
-            gravity_level(Pose::new(Quat::IDENTITY, Vec3::new(-1.774, 0.417, 0.334))),
-            0,
-        );
-        let far = unusable_held_place(placed_in_another_origin, size, head.position, size)
-            .expect("moved");
-        assert!(far.contains("farther than 1.5 m"), "{far}");
-
         let at_the_head = Pose::new(Quat::IDENTITY, head.position + Vec3::new(0.0, 0.1, -0.05));
-        let near = unusable_held_place(at_the_head, size, head.position, size).expect("moved");
-        assert!(near.contains("nearer than 0.2 m"), "{near}");
+        for move_far_panels in [false, true] {
+            let near = unusable_held_place(at_the_head, size, head.position, size, move_far_panels)
+                .expect("moved");
+            assert!(near.contains("nearer than 0.2 m"), "{near}");
+        }
     }
 
     #[test]
@@ -1900,14 +1953,15 @@ mod tests {
         let wanted = camera_frame_size();
         let held_size = stream_panel_size(1016, 665);
         let placed = standing_view_panel_pose(head, 0, held_size.height);
-        let reason = unusable_held_place(placed, held_size, head.position, wanted).expect("moved");
+        let reason =
+            unusable_held_place(placed, held_size, head.position, wanted, false).expect("moved");
         assert!(reason.contains("0.450x0.287 m"), "{reason}");
         let within_tolerance = GuiPanelSize {
             height: wanted.height + 0.004,
             ..wanted
         };
         assert_eq!(
-            unusable_held_place(placed, within_tolerance, head.position, wanted),
+            unusable_held_place(placed, within_tolerance, head.position, wanted, false),
             None
         );
     }
@@ -1917,7 +1971,7 @@ mod tests {
         let head = metalense_head();
         let size = camera_frame_size();
         assert_eq!(
-            place_for_claim(None, head.position, size),
+            place_for_claim(None, head.position, size, false),
             PanelPlace::AsHeld,
             "a new panel opens at its config's pose"
         );
@@ -1925,14 +1979,32 @@ mod tests {
         earlier_panel.size = size;
         earlier_panel.pose = to_qaros_pose(standing_view_panel_pose(head, 0, size.height));
         assert_eq!(
-            place_for_claim(Some(&earlier_panel), head.position, size),
+            place_for_claim(Some(&earlier_panel), head.position, size, true),
             PanelPlace::AsHeld
         );
         earlier_panel.pose = to_qaros_pose(Pose::from_translation(Vec3::new(3.0, 0.0, -4.0)));
+        assert_eq!(
+            place_for_claim(Some(&earlier_panel), head.position, size, false),
+            PanelPlace::AsHeld,
+            "a far panel stays without --move-far-panels"
+        );
         assert!(matches!(
-            place_for_claim(Some(&earlier_panel), head.position, size),
-            PanelPlace::MovedBecause(_)
+            place_for_claim(Some(&earlier_panel), head.position, size, true),
+            PanelPlace::MovedBecause(reason) if reason.contains("farther than 1.5 m")
         ));
+        earlier_panel.pose = to_qaros_pose(Pose::IDENTITY);
+        earlier_panel.size = GuiPanelSize {
+            width: 0.0,
+            height: 0.0,
+            ..size
+        };
+        assert!(
+            matches!(
+                place_for_claim(Some(&earlier_panel), head.position, size, false),
+                PanelPlace::MovedBecause(reason) if reason.contains("sized for another frame")
+            ),
+            "a panel listed Closed with no place left is moved without --move-far-panels"
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ With `--panels`, every demo opens a **timeline panel** in front of the first hea
 
 Demos with 2D views (structure from motion, air traffic) also open each view as a **panel** within reach of the same headset: 0.8 m away, to the right of the gaze, just below eye height. A Display Receiver places them only when no headset streams within 60 s.
 
-The Hub keeps every panel where it is, or where you moved it, across runs, as long as it stays within 1.5 m of your eyes; a panel left farther away, for example by another headset, opens in front of you again. Close the panels in the Hub Display, or add `-- --reset-panels`, to have the next run open them all in front of you again.
+The Hub keeps every panel where it is, or where you moved it, across runs, however far you walk from it. To bring panels left more than 1.5 m away (for example by another headset) back in front of you, add `-- --move-far-panels`. Close the panels in the Hub Display, or add `-- --reset-panels`, to have the next run open them all in front of you again.
 
 The viewer keeps each demo's app volume where you grabbed and zoomed it to, per demo, and starts it there at the next run. A two-hand spread zooms the scene from its tabletop size. Add `-- --reset-placement` to start a demo at its default place and size again.
 

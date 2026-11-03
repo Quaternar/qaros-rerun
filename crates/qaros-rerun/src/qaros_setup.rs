@@ -166,6 +166,7 @@ fn panel_hook(
         .with_panels_at_stop(panels_at_stop(options))
         .with_panel_posture(panel_posture(options))
         .with_reset_panels(options.qaros.reset_panels)
+        .with_move_far_panels(options.qaros.move_far_panels)
         .with_timeline_panel(gestures);
     Some(Box::new(PanelHook::new(panels, images)))
 }

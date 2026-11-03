@@ -10,6 +10,8 @@ repo: qaros-rerun
 
 > Amended by ADR-0091: a panel closed while held is reopened once a target's head streams after the close, and a panel listed `Closed` at its claim is created afresh and shown, at its held place when that place is of use.
 
+> Amended by ADR-0095: a held centre farther than 1.5 m from the eyes moves the panel only with `--move-far-panels`; the near and size rules stay.
+
 > Amends ADR-0083 (an existing panel keeps its place only while that place is of use; every claim waits for the head that places panels), ADR-0075 (a panel closed while held is seen at once and not hidden at Stop) and ADR-0087 (the claim's size is sent again with the first frame).
 
 ## Context
@@ -51,7 +53,7 @@ Seen on METALENSE 2 with QAROS 0.9.0-dev.3184 on 2026-11-02 (viewer logs `viewer
 ## Evidence and sources
 
 - [SP] `crates/qaros-sink/src/stream_panels.rs` (`PanelPlace`, `claim`, `reassert_with_the_first_frame`, `release_panels_closed_elsewhere`, `hide_all`; tests `a_panel_moved_by_its_claim_is_sized_moved_and_shown_then_all_three_again_with_its_first_frame`, `a_panel_closed_in_the_hub_display_is_released_at_the_next_sync_and_not_hidden_at_stop`, `a_panel_closed_after_the_last_sync_is_not_hidden_at_stop`).
-- [PN] `crates/qaros-sink/src/panels.rs` (`HELD_PLACE_FARTHEST_METERS`, `unusable_held_place`, `place_for_claim`, `PanelReset`; tests `a_panel_held_beyond_a_step_and_a_reach_or_at_the_head_is_moved`, `a_reset_closes_a_held_panel_then_claims_once_a_later_listing_shows_it_closed`), `crates/qaros-sink/src/panel_ids.rs`, `crates/qaros-sink/src/panel_state_watch.rs`, `crates/qaros-rerun/src/options.rs` (`--reset-panels`).
+- [PN] `crates/qaros-sink/src/panels.rs` (`HELD_PLACE_FARTHEST_METERS`, `unusable_held_place`, `place_for_claim`, `PanelReset`; tests `with_move_far_panels_a_panel_held_beyond_a_step_and_a_reach_is_moved`, `a_panel_held_at_the_head_is_moved_with_or_without_move_far_panels`, `a_reset_closes_a_held_panel_then_claims_once_a_later_listing_shows_it_closed`), `crates/qaros-sink/src/panel_ids.rs`, `crates/qaros-sink/src/panel_state_watch.rs`, `crates/qaros-rerun/src/options.rs` (`--reset-panels`).
 - [QS] qar-streaming source at `e487a311`, `libs/qar-streaming/src/` (`GuiPanelImpl.cpp`, `GuiPanelProcessor.hpp`, `CommonImpl.cpp`) and `libs/qar-streaming-c/src/v0/gui_panels.cpp` (`qar_impl_gui_panels_set_state`, `qar_impl_gui_panels_close_panel`).
 - [MX] QuaternAR mixer source at `4aeffc63`, `StereoKitGUI/src/Browser/Browser.hpp` and `qar-common-lib/include/qar_common/gui_panel_gestures/GuiPanelStreamViewport.hpp`.
 - [HDR] QAROS header at `e0c0195`, `qar-streaming-c/include/qar_streaming.h` (`QarGuiPanelSize`, `QarGuiPanelState`, `qar_gui_panels_get_or_create`).
