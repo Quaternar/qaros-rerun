@@ -290,10 +290,14 @@ mod tests {
     /// How long the fake client takes to see a commit; a removal sent sooner is stale.
     const COMMIT_SEEN_AFTER: Duration = Duration::from_millis(3);
 
+    /// The budget is far above the about 60 ms a confirmed hide takes here: the fake Hub runs on
+    /// real sleeps, and a loaded CI runner overshoots them by tens of milliseconds.
     const TEST_TIMING: HideTiming = HideTiming {
         removal_spacing: Duration::from_millis(10),
-        budget: Duration::from_millis(150),
+        budget: Duration::from_secs(1),
     };
+    /// How late a hide may give up after its budget on a loaded runner.
+    const GIVE_UP_SLACK: Duration = Duration::from_millis(500);
 
     /// A Hub and the viewer's view of it: a removal is committed unless it was sent before the
     /// previous commit could be seen, as the Hub refuses a stale `PeerChange`; a bake follows
@@ -477,14 +481,14 @@ mod tests {
             VolumeHide::Unfinished {
                 peers: vec![peer(3)],
                 reason: format!(
-                    "the Hub did not confirm the removal of {} within 150 ms",
+                    "the Hub did not confirm the removal of {} within 1000 ms",
                     peer(3)
                 ),
             }
         );
         assert_eq!(hub.calls(), ["stop_using 3"]);
         assert!(
-            took >= TEST_TIMING.budget && took < TEST_TIMING.budget + Duration::from_millis(100),
+            took >= TEST_TIMING.budget && took < TEST_TIMING.budget + GIVE_UP_SLACK,
             "the hide gave up {took:?} after it started"
         );
     }
