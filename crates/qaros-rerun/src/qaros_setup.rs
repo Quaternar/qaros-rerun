@@ -1,0 +1,786 @@
+//! `--sink qaros`: connects to the QAROS runtime before the viewer starts and builds the sink
+//! and the GUI panel hook. All QAROS handles stay on the UI thread from here on.
+//!
+//! With `--qaros-graphics vulkan` the order is the header's ("Basic flow", `b1338df`): onboard,
+//! read the session's adapter (`qar_session_get_graphics_device_id`), then create the viewer's
+//! own Vulkan device on it; the sink renders into each user's Vulkan render sender images.
+//! `--vulkan-device` overrides that: its device exists first and its adapter is chained into
+//! onboarding. With `--launched-by-qaros` the viewer stops when stdin closes; on Windows it
+//! joins as a local app, elsewhere the launch invite comes from stdin ("Launched by QAROS" in
+//! `onboarding-and-sessions.mdx`).
+
+use std::collections::HashMap;
+use std::io::BufRead as _;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use glam::Vec3;
+use qaros_sink::PanelImages;
+use qaros_sink::qaros::{GraphicsAdapter, PixelFormat};
+use qaros_sink::vulkan::{
+    QarosVulkanStream, QarosVulkanStreamOptions, VulkanSink, VulkanSinkOptions,
+};
+use qaros_sink::{
+    ConnectOptions, PanelView, PoseSpace, QarosConnection, QarosPanels, QarosSink,
+    QarosSinkOptions, WakeViewer, connect, end_process_after_teardown,
+    library_path_from_environment, runtime_directory_from_environment, start_stop_watchdog,
+    stop_on_console_events, storage_directory_from_environment,
+};
+use vulkan_device::{PhysicalDeviceIdentity, PhysicalDeviceSelector, VulkanDevice};
+
+use crate::device_setup::GraphicsChoice;
+use crate::headset::HeadsetSink;
+use crate::options::{
+    ColorFormatKind, Options, PoseSpaceKind, QarosGraphics, QarosOptions, RenderLoop,
+};
+use crate::panel_capture::PanelOutlet;
+use crate::viewer_app::{FrameHook, HeadsetFrame, StopRequest};
+
+const PANEL_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a view must have been published before it gets a panel.
+const PANEL_SETTLE: Duration = Duration::from_secs(3);
+/// How recently a view's frame must have changed for it to count as still published.
+const PANEL_LIVE: Duration = Duration::from_millis(1500);
+
+pub struct QarosSetup {
+    pub sink: HeadsetSink,
+    pub frame_hooks: Vec<Box<dyn FrameHook>>,
+    /// Set on Ctrl+C, Ctrl+Break or a closed console, and when QAROS closes stdin with
+    /// `--launched-by-qaros`.
+    pub stop_request: StopRequest,
+    /// The viewer's own Vulkan device: `named_vulkan` passed through, or the one created on
+    /// the session's adapter for `--qaros-graphics vulkan`.
+    pub vulkan: Option<VulkanDevice>,
+    /// The size the app volume holds after the start, which the data is fitted to (ADR-0098).
+    pub held_volume_size: Vec3,
+}
+
+/// `named_vulkan` is the `--vulkan-device` device, created before the session.
+pub async fn build(
+    options: &Options,
+    graphics: &GraphicsChoice,
+    wake_viewer: WakeViewer,
+    panel_outlet: Option<PanelOutlet>,
+    named_vulkan: Option<VulkanDevice>,
+) -> Result<QarosSetup, String> {
+    let qaros_options = &options.qaros;
+    let launch_line = launch_line(qaros_options)?;
+    // Watched from here on, so a Stop during onboarding is seen as soon as `connect` returns.
+    // Ctrl+C takes the same path: the console's default handler would exit with the library
+    // loaded and run its unload code.
+    let stop_request: StopRequest = Arc::new(AtomicBool::new(false));
+    if let Err(error) = stop_on_console_events(stop_and_wake(
+        &stop_request,
+        Arc::clone(&wake_viewer),
+        start_stop_watchdog,
+    )) {
+        re_log::warn!("qaros: Ctrl+C will end the viewer without its QAROS teardown ({error})");
+    }
+    if qaros_options.launched_by_qaros {
+        stop_when_closed(
+            std::io::stdin(),
+            stop_and_wake(&stop_request, Arc::clone(&wake_viewer), start_stop_watchdog),
+        );
+    }
+    let renders_on_vulkan = qaros_options.graphics() == QarosGraphics::Vulkan;
+    let adapter = named_vulkan
+        .as_ref()
+        .filter(|_| renders_on_vulkan)
+        .map(|vulkan| session_adapter(&vulkan.physical_device));
+    if let Some(adapter) = adapter {
+        re_log::info!("qaros: joining the session on adapter {adapter} (--vulkan-device)");
+    }
+    let connect_options = ConnectOptions {
+        library_path: qaros_options
+            .library_path
+            .clone()
+            .or_else(library_path_from_environment),
+        runtime_binaries_directory: runtime_directory_from_environment(),
+        storage_directory: storage_directory_from_environment(),
+        onboarding_id_file: qaros_options.onboarding_id_file(),
+        unanswered_peers_file: Some(qaros_options.unanswered_peers_file()),
+        pairing_code: qaros_options.pairing_code.clone(),
+        launch_line,
+        local_app: qaros_options.joins_as_local_app(),
+        peer_display_name: format!("{} viewer", qaros_options.display_name),
+        volume_name: qaros_options.volume_name.clone(),
+        volume_display_name: qaros_options.display_name.clone(),
+        volume_size: qaros_options.volume_size().to_array(),
+        resize_taken_over_volume: qaros_options.volume_size_flag.is_some(),
+        placement: options.placement(),
+        volume_placement_file: Some(qaros_options.volume_placement_file()),
+        reset_placement: qaros_options.reset_placement,
+        console_logging: true,
+        raise_gpu_priority: qaros_options.raise_gpu_priority,
+        adapter,
+    };
+    if let Some(path) = &connect_options.library_path {
+        re_log::info!("qaros: loading {}", path.display());
+    } else {
+        re_log::info!("qaros: loading the QAROS runtime by the default lookup");
+    }
+    let connection = Rc::new(connect(&connect_options, Arc::clone(&wake_viewer))?);
+    if is_requested(Some(&stop_request)) {
+        re_log::info!("qaros: stopped during onboarding; leaving the session and exiting");
+        drop(connection);
+        end_process_after_teardown(0);
+    }
+    re_log::info!(
+        "qaros: connected; app volume {:?} ready, looking for target peers",
+        qaros_options.volume_name
+    );
+    let held_size = connection.volume_config().size;
+    let held_volume_size = Vec3::new(held_size.width, held_size.length, held_size.height);
+
+    let vulkan = match named_vulkan {
+        Some(vulkan) => Some(vulkan),
+        None if renders_on_vulkan => {
+            let selector = device_selector(connection.adapter());
+            re_log::info!("qaros: creating the viewer's Vulkan device on {selector:?}");
+            Some(graphics.create_vulkan_device(&selector).await?)
+        }
+        None => None,
+    };
+    let sink = match vulkan.as_ref().filter(|_| renders_on_vulkan) {
+        Some(vulkan) => vulkan_sink(options, &connection, vulkan)?,
+        None => cpu_sink(options, &connection),
+    };
+
+    let frame_hooks: Vec<Box<dyn FrameHook>> = panel_hook(options, connection, panel_outlet)
+        .into_iter()
+        .collect();
+    Ok(QarosSetup {
+        sink,
+        frame_hooks,
+        stop_request,
+        vulkan,
+        held_volume_size,
+    })
+}
+
+/// The GUI panel hook: a panel per published view and the timeline panel, each a video
+/// stream of this viewer; `None` without panels.
+fn panel_hook(
+    options: &Options,
+    connection: Rc<QarosConnection>,
+    panel_outlet: Option<PanelOutlet>,
+) -> Option<Box<dyn FrameHook>> {
+    let PanelOutlet { images, gestures } = panel_outlet?;
+    re_log::info!("qaros: 2D views and the timeline open as GUI panels, each a video stream");
+    let panels = QarosPanels::new(connection, images.clone())
+        .with_panels_at_stop(panels_at_stop(options))
+        .with_panel_posture(panel_posture(options))
+        .with_reset_panels(options.qaros.reset_panels)
+        .with_move_far_panels(options.qaros.move_far_panels)
+        .with_timeline_panel(gestures);
+    Some(Box::new(PanelHook::new(panels, images)))
+}
+
+/// The physical device of the session's adapter. The launch invite carries the GPU only when
+/// the target advertised one (`onboarding-and-sessions.mdx` L250 at `b1338df`), so a session
+/// may name none; then the guess is the first discrete NVIDIA GPU, else the first discrete GPU,
+/// else the first device (the "creating the device on ..." line names it, with its LUID).
+fn device_selector(session_adapter: Option<GraphicsAdapter>) -> PhysicalDeviceSelector {
+    match session_adapter {
+        Some(GraphicsAdapter::Luid(luid)) => PhysicalDeviceSelector::Luid(luid),
+        Some(GraphicsAdapter::Uuid(uuid)) => PhysicalDeviceSelector::Uuid(uuid),
+        None => {
+            re_log::warn!(
+                "qaros: the session names no adapter; falling back to the first discrete NVIDIA \
+                 GPU, else the first discrete GPU, else the first device"
+            );
+            PhysicalDeviceSelector::Discrete
+        }
+    }
+}
+
+fn pose_space(options: &Options) -> PoseSpace {
+    match options.qaros.pose_space {
+        PoseSpaceKind::Room => PoseSpace::Room,
+        PoseSpaceKind::App => PoseSpace::App,
+    }
+}
+
+fn panels_at_stop(options: &Options) -> qaros_sink::PanelsAtStop {
+    match options.qaros.panels_at_stop {
+        crate::options::PanelsAtStopKind::Hide => qaros_sink::PanelsAtStop::Hide,
+        crate::options::PanelsAtStopKind::Keep => qaros_sink::PanelsAtStop::Keep,
+    }
+}
+
+fn panel_posture(options: &Options) -> qaros_sink::PanelPosture {
+    match options.qaros.panel_posture {
+        crate::options::PanelPostureKind::Standing => qaros_sink::PanelPosture::Standing,
+        crate::options::PanelPostureKind::Sitting => qaros_sink::PanelPosture::Sitting,
+    }
+}
+
+fn color_format(options: &Options) -> PixelFormat {
+    match options.qaros.color_format {
+        ColorFormatKind::Bgra => PixelFormat::B8G8R8A8,
+        ColorFormatKind::Rgba => PixelFormat::R8G8B8A8,
+    }
+}
+
+fn cpu_sink(options: &Options, connection: &Rc<QarosConnection>) -> HeadsetSink {
+    HeadsetSink::Cpu(Box::new(QarosSink::new(
+        Rc::clone(connection),
+        QarosSinkOptions {
+            depth_range: options.depth_range,
+            pose_space: pose_space(options),
+            color_format: color_format(options),
+            max_users: options.max_users,
+            stop_after_frames: options.stop_after_frames,
+        },
+    )))
+}
+
+fn vulkan_sink(
+    options: &Options,
+    connection: &Rc<QarosConnection>,
+    vulkan: &VulkanDevice,
+) -> Result<HeadsetSink, String> {
+    check_decoupled_window(options, vulkan.raw_queue.shares_wgpu_queue())?;
+    let stream = QarosVulkanStream::on_device(
+        Rc::clone(connection),
+        vulkan,
+        QarosVulkanStreamOptions {
+            pose_space: pose_space(options),
+            color_format: color_format(options),
+            max_users: options.max_users,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let sink = VulkanSink::new(
+        &vulkan.device,
+        &vulkan.queue,
+        &vulkan.raw_queue,
+        stream,
+        VulkanSinkOptions {
+            depth_range: options.depth_range,
+            stop_after_frames: options.stop_after_frames,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    re_log::info!("qaros: frames go straight into the Vulkan render senders' images");
+    Ok(HeadsetSink::Gpu(Box::new(sink)))
+}
+
+/// In a window, eframe submits and presents on wgpu's queue without the queue submission lock,
+/// so the decoupled render loop needs the raw batches on a queue of their own (ADR-0081). The
+/// device decides that, so this is checked once it exists rather than with the options. The
+/// default reaches this only on a GPU other than the one forecast at start (ADR-0088).
+fn check_decoupled_window(
+    options: &Options,
+    raw_queue_shares_wgpu_queue: bool,
+) -> Result<(), String> {
+    let windowed = options.headless_size.is_none();
+    if !(windowed && raw_queue_shares_wgpu_queue) {
+        return Ok(());
+    }
+    match options.render_loop {
+        RenderLoop::Inline => Ok(()),
+        RenderLoop::Decoupled => Err(
+            "--decoupled-render with the QAROS Vulkan sink in a window needs a second queue in \
+             the GPU's graphics queue family, which this device does not have; use --headless \
+             (or --launched-by-qaros without --window), --qaros-graphics cpu or --inline-render"
+                .to_owned(),
+        ),
+        RenderLoop::DecoupledWherePossible => Err(
+            "the decoupled render loop (the default) with the QAROS Vulkan sink in a window \
+             needs a second queue in the GPU's graphics queue family; the session's GPU has \
+             one, unlike the GPU checked at start; add --inline-render, or use --headless or \
+             --vulkan-device with the session's GPU"
+                .to_owned(),
+        ),
+    }
+}
+
+/// The adapter id QAROS gets for the viewer's device: the LUID on Windows (where the header
+/// accepts LUIDs), the UUID elsewhere.
+fn session_adapter(physical_device: &PhysicalDeviceIdentity) -> GraphicsAdapter {
+    match physical_device.device_luid {
+        Some(luid) if cfg!(target_os = "windows") => GraphicsAdapter::Luid(luid),
+        _ => GraphicsAdapter::Uuid(physical_device.device_uuid),
+    }
+}
+
+/// The launch invite from stdin when the viewer was launched by QAROS and does not join as a
+/// local app; `None` otherwise.
+fn launch_line(qaros_options: &QarosOptions) -> Result<Option<String>, String> {
+    if !qaros_options.launched_by_qaros || qaros_options.local_app {
+        return Ok(None);
+    }
+    if qaros_options.joins_as_local_app() {
+        re_log::info!("qaros: launched by QAROS on Windows; joining as a local app");
+        return Ok(None);
+    }
+    re_log::info!("qaros: waiting for the launch invite on stdin (--launched-by-qaros)");
+    read_launch_line().map(Some)
+}
+
+/// The first line of stdin: the launch invite QAROS writes there (one line of JSON), or a
+/// code typed by hand. Never logged.
+fn read_launch_line() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|error| format!("reading the launch line from stdin: {error}"))?;
+    let launch_line = line.trim_end_matches(['\r', '\n']);
+    if launch_line.is_empty() {
+        return Err("--launched-by-qaros: stdin carried no launch invite or code".to_owned());
+    }
+    Ok(launch_line.to_owned())
+}
+
+fn is_requested(stop_request: Option<&StopRequest>) -> bool {
+    stop_request.is_some_and(|stop_request| stop_request.load(Ordering::Acquire))
+}
+
+/// Sets `stop_request`, starts the stop's deadline (`start_watchdog`, the process's
+/// [`start_stop_watchdog`] outside tests) and wakes the viewer, which then stops at its next
+/// frame.
+fn stop_and_wake(
+    stop_request: &StopRequest,
+    wake_viewer: WakeViewer,
+    start_watchdog: fn(),
+) -> impl Fn() + Send + Sync + 'static {
+    let stop_request = Arc::clone(stop_request);
+    move || {
+        stop_request.store(true, Ordering::Release);
+        start_watchdog();
+        wake_viewer();
+    }
+}
+
+/// Watches `input` (stdin) on a thread of its own and calls `stop` when QAROS closes it.
+fn stop_when_closed(
+    mut input: impl std::io::Read + Send + 'static,
+    stop: impl FnOnce() + Send + 'static,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("qaros stdin".to_owned())
+        .spawn(move || {
+            let drained = std::io::copy(&mut input, &mut std::io::sink());
+            match drained {
+                Ok(_) => re_log::info!("qaros: stdin closed; stopping"),
+                Err(error) => re_log::warn!("qaros: reading stdin failed ({error}); stopping"),
+            }
+            stop();
+        });
+    if let Err(error) = spawned {
+        re_log::error!("qaros: cannot watch stdin ({error}); the viewer will not stop on its own");
+    }
+}
+
+/// Opens a GUI panel for each 2D view that keeps being published, checked once a second, and
+/// the timeline panel. It also feeds the panels' video senders on every call.
+struct PanelHook {
+    panels: QarosPanels,
+    /// The published views; an image's sequence rises only on change, so settling reads
+    /// `published_at`.
+    images: PanelImages,
+    last_sync: Option<Instant>,
+    /// The last sync ended with a new panel's first frame due; the next one runs as soon as it
+    /// is shown rather than a sync interval later (ADR-0101).
+    sync_once_shown: bool,
+    activity: HashMap<String, ViewActivity>,
+}
+
+impl PanelHook {
+    fn new(panels: QarosPanels, images: PanelImages) -> Self {
+        Self {
+            panels,
+            images,
+            last_sync: None,
+            sync_once_shown: false,
+            activity: HashMap::new(),
+        }
+    }
+}
+
+/// Whether a panel sync is due at `now`: [`PANEL_SYNC_INTERVAL`] after `last_sync`, or as soon
+/// as the first frame the last sync left due is out (`sync_once_shown` and no
+/// `first_frame_due`), so the next claim follows it without a wait of its own (ADR-0101).
+fn sync_due(
+    last_sync: Option<Instant>,
+    sync_once_shown: bool,
+    first_frame_due: bool,
+    now: Instant,
+) -> bool {
+    let interval_passed =
+        last_sync.is_none_or(|last| now.saturating_duration_since(last) >= PANEL_SYNC_INTERVAL);
+    interval_passed || (sync_once_shown && !first_frame_due)
+}
+
+/// The settled views among those published in `images`, and the names of all published views,
+/// as the sync sees them at `now`; `activity` tracks each published view between syncs.
+fn observe_views(
+    images: &PanelImages,
+    activity: &mut HashMap<String, ViewActivity>,
+    now: Instant,
+) -> (Vec<PanelView>, Vec<String>) {
+    let mut settled = Vec::new();
+    let published_view_names = images.view_names();
+    // A view that left the layout settles afresh when it returns, like a new one.
+    activity.retain(|name, _| published_view_names.contains(name));
+    for name in published_view_names.iter().cloned() {
+        let observed = images.latest(&name).map(|image| {
+            let activity = activity
+                .entry(name.clone())
+                .or_insert_with(|| ViewActivity::new(image.first_published_at.min(now), now));
+            activity.observe_published_at(image.published_at);
+            (*activity, image.width, image.height)
+        });
+        let Some((activity, width_in_pixel, height_in_pixel)) = observed else {
+            continue;
+        };
+        if activity.is_settled(now) {
+            settled.push(PanelView {
+                name,
+                width_in_pixel,
+                height_in_pixel,
+            });
+        }
+    }
+    (settled, published_view_names)
+}
+
+/// Since when a published view has been published and when it was last published, as seen by
+/// the sync.
+#[derive(Clone, Copy, Debug)]
+struct ViewActivity {
+    /// The view's first publish, not the sync that first saw it: a claim blocks the syncs for
+    /// seconds while the capture keeps publishing (ADR-0101).
+    first_seen: Instant,
+    last_published: Instant,
+}
+
+impl ViewActivity {
+    fn new(first_published_at: Instant, now: Instant) -> Self {
+        Self {
+            first_seen: first_published_at,
+            last_published: now,
+        }
+    }
+
+    /// An image keeps its sequence while unchanged, so the publish time tells whether a view
+    /// is still published.
+    fn observe_published_at(&mut self, published_at: Instant) {
+        self.last_published = self.last_published.max(published_at);
+    }
+
+    /// A view gets a panel once it has been published for `PANEL_SETTLE` and still is. A
+    /// replayed recording can carry its own blueprint, active for a moment while it loads; its
+    /// views are published briefly and then never again, so they get no panel.
+    fn is_settled(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.first_seen) >= PANEL_SETTLE
+            && now.saturating_duration_since(self.last_published) <= PANEL_LIVE
+    }
+}
+
+impl FrameHook for PanelHook {
+    fn on_viewer_frame(&mut self, headset: &HeadsetFrame) {
+        let now = Instant::now();
+        self.panels.pump_streams(now);
+        // New panels open within reach of a headset's head near the app volume, or of any head
+        // near it after a wait; QarosPanels ignores heads after the one it takes.
+        for head in &headset.heads {
+            self.panels.consider_head(head.user, head.pose, now);
+        }
+        let first_frame_due = self.panels.awaits_a_first_frame(now);
+        if !sync_due(self.last_sync, self.sync_once_shown, first_frame_due, now) {
+            return;
+        }
+        self.last_sync = Some(now);
+        let (views, published_view_names) = observe_views(&self.images, &mut self.activity, now);
+        self.panels.sync(&views, &published_view_names);
+        self.sync_once_shown = self.panels.awaits_a_first_frame(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(arguments: &[&str]) -> Options {
+        Options::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+            .expect("valid options")
+    }
+
+    #[test]
+    fn decoupled_render_in_a_window_needs_raw_batches_off_wgpus_queue() {
+        let windowed = options(&[
+            "--decoupled-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&windowed, false), Ok(()));
+        let refusal = check_decoupled_window(&windowed, true).expect_err("refused");
+        assert!(refusal.starts_with(
+            "--decoupled-render with the QAROS Vulkan sink in a window needs a second queue"
+        ));
+
+        let headless = options(&[
+            "--decoupled-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+        ]);
+        assert_eq!(check_decoupled_window(&headless, true), Ok(()));
+
+        let inline_window = options(&[
+            "--inline-render",
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&inline_window, true), Ok(()));
+    }
+
+    #[test]
+    fn the_default_in_a_window_refuses_only_a_one_queue_gpu_the_start_forecast_missed() {
+        let default_window = options(&[
+            "--sink",
+            "qaros",
+            "--qaros-graphics",
+            "vulkan",
+            "--launched-by-qaros",
+            "--window",
+        ]);
+        assert_eq!(check_decoupled_window(&default_window, false), Ok(()));
+        let refusal = check_decoupled_window(&default_window, true).expect_err("refused");
+        assert!(
+            refusal.starts_with("the decoupled render loop (the default) with the QAROS Vulkan")
+        );
+        assert!(refusal.contains("add --inline-render"));
+    }
+
+    #[test]
+    fn closing_the_watched_input_requests_a_stop_and_wakes_the_viewer() {
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let stop_request: StopRequest = Arc::new(AtomicBool::new(false));
+        stop_when_closed(
+            reader,
+            stop_and_wake(
+                &stop_request,
+                Arc::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }),
+                count_stdin_watchdog_start,
+            ),
+        );
+        std::io::Write::write_all(&mut writer, b"more lines after the launch line\n")
+            .expect("writing");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!is_requested(Some(&stop_request)), "open input: no stop");
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        drop(writer);
+        let started = Instant::now();
+        while wakes.load(Ordering::SeqCst) == 0 {
+            assert!(started.elapsed() < Duration::from_secs(5), "never woken");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            is_requested(Some(&stop_request)),
+            "stop set before the wake"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1, "the viewer is woken once");
+        assert!(!is_requested(None), "no watcher, no stop");
+        assert_eq!(
+            STDIN_WATCHDOG_STARTS.load(Ordering::SeqCst),
+            1,
+            "the closed input started the stop's deadline"
+        );
+    }
+
+    #[test]
+    fn a_console_stop_requests_the_same_stop_as_qaros_and_wakes_the_viewer() {
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        let stop_request: StopRequest = Arc::new(AtomicBool::new(false));
+        let on_ctrl_c = stop_and_wake(
+            &stop_request,
+            Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+            count_console_watchdog_start,
+        );
+        assert!(!is_requested(Some(&stop_request)));
+        assert_eq!(CONSOLE_WATCHDOG_STARTS.load(Ordering::SeqCst), 0);
+
+        std::thread::spawn(on_ctrl_c)
+            .join()
+            .expect("the handler thread");
+
+        assert!(is_requested(Some(&stop_request)));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            CONSOLE_WATCHDOG_STARTS.load(Ordering::SeqCst),
+            1,
+            "the console stop started the stop's deadline"
+        );
+    }
+
+    static STDIN_WATCHDOG_STARTS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static CONSOLE_WATCHDOG_STARTS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn count_stdin_watchdog_start() {
+        STDIN_WATCHDOG_STARTS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn count_console_watchdog_start() {
+        CONSOLE_WATCHDOG_STARTS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// One sync a second over `published_until_seconds`, the view published (its image
+    /// unchanged or not) before every sync while published; returns the syncs (in seconds) at
+    /// which the view is settled.
+    fn settled_syncs(published_until_seconds: u64, last_sync_seconds: u64) -> Vec<u64> {
+        let start = Instant::now();
+        let mut activity = ViewActivity::new(start, start);
+        let mut settled = Vec::new();
+        for second in 1..=last_sync_seconds {
+            let now = start + Duration::from_secs(second);
+            if second <= published_until_seconds {
+                activity.observe_published_at(now);
+            }
+            if activity.is_settled(now) {
+                settled.push(second);
+            }
+        }
+        settled
+    }
+
+    #[test]
+    fn a_view_settles_from_its_first_publish_not_from_the_sync_that_first_sees_it() {
+        let images = PanelImages::default();
+        let mut activity = HashMap::new();
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let first_published_at = images.latest("camera").unwrap().first_published_at;
+        let after_a_blocking_claim = first_published_at + PANEL_SETTLE;
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let (settled, _) = observe_views(&images, &mut activity, after_a_blocking_claim);
+        assert_eq!(
+            settled
+                .into_iter()
+                .map(|view| view.name)
+                .collect::<Vec<_>>(),
+            ["camera"],
+            "first seen by this sync, published since {PANEL_SETTLE:?} before it"
+        );
+    }
+
+    #[test]
+    fn the_sync_after_a_claim_runs_once_its_first_frame_is_out() {
+        // Run 2 of 2026-11-03: the camera's claim returned at 44.545 s, the sync right after
+        // it found the first frame due, and the frame was out at 44.593 s.
+        let gated_sync = Instant::now();
+        let first_frame_shown = gated_sync + Duration::from_millis(48);
+        assert!(
+            !sync_due(Some(gated_sync), true, true, first_frame_shown),
+            "still due"
+        );
+        assert!(
+            sync_due(Some(gated_sync), true, false, first_frame_shown),
+            "out 48 ms after the gated sync: no wait for the 1 s tick"
+        );
+        assert!(
+            !sync_due(Some(gated_sync), false, false, first_frame_shown),
+            "no first frame was due at the last sync: the 1 s tick holds"
+        );
+        assert!(
+            sync_due(
+                Some(gated_sync),
+                false,
+                true,
+                gated_sync + PANEL_SYNC_INTERVAL
+            ),
+            "the tick still runs, the claim itself waits for the frame"
+        );
+        assert!(sync_due(None, false, false, gated_sync), "the first sync");
+    }
+
+    #[test]
+    fn a_view_published_throughout_gets_its_panel_after_the_settle_time() {
+        assert_eq!(settled_syncs(10, 5), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn a_view_published_only_while_a_recording_loads_never_gets_a_panel() {
+        assert_eq!(settled_syncs(1, 10), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_view_that_left_the_layout_settles_afresh_when_it_returns() {
+        let now = Instant::now();
+        let long_ago = now.checked_sub(Duration::from_secs(20)).expect("an uptime");
+        let images = PanelImages::default();
+        let mut activity = HashMap::new();
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        images.publish_rgba8("plot", 1, 1, vec![0; 4]).unwrap();
+        observe_views(&images, &mut activity, long_ago);
+        let settled_names = |views: Vec<PanelView>| -> Vec<String> {
+            views.into_iter().map(|view| view.name).collect()
+        };
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(settled_names(settled), ["camera", "plot"]);
+        assert_eq!(published, ["camera", "plot"]);
+
+        images.retain_views(&["plot".to_owned()]);
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(settled_names(settled), ["plot"]);
+        assert_eq!(published, ["plot"]);
+
+        images.publish_rgba8("camera", 1, 1, vec![0; 4]).unwrap();
+        let (settled, published) = observe_views(&images, &mut activity, now);
+        assert_eq!(
+            settled_names(settled),
+            ["plot"],
+            "the returning camera waits the settle time again"
+        );
+        assert_eq!(published, ["camera", "plot"]);
+    }
+
+    #[test]
+    fn a_view_that_stops_being_published_is_no_longer_settled() {
+        assert_eq!(
+            settled_syncs(5, 8),
+            vec![3, 4, 5, 6],
+            "settled from 3 s, live 1.5 s past the last publish"
+        );
+    }
+
+    #[test]
+    fn the_device_is_picked_by_the_session_adapter() {
+        let luid = [0xb1, 0x5f, 0x0d, 0x04, 0, 0, 0, 0];
+        assert_eq!(
+            device_selector(Some(GraphicsAdapter::Luid(luid))),
+            PhysicalDeviceSelector::Luid(luid)
+        );
+        let uuid = [7; 16];
+        assert_eq!(
+            device_selector(Some(GraphicsAdapter::Uuid(uuid))),
+            PhysicalDeviceSelector::Uuid(uuid)
+        );
+        assert_eq!(device_selector(None), PhysicalDeviceSelector::Discrete);
+    }
+}

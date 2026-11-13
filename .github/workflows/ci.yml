@@ -1,0 +1,68 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    macos:
+        name: macOS (format, lint, tests against qaros-stub)
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            - uses: Swatinem/rust-cache@v2
+            - name: Format
+              run: cargo fmt --all --check
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets -- -D warnings
+            - name: Tests
+              run: cargo test --workspace
+
+    windows:
+        name: Windows (build and lint, no QAROS runtime)
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            - uses: Swatinem/rust-cache@v2
+            - name: Clippy
+              run: cargo clippy --workspace --all-targets -- -D warnings
+            - name: Release build of the viewer
+              run: cargo build --release -p qaros-rerun
+            # The release build above is already paid for, so publishing it costs only the upload.
+            # The layout mirrors the repository, so the demo launchers find
+            # target/release/qaros-rerun.exe without a --viewer argument.
+            - name: Stage the viewer for download
+              id: stage
+              shell: pwsh
+              env:
+                  # A pull_request run builds the merge with its base; testers know the head commit.
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+              run: |
+                  $artifactName = "qaros-rerun-windows-x64-$($env:HEAD_SHA.Substring(0, 8))"
+                  $staging = Join-Path $env:RUNNER_TEMP $artifactName
+                  New-Item -ItemType Directory -Force (Join-Path $staging "target/release") | Out-Null
+                  Copy-Item target/release/qaros-rerun.exe, target/release/log-test-scene.exe (Join-Path $staging "target/release")
+                  Copy-Item -Recurse demos (Join-Path $staging "demos")
+                  Copy-Item .github/artifact/README.md $staging
+                  Set-Content (Join-Path $staging "BUILD.txt") "head commit $env:HEAD_SHA, built commit $env:GITHUB_SHA, ref $env:GITHUB_REF, run $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+                  "name=$artifactName" >> $env:GITHUB_OUTPUT
+                  "directory=$staging" >> $env:GITHUB_OUTPUT
+            - name: Upload the viewer
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ steps.stage.outputs.name }}
+                  path: ${{ steps.stage.outputs.directory }}
+                  if-no-files-found: error
+                  retention-days: 14

@@ -1,0 +1,1020 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+use frame_sink::UserId;
+use qaros::PeerId;
+use qaros::{
+    AppVolumeConfig, AppVolumeId, AppVolumeSize, BlockingOptions, GraphicsAdapter, Library,
+    LibraryConfig, OnboardMethod, OnboardingId, PeerInfo, PeerPresentation, PendingRenderSender,
+    RenderRequest, RenderSenderConfig, Runtime, RuntimeConfig, Session, StatusCode, Subscription,
+};
+use xr_math::{AppPlacement, VolumeTransform};
+
+use crate::peer_devices::{PeerDevice, read_peer_device};
+use crate::remembered_placement::PlacementMemory;
+use crate::runtime_version::{MINIMUM_RUNTIME_VERSION, is_older_than};
+use crate::stop_watchdog::{TeardownStep, enter_teardown_step};
+use crate::volume_gestures::{RunningGestures, VolumeGestureSubscription, VolumeGestures};
+use crate::volume_transform::{
+    FollowedVolume, LiveVolume, StartupCorrection, USER_ZOOM_RANGE, describe, is_user_zoom,
+    read_latest,
+};
+use crate::volume_users::{ListedVolume, ReportedUsers, UsedByWatch, list_volume};
+use crate::volume_visibility::{SessionVolume, hide_at_stop, hide_left_over_at_start};
+
+/// When a render sender's creation gives up. A creation finishes once the target answers,
+/// which can take a while for a target that is still starting up. The creation runs in the
+/// background and holds no user slot, so the timeout only bounds how long the creation for a
+/// target that does not answer runs before the target is held back as unanswered.
+pub(crate) const SENDER_CREATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a local app's first start waits for a person to allow it in the Hub; `None`
+/// leaves it to the Hub.
+const LOCAL_APP_APPROVAL_TIMEOUT: Option<Duration> = None;
+
+/// What the Hub waits when `approval_timeout_ms` is 0 (`qar_onboard_local_app_ext_default`
+/// in `qar_streaming.h`).
+const HUB_DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// `QAROS_DLL`, else `None`: the binding's default lookup ([`Library::load_default`]).
+pub fn library_path_from_environment() -> Option<PathBuf> {
+    std::env::var_os("QAROS_DLL").map(PathBuf::from)
+}
+
+/// `QAROS_RUNTIME_DIR`, else `None` (the library's own directory).
+pub fn runtime_directory_from_environment() -> Option<PathBuf> {
+    std::env::var_os("QAROS_RUNTIME_DIR").map(PathBuf::from)
+}
+
+/// `QAROS_STORAGE_DIR`, else `None` (the library default). Tests point it at a scratch
+/// directory so the runtime's certificates and session state stay out of the user's.
+pub fn storage_directory_from_environment() -> Option<PathBuf> {
+    std::env::var_os("QAROS_STORAGE_DIR").map(PathBuf::from)
+}
+
+/// Wakes the viewer from a library thread, for example `egui::Context::request_repaint`.
+pub type WakeViewer = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone, Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent command-line switch"
+)]
+pub struct ConnectOptions {
+    /// `None` finds the runtime with the binding's default lookup: a runtime already loaded,
+    /// one beside the executable, `QAROS_RUNTIME_DIR`, the installed QAROS, then `PATH`.
+    pub library_path: Option<PathBuf>,
+    /// The package's `bin/`; `None` uses the library's directory, as the C samples do.
+    pub runtime_binaries_directory: Option<PathBuf>,
+    /// `None` keeps the library default (`%LOCALAPPDATA%\Quaternar\QarOS` on Windows).
+    pub storage_directory: Option<PathBuf>,
+    /// Holds the onboarding id in the library's UUID text form; written after onboarding.
+    pub onboarding_id_file: PathBuf,
+    /// Remembers the targets whose sender creation timed out, so the next runs hold them back
+    /// too (`TargetPeers`); `None` remembers them for this run only.
+    pub unanswered_peers_file: Option<PathBuf>,
+    /// The Hub's current pairing code; used when there is no stored id or rejoin fails.
+    pub pairing_code: Option<String>,
+    /// The first stdin line when QAROS launches the app ("Launched by QAROS" in
+    /// `onboarding-and-sessions.mdx`): a JSON launch invite (starts with `{`), or a code typed
+    /// by hand. Valid for this start only, so it is always onboarded with, never replaced by
+    /// a rejoin, and the resulting id is not stored.
+    pub launch_line: Option<String>,
+    /// Join the Hub installed on this PC as a local app (`QarOnboardLocalAppExt`), with no
+    /// code or invite. The Hub asks a person to allow the app on its first start. Stateless,
+    /// so it takes precedence over the launch line, a stored id and a pairing code.
+    pub local_app: bool,
+    /// How the viewer appears in the peer list.
+    pub peer_display_name: String,
+    /// The app volume's common name: QAROS hands an app that asks for an existing name that
+    /// volume and its render stream.
+    pub volume_name: String,
+    /// How the app volume is labelled for people; unlike the common name it may repeat.
+    pub volume_display_name: String,
+    /// Width, length, height in room meters, for a volume this start creates.
+    pub volume_size: [f32; 3],
+    /// `--volume-size` was given: a taken-over volume is set to `volume_size`. Otherwise it keeps
+    /// the size QAROS holds, which [`QarosConnection::volume_config`] then reports (ADR-0098).
+    pub resize_taken_over_volume: bool,
+    /// Volume pose, app pose and app scale (the user's zoom, 1 from the viewer) requested for
+    /// the volume, and Rerun's world in it. The frames are mapped with the volume's transform as
+    /// QAROS holds it, which may differ (`QarosConnection::volume_transform`). Only the data
+    /// fit's scale is read here: an app scale equal to it is the `--scale` an earlier build set
+    /// (ADR-0092).
+    pub placement: AppPlacement,
+    /// Remembers, per volume name, the pose, app pose and user zoom the volume was last followed
+    /// at, and asks for the volume there at the next start while `placement` is the one it was
+    /// moved from (ADR-0085, ADR-0092); `None` always asks for `placement`.
+    pub volume_placement_file: Option<PathBuf>,
+    /// Ask for `placement`, set a volume taken over to it, and forget the remembered place
+    /// (`--reset-placement`).
+    pub reset_placement: bool,
+    pub console_logging: bool,
+    /// Sets the process's GPU scheduling priority to high on Windows (a diagnostic).
+    pub raise_gpu_priority: bool,
+    /// The GPU the session's devices and every render sender's images live on
+    /// (`QarGraphicsDeviceId`, chained into onboard and rejoin); `None` leaves it to QAROS
+    /// (the GPU in the launch invite) or the library, and the viewer creates its device on
+    /// the adapter the session reports. Set only when the viewer's device exists first
+    /// (`--vulkan-device`).
+    pub adapter: Option<GraphicsAdapter>,
+}
+
+/// The session and what hangs off it. Fields drop in declaration order: the subscriptions are
+/// cancelled before the session is destroyed, apart from the used-by watch, which ends with it,
+/// and the library goes last.
+pub struct QarosConnection {
+    /// `None` when the subscription failed; the transform then follows the update poll only.
+    volume_gestures: Option<VolumeGestureSubscription>,
+    gesture_inbox: VolumeGestures,
+    running_gestures: RefCell<RunningGestures>,
+    request_subscription: Subscription,
+    peer_subscription: Subscription,
+    volume_subscription: Subscription,
+    /// The volume's used-by peers as QAROS last reported them, which Stop removes.
+    reported_users: ReportedUsers,
+    requests: Receiver<RenderRequest>,
+    peer_updates: Receiver<PeerInfo>,
+    wake_viewer: WakeViewer,
+    volume: AppVolumeId,
+    volume_config: AppVolumeConfig,
+    live_volume: RefCell<LiveVolume>,
+    adapter: Option<GraphicsAdapter>,
+    unanswered_peers_file: Option<PathBuf>,
+    /// The peer each user the sink created a sender for streams to. User ids are never reused,
+    /// so an entry stays right after its user leaves.
+    peers_by_user: RefCell<BTreeMap<UserId, PeerId>>,
+    session: Session,
+    /// Dropped after the session, as the binding's own subscriptions are, so its cancel token
+    /// outlives the session. `None` when the subscription failed; Stop then removes the peers
+    /// the listing at connect reported, else the peers the senders streamed to.
+    _used_by_watch: Option<UsedByWatch>,
+    _library_dropped_last: LibraryDroppedLast,
+}
+
+/// Holds the library past the session, so its destruction is a teardown step of its own.
+struct LibraryDroppedLast {
+    _library: Library,
+}
+
+impl Drop for LibraryDroppedLast {
+    fn drop(&mut self) {
+        enter_teardown_step(TeardownStep::LibraryDestroy);
+    }
+}
+
+impl std::fmt::Debug for QarosConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QarosConnection")
+            .field("request_subscription", &self.request_subscription)
+            .field("peer_subscription", &self.peer_subscription)
+            .field("volume_subscription", &self.volume_subscription)
+            .field("volume", &self.volume)
+            .field("session", &self.session)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The volume is hidden while the session is still alive: every peer that uses it is removed,
+/// so no headset draws its box or its last content, and QAROS keeps it with its place for the
+/// next run to take over (ADR-0089). The viewer never closes it; a hide that cannot be finished
+/// within its budget leaves it as it is, and the next start finishes it (ADR-0093). The
+/// connection drops last, after the sink and the panels that hold it, so the senders are gone
+/// and the panels hidden before the volume is. Its last place is stored after the hide
+/// (ADR-0085).
+impl Drop for QarosConnection {
+    fn drop(&mut self) {
+        enter_teardown_step(TeardownStep::HideVolume);
+        let served_peers: Vec<PeerId> = self.peers_by_user.get_mut().values().copied().collect();
+        hide_at_stop(
+            &SessionVolume {
+                session: &self.session,
+                volume: self.volume,
+                reported: &self.reported_users,
+            },
+            &served_peers,
+            &self.volume_config.common_name,
+        );
+        self.live_volume
+            .get_mut()
+            .remember_before_close(&self.session, self.volume);
+        // The fields drop after this body: the subscriptions, the session, then the library.
+        enter_teardown_step(TeardownStep::SessionDestroy);
+    }
+}
+
+impl QarosConnection {
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn volume(&self) -> AppVolumeId {
+        self.volume
+    }
+
+    /// What the volume was asked for at start: the requested placement, or the place it was
+    /// last moved to (ADR-0085); its transform may differ by now (see
+    /// [`Self::volume_transform`]). Its size is the one the volume holds after the start: the
+    /// requested one, or a taken-over volume's own (ADR-0098).
+    pub fn volume_config(&self) -> &AppVolumeConfig {
+        &self.volume_config
+    }
+
+    /// The volume's pose, app pose and app scale as QAROS holds them, for the frames begun now:
+    /// read at connect, then again on every update of the volume, on every frame while a grab
+    /// or spread runs, and at least every 100 ms (`LATEST_VALUES_POLL_PERIOD`). Gesture events
+    /// are logged as they are drained here. Each change of the transform is logged once.
+    pub fn volume_transform(&self) -> VolumeTransform {
+        let gestures = self.gesture_inbox.take();
+        let mut running = self.running_gestures.borrow_mut();
+        let transform_may_have_changed = running.absorb(&gestures);
+        let read_now = transform_may_have_changed || running.any_running();
+        self.live_volume
+            .borrow_mut()
+            .refresh(&self.session, self.volume, read_now)
+    }
+
+    /// The adapter the session's GPU devices live on (`qar_session_get_graphics_device_id`),
+    /// else the one chained at onboarding; `None` when neither is known.
+    pub fn adapter(&self) -> Option<GraphicsAdapter> {
+        self.adapter
+    }
+
+    pub fn unanswered_peers_file(&self) -> Option<&Path> {
+        self.unanswered_peers_file.as_deref()
+    }
+
+    /// The sink starts creating `user`'s render sender for `peer`.
+    pub(crate) fn note_user_peer(&self, user: UserId, peer: PeerId) {
+        self.peers_by_user.borrow_mut().insert(user, peer);
+    }
+
+    pub fn peer_of_user(&self, user: UserId) -> Option<PeerId> {
+        self.peers_by_user.borrow().get(&user).copied()
+    }
+
+    /// What QAROS says `peer`'s device is; `Ok(None)` when the peer list does not hold it.
+    pub fn peer_device(&self, peer: PeerId) -> Result<Option<PeerDevice>, String> {
+        read_peer_device(self, peer)
+    }
+
+    /// Every render stream request since the last call, oldest first.
+    pub fn take_render_requests(&self) -> Vec<RenderRequest> {
+        self.requests.try_iter().collect()
+    }
+
+    /// Every peer update since the last call, oldest first.
+    pub fn take_peer_updates(&self) -> Vec<PeerInfo> {
+        self.peer_updates.try_iter().collect()
+    }
+
+    /// Wakes the viewer from any thread, for example when an async frame arrives.
+    pub fn wake_viewer(&self) -> WakeViewer {
+        Arc::clone(&self.wake_viewer)
+    }
+
+    /// Starts creating a CPU render sender in the background; the viewer is woken when it
+    /// finishes and picks it up with `PendingRenderSender::poll`.
+    pub fn start_render_sender(
+        &self,
+        config: &RenderSenderConfig,
+    ) -> qaros::Result<PendingRenderSender> {
+        let wake_viewer = self.wake_viewer();
+        self.session
+            .start_render_sender(config, Some(SENDER_CREATION_TIMEOUT), move || {
+                wake_viewer();
+            })
+    }
+
+    /// Starts creating a Vulkan render sender in the background, as
+    /// [`Self::start_render_sender`].
+    ///
+    /// # Safety
+    ///
+    /// As `qaros::Session::start_vulkan_render_sender`: `vulkan` names a device on the
+    /// session's adapter with QAROS's extensions, which outlives the sender.
+    #[cfg(feature = "vulkan")]
+    #[allow(unsafe_code)]
+    pub unsafe fn start_vulkan_render_sender(
+        &self,
+        config: &RenderSenderConfig,
+        vulkan: qaros::vulkan::VulkanStreamParams,
+    ) -> qaros::Result<PendingRenderSender> {
+        let wake_viewer = self.wake_viewer();
+        // SAFETY: forwarded to the caller.
+        unsafe {
+            self.session.start_vulkan_render_sender(
+                config,
+                vulkan,
+                Some(SENDER_CREATION_TIMEOUT),
+                move || wake_viewer(),
+            )
+        }
+    }
+}
+
+pub fn connect(
+    options: &ConnectOptions,
+    wake_viewer: WakeViewer,
+) -> Result<QarosConnection, String> {
+    crate::host_timing::keep_process_waits_precise();
+    if options.raise_gpu_priority {
+        crate::host_timing::raise_gpu_priority();
+    }
+    let library = load_library(options)?;
+    let runtime = library
+        .create_runtime(&RuntimeConfig {
+            runtime_binaries_directory: options.runtime_binaries_directory.clone().or_else(|| {
+                library
+                    .library_path()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+            }),
+            storage_directory: options.storage_directory.clone(),
+            ephemeral_storage: false,
+        })
+        .map_err(|error| error.to_string())?;
+    let presentation = PeerPresentation {
+        display_name: Some(options.peer_display_name.clone()),
+        app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        custom_info: None,
+        device_identity: None,
+    };
+    let session = join_session(&library, &runtime, options, &presentation)?;
+    let adapter = session_adapter(&session, options.adapter);
+
+    let (placement_memory, startup_transform) = open_placement_memory(options);
+    let mut volume_config = volume_config(options, startup_transform);
+    let volume = session
+        .app_volumes()
+        .get_or_create(&volume_config)
+        .map_err(|error| error.to_string())?;
+    let reported_users = ReportedUsers::default();
+    let listed_volume = list_and_warn_if_closed(&session, volume, &volume_config.common_name);
+    let left_over_peers = seed_reported_users(listed_volume, &reported_users);
+    volume_config.size = settle_taken_over_volume(
+        &session,
+        volume,
+        &volume_config.common_name,
+        startup_transform,
+        options,
+    );
+    // Subscribed before the first read, so no change falls between the two.
+    let (volume_subscription, volume_updates) = forward_and_wake(&wake_viewer, |forward| {
+        session.app_volumes().subscribe(forward)
+    })?;
+    let used_by_watch = watch_used_by(&session, volume, &reported_users);
+    let followed_volume = FollowedVolume::new(
+        &volume_config.common_name,
+        startup_transform,
+        read_latest(&session, volume).map_err(|error| error.to_string()),
+    );
+
+    // Peer updates first: a peer that requests a stream right away is then already listed.
+    let (peer_subscription, peer_updates) = forward_and_wake(&wake_viewer, |forward| {
+        session.subscribe_peer_updates(forward)
+    })?;
+    let (request_subscription, requests) = forward_and_wake(&wake_viewer, |forward| {
+        session.subscribe_render_requests(forward)
+    })?;
+
+    let library_dropped_last = LibraryDroppedLast {
+        _library: session.library(),
+    };
+    let mut connection = QarosConnection {
+        volume_gestures: None,
+        gesture_inbox: VolumeGestures::default(),
+        running_gestures: RefCell::new(RunningGestures::default()),
+        request_subscription,
+        peer_subscription,
+        volume_subscription,
+        reported_users,
+        requests,
+        peer_updates,
+        wake_viewer,
+        volume,
+        volume_config,
+        live_volume: RefCell::new(LiveVolume::new(
+            followed_volume,
+            volume_updates,
+            placement_memory,
+        )),
+        adapter,
+        unanswered_peers_file: options.unanswered_peers_file.clone(),
+        peers_by_user: RefCell::new(BTreeMap::new()),
+        session,
+        _used_by_watch: used_by_watch,
+        _library_dropped_last: library_dropped_last,
+    };
+    follow_volume_gestures(&mut connection);
+    if left_over_peers {
+        hide_left_over_at_start(
+            &SessionVolume {
+                session: &connection.session,
+                volume: connection.volume,
+                reported: &connection.reported_users,
+            },
+            &connection.volume_config.common_name,
+        );
+    }
+    Ok(connection)
+}
+
+/// The QAROS library from `library_path` or the default lookup, with its runtime version
+/// logged and checked against the oldest this viewer supports.
+fn load_library(options: &ConnectOptions) -> Result<Library, String> {
+    let library_config = LibraryConfig {
+        console_logging: options.console_logging,
+        ..LibraryConfig::default()
+    };
+    // SAFETY: the path, or the default lookup, names a qar-streaming-c build matching the
+    // header vendored in qaros-sys (the QAROS package, or qaros-stub).
+    #[allow(unsafe_code)]
+    let library = match &options.library_path {
+        Some(path) => unsafe { Library::load(path, &library_config) }
+            .map_err(|error| format!("{}: {error}", path.display()))?,
+        None => unsafe { Library::load_default(&library_config) }
+            .map_err(|error| format!("the QAROS runtime: {error}"))?,
+    };
+    if let Some(loaded) = library.library_path() {
+        log::info!("qaros: loaded {}", loaded.display());
+    }
+    match library.runtime_info() {
+        Ok(info) => {
+            log::info!(
+                "qaros: runtime {} ({}, C API {})",
+                info.version,
+                info.flavor,
+                info.c_api
+            );
+            if is_older_than(&info.version, MINIMUM_RUNTIME_VERSION) == Some(true) {
+                log::warn!(
+                    "qaros: runtime {} is older than {MINIMUM_RUNTIME_VERSION}, the oldest this \
+                     viewer supports; its mixer can fail when stream panels restart",
+                    info.version
+                );
+            }
+        }
+        Err(error) => log::warn!("qaros: cannot read the runtime's version: {error}"),
+    }
+    Ok(library)
+}
+
+/// The memory of where the volume was last placed, and the transform to ask for: the
+/// remembered place when there is one for this request, else the requested placement.
+fn open_placement_memory(options: &ConnectOptions) -> (Option<PlacementMemory>, VolumeTransform) {
+    let requested = options.placement.volume_transform();
+    let Some(file) = &options.volume_placement_file else {
+        return (None, requested);
+    };
+    let (memory, startup_transform) = PlacementMemory::open(
+        file.clone(),
+        &options.volume_name,
+        requested,
+        options.reset_placement,
+    );
+    (Some(memory), startup_transform)
+}
+
+/// Subscribes to the volume's gestures, so the transform is read every frame while one runs
+/// and each event is logged. Without the subscription the transform follows the update poll.
+fn follow_volume_gestures(connection: &mut QarosConnection) {
+    match VolumeGestureSubscription::subscribe(
+        connection,
+        connection.volume,
+        connection.gesture_inbox.clone(),
+        Arc::clone(&connection.wake_viewer),
+    ) {
+        Ok(subscription) => connection.volume_gestures = Some(subscription),
+        Err(error) => {
+            log::warn!("qaros: gestures on the app volume are not followed or logged: {error}");
+        }
+    }
+}
+
+/// The one listing of the connect, about 4 s: whether QAROS handed back a closed volume, and
+/// which peers use it. A volume closed in the Hub is rebuilt from the init by `get_or_create` in
+/// QAROS's source; the header does not promise it. A closed volume handed back would leave this
+/// run with nothing on screen, so it is reported where the run's log starts.
+fn list_and_warn_if_closed(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+) -> Option<ListedVolume> {
+    match list_volume(session, volume) {
+        Ok(Some(listed)) => {
+            if listed.closed {
+                log::warn!(
+                    "qaros: QAROS handed back app volume {common_name:?} closed; content may not show (use another --volume-name)"
+                );
+            }
+            Some(listed)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            log::warn!("qaros: cannot list app volumes: {error}");
+            None
+        }
+    }
+}
+
+/// Records the listed used-by peers as QAROS's first report; whether any are listed, which
+/// before the run's first sender means an earlier run left them.
+fn seed_reported_users(listed: Option<ListedVolume>, reported_users: &ReportedUsers) -> bool {
+    match listed.map(|listed| listed.used_by) {
+        Some(Ok(peers)) => {
+            let left_over = !peers.is_empty();
+            reported_users.report(peers);
+            left_over
+        }
+        Some(Err(error)) => {
+            log::warn!("qaros: cannot read which peers use the app volume: {error}");
+            false
+        }
+        None => false,
+    }
+}
+
+/// Keeps `reported_users` current from the volume's updates; without it Stop removes the peers
+/// last reported, else the served ones.
+fn watch_used_by(
+    session: &Session,
+    volume: AppVolumeId,
+    reported_users: &ReportedUsers,
+) -> Option<UsedByWatch> {
+    UsedByWatch::subscribe(session, volume, reported_users.clone())
+        .inspect_err(|error| {
+            log::warn!(
+                "qaros: cannot follow which peers use the app volume ({error}); Stop removes the peers known at connect or streamed to"
+            );
+        })
+        .ok()
+}
+
+/// A taken-over volume keeps the place QAROS holds and the user's zoom, unless
+/// `--reset-placement` asks for the flags' placement (ADR-0089, ADR-0092), and keeps its size
+/// unless `--volume-size` asks for one (ADR-0098). Returns the size the volume holds.
+fn settle_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_transform: VolumeTransform,
+    options: &ConnectOptions,
+) -> AppVolumeSize {
+    if options.reset_placement {
+        reset_taken_over_volume(session, volume, common_name, startup_transform);
+    } else {
+        keep_only_a_user_zoom(
+            session,
+            volume,
+            common_name,
+            startup_transform.app_scale,
+            options.placement.data_fit.scale,
+        );
+    }
+    size_taken_over_volume(
+        session,
+        volume,
+        common_name,
+        requested_volume_size(options),
+        options.resize_taken_over_volume,
+    )
+}
+
+/// `get_or_create` ignores the init for a volume that is open, typically one an earlier run hid
+/// at Stop, and hands it over with the transform QAROS holds, which the run keeps, as a
+/// reattached panel keeps its place (ADR-0089). `--reset-placement` is the exception: it asks
+/// for the flags' placement, so the parts of a taken-over volume that differ from it are set.
+/// A volume this start created already holds it, so no call is made for it.
+fn reset_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_transform: VolumeTransform,
+) {
+    let live = match read_latest(session, volume) {
+        Ok(live) => live,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s transform at start ({error}); it is not reset to the requested placement"
+            );
+            return;
+        }
+    };
+    let correction = StartupCorrection::between(live, startup_transform);
+    if correction.is_empty() {
+        return;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} as QAROS holds it ({}); --reset-placement sets it to the requested placement ({})",
+        describe(live),
+        describe(startup_transform)
+    );
+    let volumes = session.app_volumes();
+    let pose_set = correction
+        .volume_pose
+        .map_or(Ok(()), |pose| volumes.set_pose(volume, to_qaros_pose(pose)));
+    let app_pose_set = correction.app_pose.map_or(Ok(()), |app_pose| {
+        volumes.set_app_pose(volume, to_qaros_pose(app_pose))
+    });
+    let app_scale_set = correction
+        .app_scale
+        .map_or(Ok(()), |app_scale| volumes.set_app_scale(volume, app_scale));
+    for (part, set) in [
+        ("pose", pose_set),
+        ("app pose", app_pose_set),
+        ("app scale", app_scale_set),
+    ] {
+        if let Err(error) = set {
+            log::warn!(
+                "qaros: cannot set app volume {common_name:?}'s {part} at start: {error}; frames map with the transform QAROS holds"
+            );
+        }
+    }
+}
+
+/// Within a millimetre a taken-over volume already has the requested size.
+const VOLUME_SIZE_TOLERANCE_METERS: f32 = 0.001;
+
+/// `get_or_create` hands an open volume over with the size an earlier run asked for, or a person
+/// set in the Hub. It keeps that size unless `--volume-size` was given, which sets it (ADR-0094,
+/// ADR-0098); its place and the user's zoom stay as QAROS holds them either way. A volume this
+/// start created already has the requested size, so no call is made for it. Returns the size
+/// the volume holds, which the data is fitted to.
+fn size_taken_over_volume(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    requested: AppVolumeSize,
+    resize_requested: bool,
+) -> AppVolumeSize {
+    let live = match session.app_volumes().latest_size(volume) {
+        Ok(live) => live,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s size at start ({error}); it is kept as QAROS holds it, and the data fits to the requested {}",
+                describe_volume_size(requested)
+            );
+            return requested;
+        }
+    };
+    let settled = settled_volume_size(live, requested, resize_requested);
+    if settled == live {
+        if !same_volume_size(live, requested) {
+            log::info!(
+                "qaros: took over app volume {common_name:?} at {}; kept its size, the data fits to it (--volume-size sets one)",
+                describe_volume_size(live)
+            );
+        }
+        return live;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} at {}; resized to the requested {}",
+        describe_volume_size(live),
+        describe_volume_size(requested)
+    );
+    if let Err(error) = session.app_volumes().set_size(volume, requested) {
+        log::warn!(
+            "qaros: cannot resize app volume {common_name:?} at start: {error}; it stays at {}",
+            describe_volume_size(live)
+        );
+        return live;
+    }
+    requested
+}
+
+/// The size a taken-over volume ends with: its own, unless `--volume-size` asks for another.
+fn settled_volume_size(
+    live: AppVolumeSize,
+    requested: AppVolumeSize,
+    resize_requested: bool,
+) -> AppVolumeSize {
+    if resize_requested && !same_volume_size(live, requested) {
+        requested
+    } else {
+        live
+    }
+}
+
+fn same_volume_size(left: AppVolumeSize, right: AppVolumeSize) -> bool {
+    [
+        left.width - right.width,
+        left.length - right.length,
+        left.height - right.height,
+    ]
+    .iter()
+    .all(|difference| difference.abs() <= VOLUME_SIZE_TOLERANCE_METERS)
+}
+
+fn describe_volume_size(size: AppVolumeSize) -> String {
+    format!(
+        "{:.2}x{:.2}x{:.2} m (width, length, height)",
+        size.width, size.length, size.height
+    )
+}
+
+/// A taken-over volume keeps its app scale, the user's zoom (ADR-0092), unless it cannot be one
+/// (`is_user_zoom`): then it is set to `startup_app_scale`, the zoom this start asks for. A
+/// volume this start created already holds that, so no call is made for it.
+fn keep_only_a_user_zoom(
+    session: &Session,
+    volume: AppVolumeId,
+    common_name: &str,
+    startup_app_scale: f32,
+    flag_data_scale: f32,
+) {
+    let live_app_scale = match session.app_volumes().latest_app_scale(volume) {
+        Ok(app_scale) => app_scale,
+        Err(error) => {
+            log::warn!(
+                "qaros: cannot read app volume {common_name:?}'s app scale at start ({error}); it is kept as QAROS holds it"
+            );
+            return;
+        }
+    };
+    if is_user_zoom(live_app_scale, flag_data_scale) {
+        return;
+    }
+    log::info!(
+        "qaros: took over app volume {common_name:?} with app scale {live_app_scale}, which is no user zoom (outside {}..={}, or the --scale an earlier build set); the zoom starts at {startup_app_scale}",
+        USER_ZOOM_RANGE.start(),
+        USER_ZOOM_RANGE.end()
+    );
+    if let Err(error) = session
+        .app_volumes()
+        .set_app_scale(volume, startup_app_scale)
+    {
+        log::warn!(
+            "qaros: cannot set app volume {common_name:?}'s app scale at start: {error}; frames map with the app scale QAROS holds"
+        );
+    }
+}
+
+/// The session's report wins over the chained adapter: it is where QAROS actually created the
+/// session's devices.
+fn session_adapter(session: &Session, chained: Option<GraphicsAdapter>) -> Option<GraphicsAdapter> {
+    match session.graphics_adapter() {
+        Ok(Some(reported)) => {
+            if chained.is_some_and(|chained| chained != reported) {
+                log::warn!("qaros: the session reports adapter {reported}, not the chained one");
+            }
+            log::info!("qaros: the session's GPU is adapter {reported}");
+            Some(reported)
+        }
+        Ok(None) => chained,
+        Err(error) => {
+            log::warn!("qaros: cannot read the session's adapter: {error}");
+            chained
+        }
+    }
+}
+
+/// Subscribes with a callback that forwards each event into a channel and wakes the viewer.
+fn forward_and_wake<Event: Send + 'static>(
+    wake_viewer: &WakeViewer,
+    subscribe: impl FnOnce(Box<dyn Fn(Event) + Send + Sync>) -> qaros::Result<Subscription>,
+) -> Result<(Subscription, Receiver<Event>), String> {
+    let (forward, events) = mpsc::channel();
+    let wake_viewer = Arc::clone(wake_viewer);
+    let subscription = subscribe(Box::new(move |event| {
+        // A disconnected receiver means the sink is gone; nobody needs waking.
+        if forward.send(event).is_ok() {
+            wake_viewer();
+        }
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok((subscription, events))
+}
+
+fn join_session(
+    library: &Library,
+    runtime: &Runtime,
+    options: &ConnectOptions,
+    presentation: &PeerPresentation,
+) -> Result<Session, String> {
+    let blocking = BlockingOptions::default();
+    if options.local_app {
+        let approval_seconds = LOCAL_APP_APPROVAL_TIMEOUT
+            .unwrap_or(HUB_DEFAULT_APPROVAL_TIMEOUT)
+            .as_secs();
+        // `qaros::CancelToken` cannot be cancelled from another thread, so the stdin watcher
+        // cannot end this wait.
+        log::info!(
+            "qaros: onboarding as a local app; on its first start the Hub asks to allow it (up to {approval_seconds} s), and a Stop meanwhile takes effect only once the wait ends"
+        );
+        return runtime
+            .onboard_on_adapter(
+                &OnboardMethod::LocalApp {
+                    approval_timeout: LOCAL_APP_APPROVAL_TIMEOUT,
+                    app_tag: None,
+                },
+                presentation,
+                options.adapter,
+                &blocking,
+            )
+            .map(|onboarded| onboarded.session)
+            .map_err(|error| format!("local-app onboarding: {error}"));
+    }
+    if let Some(launch_line) = options.launch_line.as_deref() {
+        return onboard_with_launch_line(library, runtime, launch_line, presentation, options);
+    }
+    match rejoin_with_stored_id(library, runtime, options, presentation, &blocking) {
+        Ok(Some(session)) => return Ok(session),
+        Ok(None) => {}
+        Err(error) if options.pairing_code.is_some() => {
+            log::warn!("qaros: cannot rejoin ({error}); pairing with --pairing-code instead");
+        }
+        Err(error) => return Err(error),
+    }
+
+    let Some(pairing_code) = options.pairing_code.as_deref() else {
+        return Err(format!(
+            "no usable onboarding id in {}; pass --pairing-code with the Hub's current code",
+            options.onboarding_id_file.display()
+        ));
+    };
+    let onboarded = runtime
+        .onboard_on_adapter(
+            &OnboardMethod::Code {
+                code: pairing_code,
+                hub: None,
+            },
+            presentation,
+            options.adapter,
+            &blocking,
+        )
+        .map_err(|error| error.to_string())?;
+    let id_text = library
+        .uuid_to_string(&onboarded.onboarding_id.0)
+        .map_err(|error| error.to_string())?;
+    match std::fs::write(&options.onboarding_id_file, format!("{id_text}\n")) {
+        Ok(()) => log::info!(
+            "qaros: onboarded; id stored in {} for the next start",
+            options.onboarding_id_file.display()
+        ),
+        Err(error) => log::warn!(
+            "qaros: onboarded, but cannot store the id in {} ({error}); the next start needs a new pairing code",
+            options.onboarding_id_file.display()
+        ),
+    }
+    Ok(onboarded.session)
+}
+
+/// The session rejoined with the id stored in the onboarding id file; `None` when there is no
+/// file or the runtime no longer knows the id.
+fn rejoin_with_stored_id(
+    library: &Library,
+    runtime: &Runtime,
+    options: &ConnectOptions,
+    presentation: &PeerPresentation,
+    blocking: &BlockingOptions<'_>,
+) -> Result<Option<Session>, String> {
+    let Some(onboarding_id) = read_onboarding_id(library, &options.onboarding_id_file)? else {
+        return Ok(None);
+    };
+    match runtime.rejoin_on_adapter(onboarding_id, presentation, options.adapter, blocking) {
+        Ok(session) => {
+            log::info!(
+                "qaros: rejoined with the onboarding id in {}",
+                options.onboarding_id_file.display()
+            );
+            Ok(Some(session))
+        }
+        Err(error) if error.has_code(StatusCode::ONBOARDING_SESSION_NOT_FOUND) => {
+            log::warn!("qaros: the stored onboarding id is unknown to the runtime; onboarding");
+            Ok(None)
+        }
+        Err(error) => Err(format!(
+            "rejoining with the onboarding id in {}: {error}",
+            options.onboarding_id_file.display()
+        )),
+    }
+}
+
+/// A line starting with `{` is the launch invite, passed unchanged to
+/// `qar_onboarding_invite_deserialize`; anything else is a code typed by hand.
+fn onboard_with_launch_line(
+    library: &Library,
+    runtime: &Runtime,
+    launch_line: &str,
+    presentation: &PeerPresentation,
+    options: &ConnectOptions,
+) -> Result<Session, String> {
+    let blocking = BlockingOptions::default();
+    let onboarded = if launch_line.starts_with('{') {
+        log::info!("qaros: onboarding with the launch invite from stdin");
+        let invite = library
+            .deserialize_invite(launch_line.as_bytes())
+            .map_err(|error| format!("the launch invite from stdin: {error}"))?;
+        runtime.onboard_on_adapter(
+            &OnboardMethod::Invite(&invite),
+            presentation,
+            options.adapter,
+            &blocking,
+        )
+    } else {
+        log::info!("qaros: onboarding with the code from stdin");
+        runtime.onboard_on_adapter(
+            &OnboardMethod::Code {
+                code: launch_line,
+                hub: None,
+            },
+            presentation,
+            options.adapter,
+            &blocking,
+        )
+    };
+    onboarded
+        .map(|onboarded| onboarded.session)
+        .map_err(|error| format!("onboarding with the line from stdin: {error}"))
+}
+
+fn read_onboarding_id(library: &Library, path: &Path) -> Result<Option<OnboardingId>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let bytes = library
+        .uuid_from_string(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(Some(OnboardingId(bytes)))
+}
+
+fn requested_volume_size(options: &ConnectOptions) -> AppVolumeSize {
+    let [width, length, height] = options.volume_size;
+    AppVolumeSize {
+        width,
+        length,
+        height,
+    }
+}
+
+fn volume_config(options: &ConnectOptions, startup_transform: VolumeTransform) -> AppVolumeConfig {
+    AppVolumeConfig {
+        display_name: Some(options.volume_display_name.clone()),
+        pose: to_qaros_pose(startup_transform.volume_pose),
+        size: requested_volume_size(options),
+        app_pose: to_qaros_pose(startup_transform.app_pose),
+        app_scale: startup_transform.app_scale,
+        ..AppVolumeConfig::new(options.volume_name.clone())
+    }
+}
+
+pub(crate) fn to_qaros_pose(pose: xr_math::Pose) -> qaros::Pose {
+    qaros::Pose {
+        orientation: qaros::Quat {
+            x: pose.orientation.x,
+            y: pose.orientation.y,
+            z: pose.orientation.z,
+            w: pose.orientation.w,
+        },
+        position: qaros::Vec3::new(pose.position.x, pose.position.y, pose.position.z),
+    }
+}
+
+pub(crate) fn from_qaros_pose(pose: qaros::Pose) -> xr_math::Pose {
+    let orientation = pose.orientation;
+    let position = pose.position;
+    xr_math::Pose::from_xyzw_and_position(
+        [orientation.x, orientation.y, orientation.z, orientation.w],
+        [position.x, position.y, position.z],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cube(side: f32) -> AppVolumeSize {
+        AppVolumeSize {
+            width: side,
+            length: side,
+            height: side,
+        }
+    }
+
+    #[test]
+    fn a_taken_over_volume_keeps_its_own_size_without_the_flag() {
+        assert_eq!(settled_volume_size(cube(2.0), cube(1.5), false), cube(2.0));
+    }
+
+    #[test]
+    fn the_flag_sets_a_taken_over_volume_to_the_requested_size() {
+        assert_eq!(settled_volume_size(cube(2.0), cube(1.5), true), cube(1.5));
+    }
+
+    #[test]
+    fn a_size_within_a_millimetre_of_the_request_is_kept_as_it_is() {
+        let nearly = AppVolumeSize {
+            width: 1.5005,
+            ..cube(1.5)
+        };
+        assert_eq!(settled_volume_size(nearly, cube(1.5), true), nearly);
+    }
+}

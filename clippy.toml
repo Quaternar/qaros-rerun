@@ -1,0 +1,3 @@
+doc-valid-idents = ["OpenXR", "QAROS", "WebGPU", "WebGL", "WebAssembly", "DirectX", "D3D11", "QuaternAR", "StereoKit", "MoltenVK", ".."]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
