@@ -341,7 +341,7 @@ pub fn connect(
         .map_err(|error| error.to_string())?;
     let presentation = PeerPresentation {
         display_name: Some(options.peer_display_name.clone()),
-        app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        app_version: Some(env!("QAROS_RERUN_VERSION").to_owned()),
         custom_info: None,
         device_identity: None,
     };

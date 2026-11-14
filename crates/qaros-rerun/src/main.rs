@@ -377,12 +377,21 @@ fn install_view_3d_observer(
     }
 }
 
+/// The full version: `X.Y.Z` when built from a release tag, `X.Y.Z-rc.N` from a release
+/// candidate, `X.Y.Z-dev.<commits since the last tag>+<commit>` otherwise
+/// (`crates/build_version.rs`).
+pub const VERSION: &str = env!("QAROS_RERUN_VERSION");
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = match Options::parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(ParseOutcome::Help) => {
             print!("{USAGE}");
+            return Ok(());
+        }
+        Err(ParseOutcome::Version) => {
+            println!("qaros-rerun {VERSION}");
             return Ok(());
         }
         Err(ParseOutcome::Error(message)) => {
@@ -393,6 +402,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let main_thread_token = rerun::MainThreadToken::i_promise_i_am_on_the_main_thread();
     re_log::setup_logging();
+    re_log::info!("qaros-rerun {VERSION}");
     re_crash_handler::install_crash_handlers(re_viewer::build_info());
     render_loop::settle(&mut options).await;
 
