@@ -1,0 +1,175 @@
+name: Release
+
+# A tag vX.Y.Z (release) or vX.Y.Z-rc.N (release candidate) builds the viewer for every platform
+# and publishes a GitHub release with qaros-rerun-<version>-<platform>.zip per platform and one
+# manifest.json, which the QAROS Visualizer's Sources catalog downloads. Tags are the viewer's
+# own semantic version; a tag whose X.Y.Z differs from VERSION fails the release. The QAROS
+# version each package needs is in the manifest (min_qaros_version, c_api_header_sha256).
+#
+# A pull request into main builds and packages every platform as workflow artifacts, version
+# X.Y.Z-pr.<number>, and never publishes. workflow_dispatch with a tag rebuilds and republishes
+# that tag's release; without one it builds the selected branch as X.Y.Z-dev.N+commit and keeps
+# the packages as workflow artifacts only.
+
+on:
+    push:
+        tags: ["v*"]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Existing tag to build and publish (v0.1.0). Empty: build the branch, publish nothing."
+                required: false
+                default: ""
+
+permissions:
+    contents: read
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    prepare:
+        name: Version
+        runs-on: ubuntu-22.04
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+            ref: ${{ steps.version.outputs.ref }}
+            publish: ${{ steps.version.outputs.publish }}
+            tag: ${{ steps.version.outputs.tag }}
+            prerelease: ${{ steps.version.outputs.prerelease }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ github.ref_type == 'tag' && github.ref || inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+                  # The dev version counts the commits since the last tag.
+                  fetch-depth: 0
+            - name: Version from the tag and VERSION
+              id: version
+              shell: pwsh
+              env:
+                  INPUT_TAG: ${{ inputs.tag }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
+              run: |
+                  ./scripts/version.ps1 -Check | Out-Null
+                  $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:INPUT_TAG }
+                  if ($tag) {
+                      $version = ./scripts/version.ps1 -Tag $tag
+                      $outputs = "version=$version", "ref=refs/tags/$tag", "publish=true", "tag=$tag", "prerelease=$($version.Contains('-'))"
+                  } elseif ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+                      $version = "$((Get-Content VERSION -Raw).Trim())-pr.$env:PR_NUMBER"
+                      $outputs = "version=$version", "ref=$(git rev-parse HEAD)", "publish=false", "tag=", "prerelease=true"
+                  } else {
+                      $version = ./scripts/version.ps1
+                      $outputs = "version=$version", "ref=$(git rev-parse HEAD)", "publish=false", "tag=", "prerelease=true"
+                  }
+                  $outputs | Add-Content -Path $env:GITHUB_OUTPUT
+                  Write-Host "qaros-rerun $version"
+
+    build:
+        name: Build (${{ matrix.platform }})
+        needs: prepare
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: windows-x64
+                      os: windows-latest
+                      # Line tables in a separate .pdb (.cargo/dist-windows.toml).
+                      cargo_config: --config .cargo/dist-windows.toml
+                    - platform: linux-x64
+                      os: ubuntu-22.04
+                      cargo_config: ""
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.prepare.outputs.ref }}
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            # What Rerun's native viewer links against on Linux (GTK for file dialogs, xcb and
+            # xkbcommon for winit, fontconfig and freetype, OpenSSL).
+            - name: System packages (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y --no-install-recommends \
+                      libclang-dev libatk-bridge2.0-dev libfontconfig1-dev libfreetype6-dev \
+                      libglib2.0-dev libgtk-3-dev libssl-dev libxcb-render0-dev \
+                      libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libudev-dev
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  key: dist
+            - name: Release build of the viewer (dist profile)
+              env:
+                  # The version the viewer reports, the one prepare derived.
+                  QAROS_RERUN_VERSION: ${{ needs.prepare.outputs.version }}
+                  CARGO_CONFIG: ${{ matrix.cargo_config }}
+              shell: bash
+              run: cargo build --profile dist --locked -p qaros-rerun $CARGO_CONFIG
+            - name: Package
+              shell: pwsh
+              env:
+                  VERSION: ${{ needs.prepare.outputs.version }}
+                  PLATFORM: ${{ matrix.platform }}
+              run: ./scripts/package-release.ps1 -Version $env:VERSION -Platform $env:PLATFORM -Commit (git rev-parse HEAD) -OutDir dist
+            - name: Upload the package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: qaros-rerun-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
+                  path: dist/
+                  if-no-files-found: error
+                  retention-days: 14
+            # Symbols for crash reports; not part of the release.
+            - name: Upload the debug symbols (Windows)
+              if: runner.os == 'Windows'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: qaros-rerun-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-pdb
+                  path: |
+                      target/dist/qaros_rerun.pdb
+                      target/dist/log_test_scene.pdb
+                  if-no-files-found: error
+                  retention-days: 90
+
+    publish:
+        name: Publish the release
+        needs: [prepare, build]
+        if: needs.prepare.outputs.publish == 'true'
+        runs-on: ubuntu-22.04
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.prepare.outputs.ref }}
+            - uses: actions/download-artifact@v4
+              with:
+                  path: packages
+                  pattern: qaros-rerun-${{ needs.prepare.outputs.version }}-*
+            - name: One manifest for every platform
+              shell: pwsh
+              run: |
+                  $manifests = @(Get-ChildItem packages -Recurse -Filter manifest.json | ForEach-Object FullName)
+                  New-Item -ItemType Directory -Force release | Out-Null
+                  Get-ChildItem packages -Recurse -Filter *.zip | Copy-Item -Destination release
+                  ./scripts/package-release.ps1 -MergeManifests $manifests -OutDir release
+                  Get-Content release/manifest.json
+            - name: Create or update the GitHub release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ needs.prepare.outputs.tag }}
+                  VERSION: ${{ needs.prepare.outputs.version }}
+                  PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+              run: |
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                      gh release upload "$TAG" release/* --clobber
+                  else
+                      flags=()
+                      if [ "$PRERELEASE" = "True" ] || [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+                      gh release create "$TAG" release/* --verify-tag --title "qaros-rerun $VERSION" \
+                          --notes "The QAROS Rerun viewer $VERSION: one zip per platform and manifest.json (SHA-256 of each zip, the QAROS version it needs and its C API header hash). Changes: CHANGELOG.md." \
+                          "${flags[@]}"
+                  fi

@@ -18,6 +18,9 @@ jobs:
         runs-on: macos-latest
         steps:
             - uses: actions/checkout@v4
+            - name: VERSION and Cargo.toml agree
+              shell: pwsh
+              run: ./scripts/version.ps1 -Check
             - name: Toolchain from rust-toolchain.toml
               run: rustup show active-toolchain || rustup toolchain install
             - uses: Swatinem/rust-cache@v2
@@ -33,6 +36,9 @@ jobs:
         runs-on: windows-latest
         steps:
             - uses: actions/checkout@v4
+              with:
+                  # The viewer reports X.Y.Z-dev.<commits since the last tag>+<commit>.
+                  fetch-depth: 0
             - name: Toolchain from rust-toolchain.toml
               run: rustup show active-toolchain || rustup toolchain install
             - uses: Swatinem/rust-cache@v2

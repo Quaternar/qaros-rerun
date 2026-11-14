@@ -162,6 +162,7 @@ Viewer:
     --headless WxH             run without a window, the UI rendered off screen at WxH points
     --window                   open the desktop window also with --launched-by-qaros
     -h, --help                 this text
+    -V, --version              print the version (X.Y.Z, X.Y.Z-rc.N, or X.Y.Z-dev.N+commit)
 
 Graphics device (Vulkan on macOS needs Homebrew's vulkan-loader and molten-vk, and
 DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib):
@@ -592,6 +593,7 @@ impl Default for Options {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseOutcome {
     Help,
+    Version,
     Error(String),
 }
 
@@ -778,6 +780,7 @@ impl Options {
             };
             match flag.as_str() {
                 "-h" | "--help" => return Err(ParseOutcome::Help),
+                "-V" | "--version" => return Err(ParseOutcome::Version),
                 "--sink" => {
                     options.sink = match value()?.as_str() {
                         "image" | "images" => SinkKind::Images,
@@ -1804,6 +1807,7 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         assert_eq!(parse(&["--help"]).unwrap_err(), ParseOutcome::Help);
+        assert_eq!(parse(&["--version"]).unwrap_err(), ParseOutcome::Version);
         assert!(matches!(
             parse(&["--near", "5", "--far", "1"]),
             Err(ParseOutcome::Error(_))

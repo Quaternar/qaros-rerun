@@ -1,0 +1,11 @@
+# Windows settings of the release packages, on top of the dist profile in Cargo.toml:
+#
+#   cargo build --profile dist -p qaros-rerun --config .cargo/dist-windows.toml
+#
+# Line tables go to a .pdb next to the executable (target/dist/*.pdb), for symbolicating crashes;
+# the release zip leaves it out. Stripping symbols on MSVC would drop the .pdb, so it is off here.
+# The C runtime stays dynamic: the viewer uses the Visual C++ Redistributable the QAROS setup installs.
+
+[profile.dist]
+debug = "line-tables-only"
+strip = "none"

@@ -33,6 +33,8 @@ cargo build --release -p qaros-rerun
 
 The first build compiles Rerun and takes several minutes.
 
+Prebuilt viewers for Windows and Linux are on the [Releases](https://github.com/Quaternar/qaros-rerun/releases) page; the QAROS Visualizer installs them from its Sources catalog. To have the Visualizer launch a viewer you built, register it: `.\scripts\register-qaros-app.ps1` (Linux: `scripts/register-qaros-app.sh`). See [docs/releases.md](docs/releases.md).
+
 ## Run a demo
 
 On the PC that runs the QAROS Hub, with the Hub running, in PowerShell:
@@ -59,7 +61,7 @@ The [quick start](docs/quick-start.md) takes your Rerun project to the headset i
 .\target\release\log-test-scene.exe 600    # second terminal: a 1 m cube, points, axes
 ```
 
-Each recording is fitted into the app volume by itself; `--origin`, `--yaw` and `--volume-size` place the volume in the room, and `--center` and `--scale` place the start recording by hand. The mixer clips content outside the app volume. Instead of `--local-app`, `--pairing-code <PAIRING-CODE>` joins with the Hub's pairing code, and `--launched-by-qaros` lets the visualizer's Source Applications panel start the viewer. The Vulkan path is the default; `--qaros-graphics cpu` selects the CPU path. `qaros-rerun.exe --help` lists every option. The [integration guide](docs/integration-guide.md) covers the QAROS runtime, the firewall, placement, and what to try when frames look wrong (`--depth`, `--pose-space`, `--color-format`).
+Each recording is fitted into the app volume by itself; `--origin`, `--yaw` and `--volume-size` place the volume in the room, and `--center` and `--scale` place the start recording by hand. The mixer clips content outside the app volume. Instead of `--local-app`, `--pairing-code <PAIRING-CODE>` joins with the Hub's pairing code, and `--launched-by-qaros` lets the visualizer's Source Applications panel start the viewer. The Vulkan path is the default; `--qaros-graphics cpu` selects the CPU path. `qaros-rerun.exe --help` lists every option, `--version` prints the version. The [integration guide](docs/integration-guide.md) covers the QAROS runtime, the firewall, placement, and what to try when frames look wrong (`--depth`, `--pose-space`, `--color-format`).
 
 ## How it works
 
@@ -96,6 +98,7 @@ A small patch to Rerun's 3D view hands its draw data to the headset renderer, wh
 | [`crates/xr-math`](crates/xr-math) | Poses, fields of view, off-axis projection, depth encodings, room placement |
 | [`patches/`](patches) | `re_view_spatial` and `re_renderer` 0.40.0 with small patches (pristine copy, then the patch) |
 | [`demos/`](demos) | One-command demos with real Rerun data |
+| [`scripts/`](scripts) | Release packaging and registering a hand-built viewer with QAROS |
 | [`docs/`](docs) | Guides, design notes and architecture decision records |
 
 The Rust binding (`qaros`), the stub runtime for tests (`qaros-stub`) and a test extension come from [github.com/Quaternar/qaros](https://github.com/Quaternar/qaros), pinned by git revision in `Cargo.toml`.
@@ -122,6 +125,7 @@ The tests load `qaros-stub` instead of QAROS, so they need no Hub and no headset
 | [docs/vulkan-path.md](docs/vulkan-path.md) | The QAROS Vulkan path: startup order, one frame, the hand-over, depth |
 | [docs/vulkan-device.md](docs/vulkan-device.md) | The Vulkan device the viewer creates |
 | [docs/decoupled-render.md](docs/decoupled-render.md) | The decoupled render loop, the default (`--inline-render` opts out) |
+| [docs/releases.md](docs/releases.md) | Versions, release packages and their `manifest.json`, and registering a hand-built viewer with QAROS |
 | [docs/known-issues.md](docs/known-issues.md) | QAROS runtime behaviour the viewer works around: symptom, cause, workaround, build seen on, status |
 | [docs/decisions/](docs/decisions/README.md) | Architecture decision records |
 

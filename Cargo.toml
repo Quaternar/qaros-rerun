@@ -66,6 +66,15 @@ expect_used = "warn"
 re_view_spatial = { path = "patches/re_view_spatial" }
 re_renderer = { path = "patches/re_renderer" }
 
+# The build of the release packages (scripts/package-release.ps1, the Release workflow): the
+# release profile with no symbols in the executable. On Windows, .cargo/dist-windows.toml keeps
+# line tables in a separate .pdb instead. No LTO: thin LTO made the Windows viewer larger
+# (262 MB against 230 MB) and its build several times longer.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = "symbols"
+
 [profile.dev]
 opt-level = 1
 
