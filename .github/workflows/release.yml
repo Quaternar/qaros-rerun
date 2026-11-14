@@ -6,13 +6,16 @@ name: Release
 # own semantic version; a tag whose X.Y.Z differs from VERSION fails the release. The QAROS
 # version each package needs is in the manifest (min_qaros_version, c_api_header_sha256).
 #
-# workflow_dispatch with a tag rebuilds and republishes that tag's release; without one it
-# builds the selected branch as X.Y.Z-dev.N+commit and keeps the packages as workflow
-# artifacts only.
+# A pull request into main builds and packages every platform as workflow artifacts, version
+# X.Y.Z-pr.<number>, and never publishes. workflow_dispatch with a tag rebuilds and republishes
+# that tag's release; without one it builds the selected branch as X.Y.Z-dev.N+commit and keeps
+# the packages as workflow artifacts only.
 
 on:
     push:
         tags: ["v*"]
+    pull_request:
+        branches: [main]
     workflow_dispatch:
         inputs:
             tag:
@@ -47,12 +50,16 @@ jobs:
               shell: pwsh
               env:
                   INPUT_TAG: ${{ inputs.tag }}
+                  PR_NUMBER: ${{ github.event.pull_request.number }}
               run: |
                   ./scripts/version.ps1 -Check | Out-Null
                   $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:INPUT_TAG }
                   if ($tag) {
                       $version = ./scripts/version.ps1 -Tag $tag
                       $outputs = "version=$version", "ref=refs/tags/$tag", "publish=true", "tag=$tag", "prerelease=$($version.Contains('-'))"
+                  } elseif ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+                      $version = "$((Get-Content VERSION -Raw).Trim())-pr.$env:PR_NUMBER"
+                      $outputs = "version=$version", "ref=$(git rev-parse HEAD)", "publish=false", "tag=", "prerelease=true"
                   } else {
                       $version = ./scripts/version.ps1
                       $outputs = "version=$version", "ref=$(git rev-parse HEAD)", "publish=false", "tag=", "prerelease=true"
@@ -69,8 +76,11 @@ jobs:
                 include:
                     - platform: windows-x64
                       os: windows-latest
+                      # Line tables in a separate .pdb (.cargo/dist-windows.toml).
+                      cargo_config: --config .cargo/dist-windows.toml
                     - platform: linux-x64
                       os: ubuntu-22.04
+                      cargo_config: ""
         runs-on: ${{ matrix.os }}
         steps:
             - uses: actions/checkout@v4
@@ -90,12 +100,14 @@ jobs:
                       libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
             - uses: Swatinem/rust-cache@v2
               with:
-                  key: release
-            - name: Release build of the viewer
+                  key: dist
+            - name: Release build of the viewer (dist profile)
               env:
                   # The version the viewer reports, the one prepare derived.
                   QAROS_RERUN_VERSION: ${{ needs.prepare.outputs.version }}
-              run: cargo build --release --locked -p qaros-rerun
+                  CARGO_CONFIG: ${{ matrix.cargo_config }}
+              shell: bash
+              run: cargo build --profile dist --locked -p qaros-rerun $CARGO_CONFIG
             - name: Package
               shell: pwsh
               env:
@@ -109,6 +121,17 @@ jobs:
                   path: dist/
                   if-no-files-found: error
                   retention-days: 14
+            # Symbols for crash reports; not part of the release.
+            - name: Upload the debug symbols (Windows)
+              if: runner.os == 'Windows'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: qaros-rerun-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-pdb
+                  path: |
+                      target/dist/qaros_rerun.pdb
+                      target/dist/log_test_scene.pdb
+                  if-no-files-found: error
+                  retention-days: 90
 
     publish:
         name: Publish the release

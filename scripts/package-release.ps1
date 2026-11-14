@@ -3,7 +3,13 @@
 Packages a release build of the qaros-rerun viewer as a release asset and records it in manifest.json.
 
 .DESCRIPTION
-Run after `cargo build --release -p qaros-rerun` on the platform being packaged. Writes to -OutDir:
+Run after the dist build on the platform being packaged (the .pdb files the Windows build writes
+next to the executables stay out of the zip):
+
+    cargo build --profile dist -p qaros-rerun                                          # Linux
+    cargo build --profile dist -p qaros-rerun --config .cargo/dist-windows.toml        # Windows
+
+Writes to -OutDir:
 
 - qaros-rerun-<version>-<platform>.zip: qaros-rerun and log-test-scene, LICENSE, the third-party
   licenses of every crate compiled into them, a README and BUILD.txt, at the root of the zip;
@@ -25,7 +31,8 @@ Runs on Windows PowerShell 5.1 and PowerShell 7 (Windows and Linux).
 #>
 [CmdletBinding(DefaultParameterSetName = 'Package')]
 param(
-    # The viewer version: X.Y.Z, X.Y.Z-rc.N or X.Y.Z-dev.N+commit. Default: derived from VERSION
+    # The viewer version: X.Y.Z, X.Y.Z-rc.N, X.Y.Z-dev.N+commit, or X.Y.Z-pr.N for a pull
+    # request build. Default: derived from VERSION
     # and the git tags (scripts/version.ps1), as the build derives the version the viewer reports.
     [Parameter(ParameterSetName = 'Package')]
     [string]$Version,
@@ -34,7 +41,11 @@ param(
     [Parameter(ParameterSetName = 'Package')]
     [string]$Platform,
 
-    # Where cargo put the release binaries. Default: target/release in the repository.
+    # The cargo profile the binaries were built with. Default: dist.
+    [Parameter(ParameterSetName = 'Package')]
+    [string]$CargoProfile = 'dist',
+
+    # Where cargo put the binaries. Default: target/<CargoProfile> in the repository.
     [Parameter(ParameterSetName = 'Package')]
     [string]$TargetDir,
 
@@ -52,7 +63,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'qaros-common.ps1')
 
 $ManifestFormatVersion = 1
-$VersionPattern = '^\d+\.\d+\.\d+(-rc\.\d+|-dev\.\d+\+[0-9a-z]+)?$'
+$VersionPattern = '^\d+\.\d+\.\d+(-rc\.\d+|-pr\.\d+|-dev\.\d+\+[0-9a-z]+)?$'
 $Binaries = @('qaros-rerun', 'log-test-scene')
 
 $repoRoot = Get-QarosRepoRoot
@@ -133,11 +144,11 @@ if ($Version) {
 } else {
     $Version = Get-QarosRerunVersion $repoRoot
 }
-if ($Version -notmatch $VersionPattern) { throw "Version '$Version' is not X.Y.Z, X.Y.Z-rc.N or X.Y.Z-dev.N+commit." }
+if ($Version -notmatch $VersionPattern) { throw "Version '$Version' is not X.Y.Z, X.Y.Z-rc.N, X.Y.Z-pr.N or X.Y.Z-dev.N+commit." }
 if (-not $Platform) { $Platform = Get-QarosPlatform }
 $triple = Get-QarosTargetTriple $Platform
 
-if (-not $TargetDir) { $TargetDir = Join-Path $repoRoot (Join-Path 'target' 'release') }
+if (-not $TargetDir) { $TargetDir = Join-Path $repoRoot (Join-Path 'target' $CargoProfile) }
 if (-not $Commit) {
     $Commit = (& git -C $repoRoot rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not $Commit) { $Commit = 'unknown' }
@@ -146,7 +157,7 @@ if (-not $Commit) {
 $executables = foreach ($binary in $Binaries) {
     $path = Join-Path $TargetDir (Get-QarosExecutableName $binary $Platform)
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "$path is missing; build it first with: cargo build --release -p qaros-rerun"
+        throw "$path is missing; build it first with: cargo build --profile $CargoProfile -p qaros-rerun (on Windows add --config .cargo/dist-windows.toml)"
     }
     $path
 }
@@ -305,15 +316,24 @@ Write-QarosFileAtomically (Join-Path $staging 'THIRD-PARTY-LICENSES.txt') $licen
 Write-Host "  $($licenses.Crates) crates, $($licenses.Texts) distinct license texts"
 
 $rustc = (& rustc --version 2>$null)
+# The Windows viewer links the C runtime dynamically and the package does not carry it: the QAROS
+# setup installs the Visual C++ Redistributable system wide.
+$vcRuntime = if ($Platform -like 'windows-*') {
+    'not included; needs the Microsoft Visual C++ 2015-2022 Redistributable (x64), which the QAROS setup installs from QAROS 0.10.0'
+} else {
+    'not used'
+}
 Write-QarosFileAtomically (Join-Path $staging 'BUILD.txt') (@(
         "app: $QarosAppName",
         "version: $Version",
         "min qaros version: $minQarosVersion",
         "platform: $Platform ($triple)",
+        "cargo profile: $CargoProfile",
         "commit: $Commit",
         "qaros revision: $qarosRevision",
         "C API header sha256: $headerSha256",
-        "rustc: $rustc"
+        "rustc: $rustc",
+        "visual c++ runtime: $vcRuntime"
     ) -join "`n")
 
 # The zip: forward slashes in entry names, every file at the root, executables marked

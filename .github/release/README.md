@@ -15,7 +15,7 @@ The QAROS Visualizer installs this package from its Sources catalog ("Rerun"). I
 
 - QAROS, for streaming to headsets: the version the release's `manifest.json` names as `min_qaros_version`, or later. The viewer loads the installed QAROS runtime by itself; otherwise set `QAROS_DLL` to `qar-streaming-c.dll` (or `--qaros-library`).
 - A GPU with a Vulkan driver.
-- Windows: the Microsoft Visual C++ Redistributable (x64). Without it Windows reports `VCRUNTIME140.dll` missing; install it with `winget install Microsoft.VCRedist.2015+.x64`.
+- Windows: the Microsoft Visual C++ 2015-2022 Redistributable (x64). The QAROS setup installs it from QAROS 0.10.0; on a PC without it, Windows reports `VCRUNTIME140.dll` missing: install it from Microsoft (`winget install Microsoft.VCRedist.2015+.x64`).
 - Linux: a desktop session (X11 or Wayland) with the usual GTK 3 and xkbcommon libraries.
 
 ## Run
