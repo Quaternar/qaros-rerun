@@ -4,6 +4,8 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-14
+
 ### Features
 
 - The Rerun 0.40.0 viewer with a headset renderer: the 3D view is drawn once per eye of every QAROS user, from that user's head pose, and streamed as color plus depth.
