@@ -41,7 +41,7 @@ Each tag `vX.Y.Z` or `vX.Y.Z-rc.N` runs the [Release workflow](../.github/workfl
 
 The packages do not contain the QAROS runtime: the viewer loads the QAROS installed on the PC. The Windows viewer needs the Microsoft Visual C++ 2015-2022 Redistributable (x64), which the package does not carry: the QAROS setup installs it system wide from QAROS 0.10.0, and a PC without QAROS installs it from Microsoft (`winget install Microsoft.VCRedist.2015+.x64`).
 
-The packages are built with the `dist` profile (`Cargo.toml`): the release profile with thin LTO and no symbols in the executables. On Windows, `.cargo/dist-windows.toml` writes line tables to `.pdb` files, which stay out of the zip; each run uploads them as the workflow artifact `qaros-rerun-<version>-windows-x64-pdb`, kept for 90 days, for symbolicating crash reports.
+The packages are built with the `dist` profile (`Cargo.toml`): the release profile with no symbols in the executables. On Windows, `.cargo/dist-windows.toml` writes line tables to `.pdb` files, which stay out of the zip; each run uploads them as the workflow artifact `qaros-rerun-<version>-windows-x64-pdb`, kept for 90 days, for symbolicating crash reports.
 
 A pull request into `main` builds and packages every platform as workflow artifacts, with the version `X.Y.Z-pr.<number>`, and publishes nothing. `workflow_dispatch` with a tag rebuilds that tag and replaces its assets; without a tag it builds the selected branch with its dev version and keeps the packages as workflow artifacts only.
 
