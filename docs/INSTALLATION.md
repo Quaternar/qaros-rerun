@@ -78,6 +78,8 @@ Drop `--headless` for a desktop window, and see `qaros-rerun --help` for every o
 
 ## Download a build
 
+Releases carry a packaged viewer for Windows x64 and Linux x64, `qaros-rerun-<version>-<platform>.zip`, which the QAROS Visualizer installs from its Sources catalog; download one from the repository's **Releases** page to run it by hand. [Releases](releases.md) describes the packages, and how to register a viewer you built yourself with QAROS.
+
 Every CI run on a pull request or on `main` uploads the Windows x64 release viewer as an artifact, kept for 14 days. Download `qaros-rerun-windows-x64-<commit>` from **Artifacts** on the run's page under the repository's **Actions** tab, or with the GitHub CLI:
 
 ```powershell
