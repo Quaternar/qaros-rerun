@@ -3484,7 +3484,7 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "frame-sink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "image",
@@ -6651,7 +6651,7 @@ dependencies = [
 
 [[package]]
 name = "qaros-rerun"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -6679,7 +6679,7 @@ dependencies = [
 
 [[package]]
 name = "qaros-sink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ash",
  "frame-sink",
@@ -12059,7 +12059,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vulkan-device"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ash",
  "log",
@@ -13044,7 +13044,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xr-math"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
 ]
