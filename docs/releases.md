@@ -17,23 +17,23 @@ The QAROS Visualizer's Sources catalog has a **Rerun** tile. It finds the viewer
 
 ## Versions
 
-Releases carry the viewer's own [semantic version](https://semver.org/). `VERSION` at the root of the repository holds the next planned `X.Y.Z`; the full version is derived from it and the git tags:
+Releases carry the viewer's own [semantic version](https://semver.org/). Every merge to `main` that changes behaviour is a release: CI picks the bump from the pull request's `release:*` label or its Conventional Commit title, writes the version, tags it and publishes the packages. `VERSION` at the root of the repository holds the last release `X.Y.Z`; the full version is derived from it and the git tags:
 
 | Built from | Version | Example |
 | --- | --- | --- |
-| tag `vX.Y.Z` | `X.Y.Z` | `0.1.0` |
-| tag `vX.Y.Z-rc.N` | `X.Y.Z-rc.N` | `0.1.0-rc.2` |
-| anything else | `X.Y.Z-dev.<commits since the last tag>+<commit>` | `0.2.0-dev.14+1a2b3c4d` |
+| the release commit, tag `vX.Y.Z` | `X.Y.Z` | `0.1.0` |
+| any other commit | `X.Y.(Z+1)-dev.<commits since the last tag>+<commit>` | `0.1.1-dev.14+1a2b3c4d` |
+| pull request N | `X.Y.(Z+1)-pr.N` | `0.1.1-pr.12` |
 
-`qaros-rerun --version` prints it; the viewer logs it at start and reports it to QAROS. `scripts/version.ps1` prints the version of the checkout. A tag whose `X.Y.Z` differs from `VERSION` fails the build and the release. The release steps are in [AGENTS.md](../AGENTS.md#releasing).
+A development build reports the next patch, so it sorts after the release it builds on and before the next one, whatever that turns out to be. `qaros-rerun --version` prints it; the viewer logs it at start and reports it to QAROS. `scripts/version.ps1` prints the version of the checkout. A tag whose `X.Y.Z` differs from `VERSION` fails the build and the release. How a merge picks its bump and how to merge without releasing: [AGENTS.md](../AGENTS.md#releasing).
 
 Which QAROS a release runs with is not part of its version: the manifest records it per package, as `min_qaros_version` and `c_api_header_sha256`.
 
-Versioning follows the shared QAROS scheme: [ADR-0001: One versioning scheme for every QAROS repository](https://github.com/Quaternar/qaros/blob/main/docs/adr/0001-one-versioning-scheme.md).
+Versioning follows the shared QAROS scheme: [ADR-0001: One versioning scheme for every QAROS repository](https://github.com/Quaternar/qaros/blob/main/docs/adr/0001-one-versioning-scheme.md), and for releasing [ADR-0002: QAROS apps release on every merge that changes behaviour](https://github.com/Quaternar/qaros/blob/main/docs/adr/0002-app-release-on-merge.md).
 
 ## Release packages
 
-Each tag `vX.Y.Z` or `vX.Y.Z-rc.N` runs the [Release workflow](../.github/workflows/release.yml): a release build of the viewer for `windows-x64` (Windows Server, MSVC) and `linux-x64` (Ubuntu 22.04), published as a GitHub release (a prerelease for a release candidate) with these assets:
+Each release tag `vX.Y.Z` runs the [Release workflow](../.github/workflows/release.yml): a release build of the viewer for `windows-x64` (Windows Server, MSVC) and `linux-x64` (Ubuntu 22.04), published as a GitHub release with these assets:
 
 | Asset | What it holds |
 | --- | --- |
@@ -45,7 +45,7 @@ The packages do not contain the QAROS runtime: the viewer loads the QAROS instal
 
 The packages are built with the `dist` profile (`Cargo.toml`): the release profile with no symbols in the executables. On Windows, `.cargo/dist-windows.toml` writes line tables to `.pdb` files, which stay out of the zip; each run uploads them as the workflow artifact `qaros-rerun-<version>-windows-x64-pdb`, kept for 90 days, for symbolicating crash reports.
 
-A pull request into `main` builds and packages every platform as workflow artifacts, with the version `X.Y.Z-pr.<number>`, and publishes nothing. `workflow_dispatch` with a tag rebuilds that tag and replaces its assets; without a tag it builds the selected branch with its dev version and keeps the packages as workflow artifacts only.
+A pull request into `main` builds and packages every platform as workflow artifacts, with the version `X.Y.(Z+1)-pr.<number>`, and publishes nothing. `workflow_dispatch` with a tag rebuilds that tag and replaces its assets; without a tag it builds the selected branch with its dev version and keeps the packages as workflow artifacts only.
 
 ### manifest.json
 
@@ -126,7 +126,7 @@ The registry is `apps.json` in the QAROS user config folder: `%APPDATA%\Quaterna
       "platform": "windows-x64",
       "source": "local",
       "executable": "C:\\src\\qaros-rerun\\target\\release\\qaros-rerun.exe",
-      "app_version": "0.1.0-dev.42+1a2b3c4d",
+      "app_version": "0.1.1-dev.42+1a2b3c4d",
       "c_api_header_sha256": "<64 hex digits>",
       "registered_at": "2026-11-14T10:00:00Z"
     }

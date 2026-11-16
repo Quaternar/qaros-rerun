@@ -5,11 +5,13 @@ name: Release
 # manifest.json, which the QAROS Visualizer's Sources catalog downloads. Tags are the viewer's
 # own semantic version; a tag whose X.Y.Z differs from VERSION fails the release. The QAROS
 # version each package needs is in the manifest (min_qaros_version, c_api_header_sha256).
+# The App release workflow (app-release.yml) tags every release and starts this workflow for it
+# with workflow_dispatch and the tag (or, with QAROS_RELEASE_TOKEN, by the tag push).
 #
-# A pull request into main builds and packages every platform as workflow artifacts, version
-# X.Y.Z-pr.<number>, and never publishes. workflow_dispatch with a tag rebuilds and republishes
-# that tag's release; without one it builds the selected branch as X.Y.Z-dev.N+commit and keeps
-# the packages as workflow artifacts only.
+# VERSION holds the last release X.Y.Z. A pull request into main builds and packages every
+# platform as workflow artifacts, version X.Y.(Z+1)-pr.<number>, and never publishes.
+# workflow_dispatch with a tag rebuilds and republishes that tag's release; without one it builds
+# the selected branch as X.Y.(Z+1)-dev.N+commit and keeps the packages as workflow artifacts only.
 
 on:
     push:
@@ -58,7 +60,7 @@ jobs:
                       $version = ./scripts/version.ps1 -Tag $tag
                       $outputs = "version=$version", "ref=refs/tags/$tag", "publish=true", "tag=$tag", "prerelease=$($version.Contains('-'))"
                   } elseif ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
-                      $version = "$((Get-Content VERSION -Raw).Trim())-pr.$env:PR_NUMBER"
+                      $version = "$(./scripts/version.ps1 -NextPatch)-pr.$env:PR_NUMBER"
                       $outputs = "version=$version", "ref=$(git rev-parse HEAD)", "publish=false", "tag=", "prerelease=true"
                   } else {
                       $version = ./scripts/version.ps1

@@ -121,11 +121,24 @@ function Get-QarosWorkspaceVersion([string]$RepoRoot) {
     throw 'No [workspace.package] version in Cargo.toml.'
 }
 
-# The next planned X.Y.Z, from VERSION at the repository root.
-function Get-QarosPlannedVersion([string]$RepoRoot) {
-    $planned = ([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'VERSION'))).Trim()
-    if ($planned -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION holds '$planned', expected X.Y.Z." }
-    return $planned
+# The last released X.Y.Z, from VERSION at the repository root.
+function Get-QarosReleasedVersion([string]$RepoRoot) {
+    $released = ([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'VERSION'))).Trim()
+    if ($released -notmatch '^\d+\.\d+\.\d+$') { throw "VERSION holds '$released', expected X.Y.Z." }
+    return $released
+}
+
+# X.Y.(Z+1): the core of every development and pull request version after release X.Y.Z.
+function Get-QarosNextPatch([string]$Released) {
+    $parts = $Released.Split('.')
+    return "$($parts[0]).$($parts[1]).$([int64]$parts[2] + 1)"
+}
+
+# The X.Y.Z a full version must carry: VERSION for a release (or a candidate), the next patch for
+# a -dev or -pr version.
+function Get-QarosExpectedCore([string]$Version, [string]$Released) {
+    if ($Version -match '^[^-+]+-(dev|pr)\.') { return Get-QarosNextPatch $Released }
+    return $Released
 }
 
 # A release tag: vX.Y.Z or vX.Y.Z-rc.N.
@@ -150,13 +163,14 @@ function Invoke-QarosGit([string]$RepoRoot, [string[]]$Arguments) {
     return $null
 }
 
-# The full version, by the same rules as crates/build_version.rs:
+# The full version, by the same rules as crates/build_version.rs. VERSION holds the last release:
 # - HEAD tagged vX.Y.Z or vX.Y.Z-rc.N: that version;
-# - otherwise X.Y.Z-dev.<commits since the last v* tag>+<8-digit commit>, X.Y.Z from VERSION;
-# - no git: X.Y.Z-dev.0+unknown.
+# - otherwise X.Y.(Z+1)-dev.<commits since the last v* tag>+<8-digit commit>, the next patch;
+# - no git: X.Y.(Z+1)-dev.0+unknown.
 # A release tag whose X.Y.Z differs from VERSION is an error.
 function Get-QarosRerunVersion([string]$RepoRoot) {
-    $planned = Get-QarosPlannedVersion $RepoRoot
+    $released = Get-QarosReleasedVersion $RepoRoot
+    $next = Get-QarosNextPatch $released
     $tags = Invoke-QarosGit $RepoRoot @('tag', '--points-at', 'HEAD', '--list', 'v[0-9]*')
     $tag = $null
     if ($tags) { $tag = $tags -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { Test-QarosReleaseTag $_ } | Select-Object -First 1 }
@@ -169,13 +183,13 @@ function Get-QarosRerunVersion([string]$RepoRoot) {
             $range = if ($lastTag) { "$lastTag..HEAD" } else { 'HEAD' }
             $count = Invoke-QarosGit $RepoRoot @('rev-list', '--count', $range)
             if (-not $count) { $count = '0' }
-            $version = "$planned-dev.$count+$commit"
+            $version = "$next-dev.$count+$commit"
         } else {
-            $version = "$planned-dev.0+unknown"
+            $version = "$next-dev.0+unknown"
         }
     }
     $core = ($version -split '[-+]', 2)[0]
-    if ($core -ne $planned) { throw "Version $version does not match VERSION ($planned); a release tag must name the version in VERSION." }
+    if ($core -ne (Get-QarosExpectedCore $version $released)) { throw "Version $version does not match VERSION ($released); a release tag must name the version in VERSION." }
     return $version
 }
 

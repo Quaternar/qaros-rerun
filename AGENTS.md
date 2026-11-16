@@ -38,19 +38,21 @@ version the categories come in this order, and only those with entries appear:
 
 ## Versions
 
-`VERSION` at the root holds the next planned `X.Y.Z`, the only typed copy; the
-`[workspace.package]` version in `Cargo.toml` must equal it (CI checks it with
-`scripts/version.ps1 -Check`). The full version is derived, never typed:
+`VERSION` at the root holds the version of the **last release**, the only typed copy; the
+`[workspace.package]` version in `Cargo.toml` and the workspace crates in `Cargo.lock` must equal
+it (CI checks `Cargo.toml` with `scripts/version.ps1 -Check`). Only a release commit changes them;
+never edit them by hand. The full version is derived, never typed:
 
-| HEAD | Version |
+| Built from | Version |
 | --- | --- |
-| tagged `vX.Y.Z` | `X.Y.Z` |
-| tagged `vX.Y.Z-rc.N` | `X.Y.Z-rc.N` |
-| anything else | `X.Y.Z-dev.<commits since the last v* tag>+<commit>` |
+| the release commit, tagged `vX.Y.Z` | `X.Y.Z` |
+| any other commit | `X.Y.(Z+1)-dev.<commits since the last v* tag>+<commit>` |
+| pull request N, before it merges | `X.Y.(Z+1)-pr.N` |
 
 The build derives it (`crates/build_version.rs`): `qaros-rerun --version` prints it, the viewer
 logs it at start and reports it to QAROS as its app version. `scripts/version.ps1` prints the same.
-A tag whose `X.Y.Z` differs from `VERSION` fails the build and the release.
+A development build reports the next patch, so it sorts after the release it builds on and before
+the next one. A tag whose `X.Y.Z` differs from `VERSION` fails the build and the release.
 
 The version is the viewer's own and follows Semantic Versioning:
 
@@ -64,13 +66,33 @@ asset (`min_qaros_version`, `c_api_header_sha256`).
 
 ## Releasing
 
-1. **Release candidate** (optional): on the commit to test, `git tag vX.Y.Z-rc.N` and push the
-   tag. The Release workflow builds and publishes it as a prerelease.
-2. **Release.** In one commit, move the `Unreleased` entries under `## [X.Y.Z] - YYYY-MM-DD`,
-   leave an empty `## [Unreleased]` on top and update the compare links at the bottom. Nothing
-   else changes in that commit.
-3. `git tag vX.Y.Z` on that commit and push the tag. The Release workflow checks the tag against
-   `VERSION`, builds Windows x64 and Linux x64, and publishes the zips and `manifest.json`.
-4. **Bump.** In the next commit, never the tagged one, set `VERSION` and the `Cargo.toml`
-   workspace version to the next planned version (`X.Y+1.0`) and run `cargo check` so
-   `Cargo.lock` follows.
+Every merge to `main` that changes behaviour is a release. Nobody tags or bumps `VERSION` by hand.
+The rules are the shared
+[ADR-0002: QAROS apps release on every merge that changes behaviour](https://github.com/Quaternar/qaros/blob/main/docs/adr/0002-app-release-on-merge.md).
+
+- **The bump.** A `release:*` label on the pull request wins; without one, its title decides:
+
+  | Label | Title (Conventional Commit) | Bump |
+  | --- | --- | --- |
+  | `release:major` | | major |
+  | | `feat!: ...`, `fix(x)!: ...`, or `BREAKING` in the title | major (minor below 1.0.0) |
+  | `release:minor` | `feat: ...` | minor |
+  | `release:patch` | `fix: ...`, `perf: ...`, `revert: ...` | patch |
+  | `release:none` | `docs`, `ci`, `chore`, `test`, `refactor`, `style`, `build` | none |
+
+  `1.0.0` comes only from `release:major`. The **Release bump** check on every pull request shows
+  the version merging it releases, and fails without a known title type or `release:*` label.
+- **The changelog sets a floor.** A release ships every `Unreleased` entry: `Breaking` or
+  `Removed` entries make it at least a breaking bump, `Features`, `Enhancements` or `Deprecated`
+  at least a minor, `Bug fixes` or `Security` at least a patch.
+- **CI releases.** On the push to `main` the App release workflow
+  (`.github/workflows/app-release.yml`) writes the new version into the files listed in
+  `.github/app-release.json`, moves the `Unreleased` entries under `## [X.Y.Z] - YYYY-MM-DD`,
+  commits `chore(release): vX.Y.Z`, tags it `vX.Y.Z` and starts the Release workflow for the tag.
+  That builds Windows x64 and Linux x64 and publishes the zips and `manifest.json`.
+- **No release candidates.** Try a change from its pull request build (`X.Y.(Z+1)-pr.N`) before
+  it merges.
+- **Merging without releasing.** Label the pull request `release:none`. The next releasing merge
+  ships its changes, its bump raised by their changelog entries.
+- **A failed release build.** Fix it on `main`; if the fix was in CI only, rerun the Release
+  workflow by hand with the tag. A tag never moves; a broken release is fixed by the next one.
