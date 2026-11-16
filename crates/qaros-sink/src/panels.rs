@@ -597,7 +597,12 @@ impl QarosPanels {
         let Some(reset) = &mut self.reset else {
             return ResetStep::Claim;
         };
-        let held_stream_panel = held.filter(|held| !matches!(held.content, PanelContent::Uri(_)));
+        let held_stream_panel = held.filter(|held| {
+            matches!(
+                held.content,
+                PanelContent::Stream(_) | PanelContent::UnreadableStream(_)
+            )
+        });
         let streams = &self.streams;
         reset.step(
             name,

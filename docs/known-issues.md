@@ -52,6 +52,7 @@ QAROS behaviour that shapes code in this repository: what was seen, why it happe
 - **What the viewer does.** The viewer lists panels through its own raw listing, which reads `qar_gui_panel_get_content_type` before the URI or the stream id (`crates/qaros-sink/src/panel_listing.rs`). A listing that still fails opens no panel and is retried after 0.5 s, then every 30 s ([ADR-0073](decisions/ADR-0073%20Failed%20Panel%20Listings%20Retried%20After%20Half%20A%20Second%20Then%20Every%2030%20s.md)).
 - **Seen on.** Build 3137, with the binding at `ebfe3bf`.
 - **Status.** Worked around: the viewer reads the content type first. Open in the binding; the raw listing can go once `GuiPanels::list` reads the content type itself.
+- **A content type the viewer does not know.** QAROS added served panels (`QAR_GUI_PANEL_CONTENT_TYPE_SERVED`, value 2) after the header the viewer is built against. Such a panel belongs to another app (a web app source's controls, for example); the listing keeps it as `PanelContent::Other` and never claims it. Before, one such panel failed the whole listing (`unknown content type QarGuiPanelContentType(2)`), and no Rerun panel opened.
 
 ## A stream panel's mixer loses its Vulkan device on a replaced stream
 
