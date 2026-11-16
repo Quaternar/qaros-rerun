@@ -1,0 +1,11 @@
+{
+  "version_files": [
+    {"path": "VERSION", "pattern": "^(?P<version>\\d+\\.\\d+\\.\\d+)$"},
+    {"path": "Cargo.toml", "pattern": "^version = \"(?P<version>\\d+\\.\\d+\\.\\d+)\"$"},
+    {"path": "Cargo.lock",
+     "pattern": "^name = \"(?:frame-sink|qaros-rerun|qaros-sink|vulkan-device|xr-math)\"\\nversion = \"(?P<version>\\d+\\.\\d+\\.\\d+)\"$",
+     "count": 5}
+  ],
+  "changelog": "CHANGELOG.md",
+  "release": {"workflow": "release.yml", "inputs": {"tag": "{tag}"}}
+}

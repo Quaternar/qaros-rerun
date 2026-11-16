@@ -73,8 +73,14 @@ if [ "$unregister" -eq 0 ]; then
     executable="$(cd "$(dirname "$executable")" && pwd)/$(basename "$executable")"
 
     if [ -z "$app_version" ]; then
-        # The full version, by the rules of crates/build_version.rs and scripts/version.ps1.
-        planned="$(tr -d '[:space:]' < "$repo_root/VERSION")"
+        # The full version, by the rules of crates/build_version.rs and scripts/version.ps1:
+        # VERSION holds the last release X.Y.Z, an untagged build is X.Y.(Z+1)-dev.N+commit.
+        released="$(tr -d '[:space:]' < "$repo_root/VERSION")"
+        if ! printf '%s\n' "$released" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "VERSION holds '$released', expected X.Y.Z." >&2
+            exit 1
+        fi
+        next="${released%.*}.$((${released##*.} + 1))"
         tag="$(git -C "$repo_root" tag --points-at HEAD --list 'v[0-9]*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' | head -n 1 || true)"
         if [ -n "$tag" ]; then
             app_version="${tag#v}"
@@ -84,13 +90,13 @@ if [ "$unregister" -eq 0 ]; then
             else
                 count="$(git -C "$repo_root" rev-list --count HEAD)"
             fi
-            app_version="$planned-dev.$count+$commit"
+            app_version="$next-dev.$count+$commit"
         else
-            app_version="$planned-dev.0+unknown"
+            app_version="$next-dev.0+unknown"
         fi
         case "$app_version" in
-            "$planned"|"$planned"-*) ;;
-            *) echo "Version $app_version does not match VERSION ($planned)." >&2; exit 1 ;;
+            "$released"|"$released"-rc.*|"$next"-dev.*) ;;
+            *) echo "Version $app_version does not match VERSION ($released)." >&2; exit 1 ;;
         esac
     fi
 

@@ -139,8 +139,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Merge') {
 if ($Version) {
     $Version = $Version.Trim()
     if ($Version.StartsWith('v')) { $Version = $Version.Substring(1) }
-    $planned = Get-QarosPlannedVersion $repoRoot
-    if (($Version -split '[-+]', 2)[0] -ne $planned) { throw "Version $Version does not match VERSION ($planned)." }
+    $released = Get-QarosReleasedVersion $repoRoot
+    $expected = Get-QarosExpectedCore $Version $released
+    if (($Version -split '[-+]', 2)[0] -ne $expected) { throw "Version $Version does not match VERSION ($released): a release names VERSION, a -dev or -pr version the next patch." }
 } else {
     $Version = Get-QarosRerunVersion $repoRoot
 }
