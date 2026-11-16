@@ -4,6 +4,8 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-16
+
 ### Bug fixes
 
 - `--panels` opens the 2D views and the timeline again while another app shows a panel of a kind this viewer does not know, such as a web app's served panel; before, the viewer logged `cannot list panels (... unknown content type ...)` and opened none.
@@ -61,4 +63,5 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 - The web panel route and its local panel server: `--panel-route`, `--panel-base-url` and `--dead-panels` are gone, `--panels` takes no address, and panels need QAROS 0.9.0-dev.3177 or later.
 
-[Unreleased]: https://github.com/Quaternar/qaros-rerun/commits/main
+[Unreleased]: https://github.com/Quaternar/qaros-rerun/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Quaternar/qaros-rerun/releases/tag/v0.1.1
