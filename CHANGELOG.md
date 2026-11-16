@@ -4,6 +4,10 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+### Bug fixes
+
+- `--panels` opens the 2D views and the timeline again while another app shows a panel of a kind this viewer does not know, such as a web app's served panel; before, the viewer logged `cannot list panels (... unknown content type ...)` and opened none.
+
 ## [0.1.0] - 2026-11-14
 
 ### Features

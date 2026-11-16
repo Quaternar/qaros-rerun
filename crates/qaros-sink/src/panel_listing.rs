@@ -26,6 +26,10 @@ pub enum PanelContent {
     /// this for a panel that holds no stream id yet ("0 payload bytes"); the panel is still
     /// listed, so one such panel does not hide the others.
     UnreadableStream(String),
+    /// A content type this viewer does not know, such as a served panel of a newer QAROS
+    /// (`QarGuiPanelContentType(2)`). Another app's panel: listed but never claimed, so it
+    /// does not fail the listing of the others.
+    Other(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +47,9 @@ impl ListedPanel {
     pub fn content_uri(&self) -> &str {
         match &self.content {
             PanelContent::Uri(uri) => uri,
-            PanelContent::Stream(_) | PanelContent::UnreadableStream(_) => "",
+            PanelContent::Stream(_)
+            | PanelContent::UnreadableStream(_)
+            | PanelContent::Other(_) => "",
         }
     }
 }
@@ -150,9 +156,7 @@ fn read_content(api: &QarApi, handle: *mut QarGuiPanel) -> Result<PanelContent, 
         );
     }
     if content_type != QarGuiPanelContentType::QAR_GUI_PANEL_CONTENT_TYPE_WEBSITE_URI {
-        return Err(format!(
-            "qar_gui_panel_get_content_type: unknown content type {content_type:?}"
-        ));
+        return Ok(PanelContent::Other(format!("{content_type:?}")));
     }
     let uri = read_string(|buffer, size| {
         // SAFETY: as above; the buffer is writable for `size` bytes.
