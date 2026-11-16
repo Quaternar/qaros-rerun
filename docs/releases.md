@@ -29,6 +29,8 @@ Releases carry the viewer's own [semantic version](https://semver.org/). `VERSIO
 
 Which QAROS a release runs with is not part of its version: the manifest records it per package, as `min_qaros_version` and `c_api_header_sha256`.
 
+Versioning follows the shared QAROS scheme: [ADR-0001: One versioning scheme for every QAROS repository](https://github.com/Quaternar/qaros/blob/main/docs/adr/0001-one-versioning-scheme.md).
+
 ## Release packages
 
 Each tag `vX.Y.Z` or `vX.Y.Z-rc.N` runs the [Release workflow](../.github/workflows/release.yml): a release build of the viewer for `windows-x64` (Windows Server, MSVC) and `linux-x64` (Ubuntu 22.04), published as a GitHub release (a prerelease for a release candidate) with these assets:
