@@ -4,6 +4,8 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-25
+
 ### Bug fixes
 
 - A viewer with no recording loaded, or with no 3D view in its layout, streams an empty scene: the headset shows an empty app volume instead of **Connecting...** for as long as the viewer runs.
@@ -67,5 +69,6 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 - The web panel route and its local panel server: `--panel-route`, `--panel-base-url` and `--dead-panels` are gone, `--panels` takes no address, and panels need QAROS 0.9.0-dev.3177 or later.
 
-[Unreleased]: https://github.com/Quaternar/qaros-rerun/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Quaternar/qaros-rerun/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Quaternar/qaros-rerun/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Quaternar/qaros-rerun/releases/tag/v0.1.1
