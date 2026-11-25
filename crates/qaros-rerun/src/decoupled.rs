@@ -24,7 +24,7 @@ use re_renderer::{QueueableDrawData, RenderConfig, RenderContext};
 use re_view_spatial::view_3d_observer::View3DFrame;
 use re_viewer_context::ViewId;
 use rerun::external::eframe;
-use xr_math::AppPlacement;
+use xr_math::{AppPlacement, ViewCoordinates};
 
 use crate::draw_data_copy::copy_all;
 use crate::headset::{
@@ -336,7 +336,32 @@ impl SceneCapture {
         });
         self.next_sequence += 1;
     }
+
+    /// The scene of a viewer frame that drew no streamed 3D view (no recording, a 2D-only
+    /// layout): nothing to draw, placed as the settings place it. Streaming it shows the
+    /// headset an empty volume instead of a stream that never sends its first frame.
+    fn empty_scene(&mut self) -> RetainedScene {
+        let world_coordinates = self
+            .settings
+            .world_coordinates_override
+            .unwrap_or(ViewCoordinates::RIGHT_FORWARD_UP);
+        let scene = RetainedScene {
+            sequence: self.next_sequence,
+            view_seed: EMPTY_SCENE_VIEW_SEED,
+            placement: AppPlacement {
+                world_coordinates,
+                ..self.settings.placement
+            },
+            draw_data: Vec::new(),
+            published_at: Instant::now(),
+        };
+        self.next_sequence += 1;
+        scene
+    }
 }
+
+/// The view seed of the empty scene; any fixed value, it only keys the eyes' view builders.
+const EMPTY_SCENE_VIEW_SEED: u64 = 0x454d_5054_5953_4345;
 
 /// The parts of the sink's setup that live on the render thread.
 pub struct RenderThreadSink {
@@ -364,6 +389,8 @@ pub struct DecoupledHeadset {
     device_sender: Option<mpsc::Sender<SharedDevice>>,
     thread: Option<JoinHandle<()>>,
     scenes_published: FrameCount,
+    /// The handoff holds the empty scene, published once when the view stopped being drawn.
+    empty_scene_published: bool,
 }
 
 impl DecoupledHeadset {
@@ -420,6 +447,7 @@ impl DecoupledHeadset {
                 device_sender: Some(device_sender),
                 thread: Some(thread),
                 scenes_published: FrameCount::default(),
+                empty_scene_published: false,
             },
             reply,
         ))
@@ -458,26 +486,32 @@ impl DecoupledHeadset {
     }
 
     /// After the UI pass, when Rerun's `before_submit` has queued this viewer frame's uploads:
-    /// publishes the scene captured in the pass, or withdraws the last one if the streamed
-    /// view was not drawn. A minimised window that drew no view keeps the last scene: the
-    /// layout was lost, not the view (ADR-0099).
+    /// publishes the scene captured in the pass, or an empty scene once if the streamed view
+    /// was not drawn, so the headset gets frames of an empty volume rather than none. A
+    /// minimised window that drew no view keeps the last scene: the layout was lost, not the
+    /// view (ADR-0099).
     pub fn end_viewer_frame(&mut self, window_is_minimised: bool) {
-        let captured = self
-            .capture
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .captured
-            .take();
-        if captured.is_none() && window_is_minimised {
+        let mut capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
+        let captured = capture.captured.take();
+        if captured.is_none() && self.keeps_the_scene_without_a_view(window_is_minimised) {
             return;
         }
-        if captured.is_some() {
+        self.empty_scene_published = captured.is_none();
+        let mut scene = if let Some(scene) = captured {
             self.scenes_published.record();
-        }
-        self.handoff.publish(captured.map(|mut scene| {
-            scene.published_at = Instant::now();
-            Arc::new(scene)
-        }));
+            scene
+        } else {
+            capture.empty_scene()
+        };
+        drop(capture);
+        scene.published_at = Instant::now();
+        self.handoff.publish(Some(Arc::new(scene)));
+    }
+
+    /// A viewer frame that drew no view changes nothing when the empty scene is already
+    /// streaming, or when the window is minimised and a scene is there to keep.
+    fn keeps_the_scene_without_a_view(&self, window_is_minimised: bool) -> bool {
+        self.empty_scene_published || (window_is_minimised && self.handoff.latest().0.is_some())
     }
 
     pub fn is_streaming(&self) -> bool {
@@ -537,6 +571,7 @@ impl DecoupledHeadset {
             device_sender: None,
             thread: None,
             scenes_published: FrameCount::default(),
+            empty_scene_published: false,
         }
     }
 
@@ -887,8 +922,46 @@ mod tests {
         headset.handoff.latest().0.map(|scene| scene.sequence)
     }
 
+    fn latest_is_empty(headset: &DecoupledHeadset) -> bool {
+        headset.handoff.latest().0.is_some_and(|scene| {
+            scene.draw_data.is_empty() && scene.view_seed == EMPTY_SCENE_VIEW_SEED
+        })
+    }
+
     #[test]
-    fn a_minimised_window_that_drew_no_view_keeps_the_last_scene_and_a_shown_one_withdraws_it() {
+    fn a_viewer_that_draws_no_view_streams_an_empty_scene_published_once() {
+        let mut headset = DecoupledHeadset::streaming_without_a_thread();
+        headset.end_viewer_frame(false);
+        assert!(latest_is_empty(&headset), "no recording: an empty scene");
+        let (_, generation) = headset.handoff.latest();
+
+        headset.end_viewer_frame(false);
+        headset.end_viewer_frame(true);
+        assert_eq!(
+            headset.handoff.latest().1,
+            generation,
+            "published once, not every viewer frame"
+        );
+        assert!(latest_is_empty(&headset));
+
+        capture_scene(&headset, 9);
+        headset.end_viewer_frame(false);
+        assert_eq!(
+            latest_sequence(&headset),
+            Some(9),
+            "a drawn view replaces it"
+        );
+    }
+
+    #[test]
+    fn a_window_minimised_from_the_start_still_streams_an_empty_scene() {
+        let mut headset = DecoupledHeadset::streaming_without_a_thread();
+        headset.end_viewer_frame(true);
+        assert!(latest_is_empty(&headset));
+    }
+
+    #[test]
+    fn a_minimised_window_that_drew_no_view_keeps_the_last_scene_and_a_shown_one_empties_it() {
         let mut headset = DecoupledHeadset::streaming_without_a_thread();
         capture_scene(&headset, 5);
         headset.end_viewer_frame(false);
@@ -907,7 +980,8 @@ mod tests {
         );
 
         headset.end_viewer_frame(false);
-        assert_eq!(latest_sequence(&headset), None, "withdrawn when shown");
+        assert!(latest_is_empty(&headset), "emptied when shown");
+        assert_eq!(headset.scenes_published.count, 2, "captured scenes only");
     }
 
     #[test]

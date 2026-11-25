@@ -4,6 +4,10 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+### Bug fixes
+
+- A viewer with no recording loaded, or with no 3D view in its layout, streams an empty scene: the headset shows an empty app volume instead of **Connecting...** for as long as the viewer runs.
+
 ## [0.1.1] - 2026-11-16
 
 ### Bug fixes
