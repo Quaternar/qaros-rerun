@@ -47,6 +47,33 @@ The packages are built with the `dist` profile (`Cargo.toml`): the release profi
 
 A pull request into `main` builds and packages every platform as workflow artifacts, with the version `X.Y.(Z+1)-pr.<number>`, and publishes nothing. `workflow_dispatch` with a tag rebuilds that tag and replaces its assets; without a tag it builds the selected branch with its dev version and keeps the packages as workflow artifacts only.
 
+### Code signing
+
+The Windows executables of a published release are Authenticode-signed with Azure Artifact Signing, so the QAROS approval prompt and Windows name the publisher instead of an unknown one. QAROS shows **Signed publisher** only for a signature Windows trusts.
+
+```mermaid
+flowchart LR
+  B["build: unsigned exes"] --> S["sign job<br/>environment release-signing"]
+  S -- "OIDC token" --> E["Entra ID app<br/>federated credential"]
+  E --> A["Artifact Signing<br/>certificate profile"]
+  S --> P["package: zip + SHA-256<br/>of the signed exes"]
+```
+
+- **No secret.** The `sign` job of the Release workflow exchanges its GitHub OIDC token for an Azure login (`azure/login`); `scripts/sign-windows.ps1` signs with signtool, the Artifact Signing client and Microsoft's time stamp, then checks each signature is `Valid`.
+- **Signed before packaging.** The zip and its SHA-256 in `manifest.json` hold the signed files. The job runs nothing the build produced.
+- **Until it is set up** the job warns and the executables ship unsigned, as before. Pull request and branch builds never sign.
+- **Linux** packages are not signed.
+
+Setup, once, by someone with admin rights on the Azure account and this repository:
+
+| Where | What |
+| --- | --- |
+| Entra ID | On the app registration that signs QAROS, add a federated credential: GitHub Actions, organization `Quaternar`, repository `qaros-rerun`, entity **Environment** `release-signing` |
+| Azure | That app holds **Artifact Signing Certificate Profile Signer** on the certificate profile (already true when it signs QAROS) |
+| GitHub | Environment `release-signing` in this repository: required reviewers, deployment rules for branch `main` (the App release workflow starts the Release workflow there) and tags `v*`. Variables (identifiers, not secrets): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE` |
+
+Required reviewers make every release wait for an approval of the `sign` job.
+
 ### manifest.json
 
 The field names are those of the qaros-ros-rviz release manifest.

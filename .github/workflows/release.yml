@@ -1,6 +1,7 @@
 name: Release
 
-# A tag vX.Y.Z (release) or vX.Y.Z-rc.N (release candidate) builds the viewer for every platform
+# A tag vX.Y.Z (release) or vX.Y.Z-rc.N (release candidate) builds the viewer for every platform,
+# signs the Windows executables (job sign, docs/releases.md#code-signing)
 # and publishes a GitHub release with qaros-rerun-<version>-<platform>.zip per platform and one
 # manifest.json, which the QAROS Visualizer's Sources catalog downloads. Tags are the viewer's
 # own semantic version; a tag whose X.Y.Z differs from VERSION fails the release. The QAROS
@@ -110,13 +111,27 @@ jobs:
                   CARGO_CONFIG: ${{ matrix.cargo_config }}
               shell: bash
               run: cargo build --profile dist --locked -p qaros-rerun $CARGO_CONFIG
+            # A published Windows release is packaged by the sign job, after signing; every other
+            # build packages here.
             - name: Package
+              if: runner.os != 'Windows' || needs.prepare.outputs.publish != 'true'
               shell: pwsh
               env:
                   VERSION: ${{ needs.prepare.outputs.version }}
                   PLATFORM: ${{ matrix.platform }}
               run: ./scripts/package-release.ps1 -Version $env:VERSION -Platform $env:PLATFORM -Commit (git rev-parse HEAD) -OutDir dist
+            - name: Upload the executables to sign (Windows release)
+              if: runner.os == 'Windows' && needs.prepare.outputs.publish == 'true'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: unsigned-${{ matrix.platform }}
+                  path: |
+                      target/dist/qaros-rerun.exe
+                      target/dist/log-test-scene.exe
+                  if-no-files-found: error
+                  retention-days: 1
             - name: Upload the package
+              if: runner.os != 'Windows' || needs.prepare.outputs.publish != 'true'
               uses: actions/upload-artifact@v4
               with:
                   name: qaros-rerun-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
@@ -135,9 +150,65 @@ jobs:
                   if-no-files-found: error
                   retention-days: 90
 
+    # Signs the Windows executables of a published release with Azure Artifact Signing, then
+    # packages them, so the zip and its SHA-256 in manifest.json hold the signed files. The job's
+    # OIDC token is the only credential: the release-signing environment holds identifiers, no
+    # secret, and its rules decide which runs may sign. Without those identifiers the executables
+    # stay unsigned, as before. It runs nothing the build produced. docs/releases.md#code-signing
+    sign:
+        name: Sign and package (windows-x64)
+        needs: [prepare, build]
+        if: needs.prepare.outputs.publish == 'true'
+        runs-on: windows-latest
+        environment: release-signing
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.prepare.outputs.ref }}
+            - uses: actions/download-artifact@v4
+              with:
+                  name: unsigned-windows-x64
+                  path: target/dist
+            - name: Azure login (OIDC, no secret)
+              if: vars.ARTIFACT_SIGNING_ACCOUNT != '' && vars.AZURE_CLIENT_ID != ''
+              uses: azure/login@v2
+              with:
+                  client-id: ${{ vars.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ vars.AZURE_TENANT_ID }}
+                  allow-no-subscriptions: true
+            - name: Sign
+              shell: pwsh
+              env:
+                  ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+                  ACCOUNT: ${{ vars.AZURE_CLIENT_ID != '' && vars.ARTIFACT_SIGNING_ACCOUNT || '' }}
+                  CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+              run: >-
+                  ./scripts/sign-windows.ps1 -Files target/dist/qaros-rerun.exe, target/dist/log-test-scene.exe
+                  -Endpoint $env:ENDPOINT -Account $env:ACCOUNT -CertificateProfile $env:CERTIFICATE_PROFILE
+                  -CorrelationId "${{ github.repository }}/${{ github.run_id }}"
+            # package-release reads cargo metadata for the licenses and the QAROS header; it builds
+            # nothing.
+            - name: Toolchain from rust-toolchain.toml
+              run: rustup show active-toolchain || rustup toolchain install
+            - name: Package
+              shell: pwsh
+              env:
+                  VERSION: ${{ needs.prepare.outputs.version }}
+              run: ./scripts/package-release.ps1 -Version $env:VERSION -Platform windows-x64 -Commit (git rev-parse HEAD) -OutDir dist
+            - name: Upload the package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: qaros-rerun-${{ needs.prepare.outputs.version }}-windows-x64
+                  path: dist/
+                  if-no-files-found: error
+                  retention-days: 14
+
     publish:
         name: Publish the release
-        needs: [prepare, build]
+        needs: [prepare, build, sign]
         if: needs.prepare.outputs.publish == 'true'
         runs-on: ubuntu-22.04
         permissions:
